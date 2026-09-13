@@ -110,5 +110,6 @@ entries = [
     { type = "added", description = "CI workflow configuration", scope = ".github/workflows/ci.yml" },
     { type = "added", description = ".gitignore", scope = ".gitignore" },
     { type = "added", description = "living.toml for project tracking", scope = "living.toml" },
+    { type = "added", description = "AGENTS.md for agent guidance", scope = "AGENTS.md" },
     { type = "added", description = "PR #1 opened: https://github.com/RAliane-REBORN/theSix/pull/1", scope = "PR" },
 ]
