@@ -1,11 +1,5 @@
 # theSix
 
-Yes. At this point I would formalize theSix as a crate-level system specification, not merely a cache implementation. The key is to make the crate's public contract stable while allowing the underlying tier implementations to evolve.
-
-I checked the current Cargo/crates.io packaging requirements as well: crates.io expects the usual package metadata such as license, description, repository, homepage and README, and cargo publish --dry-run is the appropriate pre-publication validation path. 
-
-I would structure tomorrow's build like this.
-
 1. Repository layout
 
 theSix/
