@@ -1,0 +1,26 @@
+[stampede]
+enabled = true
+strategy = "single-flight"
+
+[ownership]
+one_population_owner = true
+waiters_join_existing_population = true
+
+[timeouts]
+population_timeout = "5s"
+wait_timeout = "5s"
+
+[failure]
+owner_failure_releases_state = true
+waiters_receive_population_error = true
+retry_after_failure = true
+
+[retry]
+enabled = true
+max_attempts = 3
+backoff = "exponential"
+
+[invariants]
+duplicate_population_for_same_key = false
+stale_infinite_inflight_state = false
+owner_loss_recoverable = true

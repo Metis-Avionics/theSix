@@ -1,0 +1,53 @@
+[package]
+name = "thesix"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+
+description = "Policy-driven six-tier cache orchestration for Rust"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Metis-Avionics/theSix"
+homepage = "https://github.com/Metis-Avionics/theSix"
+
+keywords = [
+    "cache",
+    "caching",
+    "concurrency",
+    "async",
+    "systems"
+]
+
+categories = [
+    "caching",
+    "concurrency",
+    "asynchronous"
+]
+
+[dependencies]
+dashmap = "6"
+tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread"] }
+thiserror = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
+criterion = "0.5"
+
+[features]
+default = []
+redis = ["dep:redis"]
+moka = ["dep:moka"]
+sled = ["dep:sled"]
+
+[dependencies.redis]
+version = "0.24"
+optional = true
+
+[dependencies.moka]
+version = "0.12"
+optional = true
+features = ["sync"]
+
+[dependencies.sled]
+version = "0.34"
+optional = true

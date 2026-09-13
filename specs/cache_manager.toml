@@ -1,0 +1,41 @@
+[manager]
+name = "CacheManager"
+
+[identity]
+context_type = "IdentityContext"
+supplied_by_application = true
+authn_gate = "pre-policy"
+authn_failure = "Unauthenticated"
+
+[operations]
+get = true
+get_or_fetch = true
+set = true
+invalidate = true
+remove = true
+refresh = true
+exists = true
+
+[operations.promotion]
+enabled = true
+policy_controlled = true
+
+[operations.demote]
+enabled = true
+policy_controlled = true
+
+[routing]
+application_direct_tier_selection = false
+manager_resolves_policy = true
+manager_resolves_tier = true
+identity_flows_to_policy = true
+
+[execution]
+async = true
+never_hold_control_guard_across_io = true
+
+[errors]
+tier_failure_propagation = "policy"
+population_failure_propagation = "single_flight"
+unauthenticated = "Unauthenticated"
+unauthorized = "Unauthorized"
