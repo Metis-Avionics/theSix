@@ -1,0 +1,38 @@
+[system]
+name = "theSix"
+version = "0.1"
+description = "Policy-driven six-tier cache orchestration for Rust"
+model = "control-plane-over-data-plane"
+
+[architecture]
+tier_count = 6
+application_selects_tier = false
+manager_selects_tier = true
+policy_selects_tier = true
+control_plane = "cachelito"
+
+[principles]
+separate_control_plane = true
+separate_data_plane = true
+policy_driven_routing = true
+opaque_tier_topology = true
+single_flight_population = true
+generation_based_invalidation = true
+no_io_while_holding_control_guard = true
+authn_at_manager = true
+authz_at_policy = true
+fail_mode_at_policy = true
+
+[guarantees]
+concurrent_readers = true
+tier_selection_is_deterministic = true
+tier_failure_is_isolated = true
+stampede_detection = true
+population_coordination = true
+authz_never_reaches_data_plane = true
+
+[non_goals]
+distributed_consensus = false
+general_persistence_layer = false
+application_business_logic = false
+global_cache_coherence = false

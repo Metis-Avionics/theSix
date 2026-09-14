@@ -7,15 +7,28 @@ theSix/
 ├── README.md
 ├── LICENSE
 ├── CHANGELOG.md
+├── deny.toml
 ├── src/
 │   ├── lib.rs
 │   ├── manager.rs
 │   ├── policy.rs
-│   ├── control.rs
-│   ├── tier.rs
+│   ├── control/mod.rs
+│   ├── control/cachelito.rs
+│   ├── tier/mod.rs
+│   ├── tier/trait.rs
+│   ├── tier/fixed_tier_stub.rs
+│   ├── tier/l0.rs – l5.rs
+│   ├── tier/test.rs
+│   ├── tier/backends/        # ByteValue codec + real backends
+│   │   ├── mod.rs
+│   │   ├── l3_redis.rs       # feature = "redis"
+│   │   ├── l4_sled.rs        # feature = "sled" (persistent)
+│   │   └── l5_origin.rs      # pluggable origin fetcher/writer
 │   ├── entry.rs
 │   ├── error.rs
-│   └── metrics.rs
+│   ├── identity.rs           # IdentityContext + CacheContext builder
+│   ├── key.rs                # Key trait + KeyRef borrowed view
+│   └── pool.rs               # MemoryPool fixed-capacity allocator
 ├── specs/
 │   ├── thesix.toml
 │   ├── cache_manager.toml
@@ -24,11 +37,13 @@ theSix/
 │   ├── tiers.toml
 │   └── stampede.toml
 ├── tests/
+│   ├── common/mod.rs         # shared test helpers
 │   ├── hierarchy.rs
 │   ├── concurrency.rs
 │   ├── policy.rs
 │   ├── stampede.rs
-│   └── integration.rs
+│   ├── integration.rs
+│   └── backends.rs           # feature-gated backend tests
 └── benches/
     └── cache_operations.rs
 
@@ -167,7 +182,7 @@ role = "cache-control-plane"
 
 [storage]
 structure = "sharded-concurrent-map"
-implementation = "DashMap"
+implementation = "fixed-capacity sharded slot map"
 
 [state]
 tracks_entry_state = true
@@ -333,6 +348,8 @@ backend = "lru"
 [tier.l2]
 backend = "moka"
 
+# (moka is a planned optional backend; not yet wired as a feature)
+
 [tier.l3]
 backend = "redis"
 
@@ -448,14 +465,9 @@ criterion = "..."
 [features]
 default = []
 redis = ["dep:redis"]
-moka = ["dep:moka"]
 sled = ["dep:sled"]
 
 [dependencies.redis]
-version = "..."
-optional = true
-
-[dependencies.moka]
 version = "..."
 optional = true
 
@@ -579,7 +591,7 @@ Cachelito
 
 Implement Cachelito as the control-plane state registry.
 
-Use a sharded concurrent map such as DashMap.
+Use a pre-allocated, sharded slot map (theSix removes DashMap per TETANUS Rule 3: no heap allocation after init).
 
 A control entry should contain enough metadata to represent:
 
@@ -694,7 +706,7 @@ Design explicitly for:
 
 Never solve concurrency by placing one global "RwLock" around the entire cache hierarchy.
 
-Do not hold a DashMap reference or equivalent guard across an await point.
+Do not hold a shard/slot guard or equivalent control-plane reference across an await point.
 
 Generation safety
 
@@ -815,7 +827,7 @@ Keep the initial public API small.
 
 Prefer private implementation details and explicit internal modules over exposing every internal structure.
 
-Do not expose DashMap directly.
+Do not expose the control-plane slot map directly.
 
 Do not expose individual cache tiers through the default API.
 
@@ -869,7 +881,7 @@ theSix 0.1
 
 while the implementation can evolve:
 
-0.1 → DashMap + LRU + Moka + Redis + Sled + origin
+0.2 → fixed-capacity slot maps + L0–L2 in-memory + Redis + Sled + origin (moka planned)
 
 0.2 → different persistent tier
 

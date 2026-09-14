@@ -1,0 +1,48 @@
+[tiers]
+count = 6
+
+[tier.l0]
+role = "request"
+scope = "request"
+persistent = false
+shared = false
+
+[tier.l1]
+role = "hot-local"
+scope = "process"
+persistent = false
+shared = false
+
+[tier.l2]
+role = "local"
+scope = "process"
+persistent = false
+shared = false
+
+[tier.l3]
+role = "distributed"
+scope = "cluster"
+persistent = false
+shared = true
+
+[tier.l4]
+role = "persistent"
+scope = "host"
+persistent = true
+shared = false
+
+[tier.l5]
+role = "origin-fallback"
+scope = "external"
+persistent = false
+shared = true
+
+[routing]
+manager_only = true
+policy_only = true
+
+[health]
+health_checks = true
+failure_isolation = true
+circuit_breaker_per_tier = true
+fail_mode_decided_by_policy = true

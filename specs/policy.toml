@@ -1,0 +1,48 @@
+[policy]
+name = "default"
+mode = "deterministic"
+
+[selection]
+latency = true
+capacity = true
+consistency = true
+availability = true
+entry_size = true
+ttl = true
+cost = true
+identity = true
+
+[identity_inputs]
+principal = true
+roles = true
+tenant = true
+
+[resolution]
+input = [
+    "operation",
+    "key_metadata",
+    "entry_metadata",
+    "cache_state",
+    "tier_health",
+    "identity"
+]
+output = [
+    "authorized",
+    "selected_tier",
+    "operation",
+    "population_strategy",
+    "fail_mode"
+]
+
+[precedence]
+explicit_policy = 1
+tier_health = 2
+consistency_requirement = 3
+authz_deny = 4
+latency_requirement = 5
+capacity_requirement = 6
+default_tier = 7
+
+[fail_mode]
+open = "bypass_failed_tier_try_next"
+closed = "fail_fast_propagate_error"

@@ -1,0 +1,53 @@
+[control]
+name = "Cachelito"
+role = "cache-control-plane"
+
+[storage]
+structure = "sharded-concurrent-map"
+implementation = "fixed-capacity sharded slot map"
+# DashMap was removed per TETANUS Rule 3: all control-plane storage is
+# pre-allocated at init; no heap allocation in hot paths after init.
+allocation_after_init = false
+
+[state]
+tracks_entry_state = true
+tracks_generation = true
+tracks_tier = true
+tracks_population = true
+tracks_expiration = true
+tracks_tier_health = false
+# Tier health is tracked per-tier in TierRegistry (interior-mutable), not in
+# the control plane. The circuit breaker consults the registry.
+
+[entry_states]
+values = [
+    "absent",
+    "ready",
+    "stale",
+    "in_flight",
+    "failed"
+]
+
+[circuit_breaker]
+per_tier = true
+consecutive_failure_count = true
+last_failure_timestamp = true
+health_score = true
+state_does_not_decide_fail_mode = true
+
+[coordination]
+single_flight = true
+reader_coalescing = true
+writer_coordination = true
+
+[concurrency]
+multiple_readers = true
+sharded_state = true
+global_lock = false
+io_under_guard = false
+
+[invariants]
+control_state_does_not_store_payload = true
+control_guard_must_not_cross_await = true
+control_guard_must_not_cross_io = true
+circuit_breaker_state_is_advisory = true

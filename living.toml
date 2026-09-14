@@ -1,0 +1,118 @@
+[handover]
+status = "complete"
+phase = "spec_complete_pr_open"
+last_updated = "2026-09-14T08:26:23+01:00"
+
+summary = """
+Full spec completion + TETANUS compliance on PR #1 (branch implement-thesix). All spec'd operations implemented (get, get_or_fetch, set, invalidate, remove, promote, demote, exists, refresh). Identity flows via a CacheContext builder carrying IdentityContext + TTL. Real authn gate (Unauthenticated) + policy authz on all mutating ops (StrictPolicy denies anonymous writes; DefaultPolicy is the permissive baseline). Control plane tracks expiration (TTL) with lazy Ready->Stale expiry. Population: single-owner, in-place fetch retry (max 3, exponential backoff), fail-open/closed honoured, waiters receive the owner's terminal error. Real feature-gated backends: L3 redis, L4 sled (persistent), L5 origin-fallback over a ByteValue codec. All quality gates pass locally including cargo deny + cargo machete.
+"""
+
+remaining = [
+    "Review and merge PR #1",
+    "Optional follow-up (v0.3): async-native backends; richer capacity/latency telemetry for the policy ladder",
+]
+
+decisions = [
+    "Rule 3 boundary: control-plane + tier storage pre-allocated at init (MemoryPool + slot maps); data plane stores payloads",
+    "KeyRef<'a> + Key trait replace ad-hoc Vec<u8>; callers encode keys via a stack buffer (no per-byte alloc)",
+    "Identity via CacheContext builder (CacheContext::new(IdentityContext).with_ttl(..)); applications build once per request",
+    "DefaultPolicy is permissive; StrictPolicy enforces authz-deny for anonymous mutations (spec precedence 4)",
+    "Populate owns the entry once; fetch is retried in place (no re-acquire churn); fail_open -> try_fallback_tier",
+    "Failed/Stale entries are claimable (retry_after_failure); publish validates generation, releases to Ready",
+    "Waiters receive the owner's terminal error via a control-plane error marker (waiters_receive_population_error)",
+    "TTL measured from publish time; Ready entries lazily transition to Stale on expiry; tiers also store TTL (sled) or native EX (redis)",
+    "Real backends gate behind features and require V: ByteValue; core CacheTier<V> unchanged",
+    "moka feature removed as dead (Rule 8 cfg discipline); cargo-deny/machete/miri added to CI",
+    "#![forbid(unsafe_code)] declared; crate has zero unsafe (miri is a no-op guard)",
+    "Infallible tier new() constructors panic only on startup pool-allocation failure (sanctioned init mode); with_capacity() is fallible",
+]
+
+blockers = []
+
+[handover.next_agent]
+focus = "Review PR #1 against specs/ and merge if approved"
+tasks = [
+    "Verify quality gates in CI (fmt, check, test incl doctest, clippy -D warnings, doc, package, publish-dry-run, deny, machete, miri)",
+    "Confirm specs/ and README match the implemented API surface",
+    "Merge PR #1 when green",
+]
+
+[session]
+start = "2026-09-14T00:00:00+01:00"
+end = "2026-09-14T08:26:23+01:00"
+agent = "opencode"
+type = "spec_completion_and_tetanus_hardening"
+summary = """
+Implemented full spec completion for PR #1 and hardened the crate against the
+TETANUS rules. Fixed the stale lib.rs doctest, the Cachelito acquire CAS bug
+(claim from actual state), and the populate tier-mismatch that broke waiter
+reads. Added CacheContext identity builder, exists/refresh, retry-with-backoff,
+TTL/lazy-expiry, waiter-error propagation, and feature-gated real backends.
+"""
+work_done = [
+    "Fixed broken lib.rs doctest (real 5-arg + MemoryPool signature); doc example now compiles",
+    "CacheContext builder in identity.rs carrying IdentityContext + TTL; threaded through all 9 ops",
+    "check_auth now enforces is_authenticated -> Unauthenticated (pre-policy gate)",
+    "Real CacheState (snapshot + tier health) into policy; policy authz applied to all mutating ops",
+    "exists(), refresh() (stale-while-revalidate) implemented + tests",
+    "Populate retry: max 3 attempts, exponential backoff, fail-open fallback; owner-error marker to waiters",
+    "Cachelito::acquire CAS claims from actual state (Failed/Stale reclaimable); publish arms TTL",
+    "TTL/expiration in control plane (nanos-since-boot anchor) + tiers; lazy Ready->Stale in get/get_or_fetch",
+    "TierRegistry interior-mutable per-tier health with fail/recover wired to real tier outcomes",
+    "ByteValue codec; backends: L3RedisBackend, L4SledBackend (TTL prefix + lazy eviction), L5OriginBackend",
+    "Policy precedence ladder (tier-health, capacity) + availability signal on TierHealth",
+    "TETANUS hardening: with_shards>=1 clamp, fallible init ctors, documented let_= discards, forbid(unsafe_code), deny.toml, CI gates",
+    "Removed dead moka feature; tests/common/mod.rs shared helpers; 11 new tests (29 total, all features)",
+]
+tests_passing = [
+    "test_byte_value_roundtrip",
+    "test_l4_sled_backend_get_set_remove",
+    "test_l5_origin_backend_fetch_through",
+    "test_concurrent_writer_readers",
+    "test_concurrent_unrelated_keys",
+    "test_concurrent_readers",
+    "test_shard_contention",
+    "test_tier_traversal",
+    "test_basic_get_set",
+    "test_demotion",
+    "test_promotion",
+    "test_invalidation",
+    "test_exists",
+    "test_refresh_populates_and_revalidates",
+    "test_refresh_serves_stale_on_failure",
+    "test_unauthenticated_rejected",
+    "test_strict_policy_denies_anonymous_writes",
+    "test_ttl_lazy_expiry",
+    "test_complete_six_tier_integration",
+    "test_policy_selection",
+    "test_policy_replacement",
+    "test_stale_generation_rejection",
+    "test_population_failure",
+    "test_tier_failure",
+    "test_tier_recovery",
+    "test_owner_cancellation",
+    "test_single_flight_population",
+    "test_waiter_timeout",
+    "test_100_concurrent_requests_one_missing_key",
+]
+
+[changelog]
+version = "0.2.0"
+date = "2026-09-14"
+entries = [
+    { type = "added", description = "CacheContext builder carrying IdentityContext + optional TTL", scope = "src/identity.rs" },
+    { type = "added", description = "exists() and refresh() (stale-while-revalidate) operations", scope = "src/manager.rs" },
+    { type = "added", description = "StrictPolicy (authz-deny for anonymous mutations)", scope = "src/policy.rs" },
+    { type = "added", description = "TTL/expiration tracked in control plane and tiers; lazy Ready->Stale", scope = "src/control/cachelito.rs" },
+    { type = "added", description = "Populate retry (max 3, exponential backoff) + fail-open fallback", scope = "src/manager.rs" },
+    { type = "added", description = "waiters_receive_population_error via control-plane error marker", scope = "src/control/cachelito.rs" },
+    { type = "added", description = "ByteValue codec + L3 redis / L4 sled / L5 origin backends (feature-gated)", scope = "src/tier/backends/" },
+    { type = "changed", description = "All CacheManager ops take a &CacheContext (breaking API change)", scope = "src/manager.rs" },
+    { type = "changed", description = "TierHealth gains availability; TierRegistry is interior-mutable with fail/recover", scope = "src/tier/" },
+    { type = "changed", description = "CacheError is now Copy", scope = "src/error.rs" },
+    { type = "fixed", description = "Cachelito::acquire CAS claims from the actual state (Failed/Stale reclaimable)", scope = "src/control/cachelito.rs" },
+    { type = "fixed", description = "Populate tier now matches the policy decision waiters observe (fixed waiter Miss bug)", scope = "src/manager.rs" },
+    { type = "fixed", description = "Stale lib.rs doctest; doc example compiles", scope = "src/lib.rs" },
+    { type = "security", description = "Real authn gate: unauthenticated requests rejected pre-policy", scope = "src/manager.rs" },
+    { type = "removed", description = "DashMap; dead moka feature", scope = "Cargo.toml" },
+]
