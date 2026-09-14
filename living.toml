@@ -1,14 +1,14 @@
 [handover]
 status = "complete"
 phase = "merged_ci_green"
-last_updated = "2026-09-14T08:44:54+01:00"
+last_updated = "2026-09-14T08:54:16+01:00"
 
 summary = """
 Full spec completion + TETANUS compliance on PR #1 (branch implement-thesix). All spec'd operations implemented (get, get_or_fetch, set, invalidate, remove, promote, demote, exists, refresh). Identity flows via a CacheContext builder carrying IdentityContext + TTL. Real authn gate (Unauthenticated) + policy authz on all mutating ops (StrictPolicy denies anonymous writes; DefaultPolicy is the permissive baseline). Control plane tracks expiration (TTL) with lazy Ready->Stale expiry. Population: single-owner, in-place fetch retry (max 3, exponential backoff), fail-open/closed honoured, waiters receive the owner's terminal error. Real feature-gated backends: L3 redis, L4 sled (persistent), L5 origin-fallback over a ByteValue codec. All quality gates pass locally including cargo deny + cargo machete.
 """
 
 remaining = [
-    "PR #1 merged to main. Optional follow-up (v0.3): async-native backends; richer capacity/latency telemetry for the policy ladder",
+    "Nothing pending. Optional follow-up (v0.3): async-native backends; richer capacity/latency telemetry for the policy ladder",
 ]
 
 decisions = [
@@ -29,15 +29,15 @@ decisions = [
 blockers = []
 
 [handover.next_agent]
-focus = "Complete; PR #1 merged and CI green on main"
+focus = "Complete; PR #1 merged, Rust 1.98 upgrade landed, CI green on main — no pending work"
 tasks = [
-    "Confirmed: CI on main is green across all jobs (fmt, check, test, clippy, doc, package, deny, machete, miri). MSRV set to 1.88.",
-    "Rust 1.98 upgrade: edition 2021 -> 2024, rust-version -> 1.98, CI toolchain -> 1.98; gen renamed (reserved keyword), let-chain + redundant-binding clippy lints fixed; all gates green.",
+    "Confirmed: CI on main is green across all jobs (fmt, check, test, clippy, doc, package, deny, machete, miri) on the 1.98 toolchain.",
+    "Rust 1.98 upgrade landed: edition 2021 -> 2024, rust-version -> 1.98, CI toolchain -> 1.98; gen renamed (reserved keyword), let-chain + redundant-binding clippy lints fixed; CHANGELOG documents the upgrade; all gates green.",
 ]
 
 [session]
 start = "2026-09-14T00:00:00+01:00"
-end = "2026-09-14T08:44:54+01:00"
+end = "2026-09-14T08:54:16+01:00"
 agent = "opencode"
 type = "spec_completion_and_tetanus_hardening"
 summary = """
@@ -46,6 +46,8 @@ TETANUS rules. Fixed the stale lib.rs doctest, the Cachelito acquire CAS bug
 (claim from actual state), and the populate tier-mismatch that broke waiter
 reads. Added CacheContext identity builder, exists/refresh, retry-with-backoff,
 TTL/lazy-expiry, waiter-error propagation, and feature-gated real backends.
+Follow-up in the same session: upgraded to Rust 1.98 (edition 2024, MSRV 1.98,
+CI toolchain 1.98) and recorded the upgrade in CHANGELOG.md; CI green throughout.
 """
 work_done = [
     "Fixed broken lib.rs doctest (real 5-arg + MemoryPool signature); doc example now compiles",
@@ -61,6 +63,8 @@ work_done = [
     "Policy precedence ladder (tier-health, capacity) + availability signal on TierHealth",
     "TETANUS hardening: with_shards>=1 clamp, fallible init ctors, documented let_= discards, forbid(unsafe_code), deny.toml, CI gates",
     "Removed dead moka feature; tests/common/mod.rs shared helpers; 11 new tests (29 total, all features)",
+    "Rust 1.98 upgrade: edition 2021 -> 2024, rust-version 1.88 -> 1.98, CI toolchain -> 1.98; renamed gen (reserved keyword), fixed new clippy-1.98 lints (collapsible_if let-chains, redundant let binding); rustfmt edition-2024 reorderings",
+    "Recorded the 1.98 upgrade in CHANGELOG.md; refreshed AGENTS.md (edition/MSRV/CI) and README rust-version",
 ]
 tests_passing = [
     "test_byte_value_roundtrip",
