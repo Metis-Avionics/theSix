@@ -97,6 +97,12 @@ async fn main() -> Result<(), thesix::CacheError> {
 
 This exact program also lives in `examples/quickstart.rs` (`cargo run --example quickstart`).
 
+Batch-analytics patterns live in `examples/polars_etl.rs` (ETL: versioned
+marts, single-flight load under a 20-reader stampede, invalidate on new
+batches) and `examples/polars_elt.rs` (ELT: raw lake with transform-on-read
+and stale-while-revalidate `refresh`). Both need `--all-features` for the
+Polars dev-dependency.
+
 ## How it works
 
 ```

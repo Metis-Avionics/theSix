@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## v0.2.3 — 2026-09-14
+
+### Added
+- `examples/polars_etl.rs` — ETL over Polars: versioned marts, single-flight load under a 20-reader stampede, invalidate on new batches (dev-dependency on `polars`)
+- `examples/polars_elt.rs` — ELT over Polars: raw lake with transform-on-read and stale-while-revalidate `refresh` (serves the previous mart when a refresh fails)
+
 ## v0.2.2 — 2026-09-14
 
 ### Fixed

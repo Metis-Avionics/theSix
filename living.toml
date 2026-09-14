@@ -1,7 +1,7 @@
 [handover]
 status = "complete"
 phase = "merged_ci_green"
-last_updated = "2026-09-14T09:12:26+01:00"
+last_updated = "2026-09-14T10:00:20+01:00"
 
 summary = """
 Full spec completion + TETANUS compliance on PR #1 (branch implement-thesix). All spec'd operations implemented (get, get_or_fetch, set, invalidate, remove, promote, demote, exists, refresh). Identity flows via a CacheContext builder carrying IdentityContext + TTL. Real authn gate (Unauthenticated) + policy authz on all mutating ops (StrictPolicy denies anonymous writes; DefaultPolicy is the permissive baseline). Control plane tracks expiration (TTL) with lazy Ready->Stale expiry. Population: single-owner, in-place fetch retry (max 3, exponential backoff), fail-open/closed honoured, waiters receive the owner's terminal error. Real feature-gated backends: L3 redis, L4 sled (persistent), L5 origin-fallback over a ByteValue codec. All quality gates pass locally including cargo deny + cargo machete.
@@ -36,11 +36,12 @@ tasks = [
     "Published thesix v0.2.0 to crates.io (registry confirms edition 2024, rust_version 1.98, MIT); remote moved to Metis-Avionics/theSix; tag v0.2.0 pushed.",
     "Published thesix v0.2.1 (README rewrite + quickstart example); tag v0.2.1 pushed.",
     "Fixed README install snippets to 0.2.1; releasing as v0.2.2 so the registry renders the corrected README.",
+    "Added Polars ETL/ELT examples exploiting single-flight, invalidation, refresh; releasing as v0.2.3.",
 ]
 
 [session]
 start = "2026-09-14T00:00:00+01:00"
-end = "2026-09-14T09:12:26+01:00"
+end = "2026-09-14T10:00:20+01:00"
 agent = "opencode"
 type = "spec_completion_and_tetanus_hardening"
 summary = """
@@ -108,7 +109,7 @@ tests_passing = [
 ]
 
 [changelog]
-version = "0.2.2"
+version = "0.2.3"
 date = "2026-09-14"
 entries = [
     { type = "added", description = "CacheContext builder carrying IdentityContext + optional TTL", scope = "src/identity.rs" },
@@ -130,4 +131,6 @@ entries = [
     { type = "added", description = "examples/quickstart.rs runnable quick start (mirrors README)", scope = "examples/quickstart.rs" },
     { type = "changed", description = "README rewritten as crate README; stale design-doc content, signatures, dashmap/moka refs removed", scope = "README.md" },
     { type = "fixed", description = "README install snippets point at 0.2.1 (were the 0.2 range)", scope = "README.md" },
+    { type = "added", description = "examples/polars_etl.rs (ETL: versioned marts, single-flight, invalidate)", scope = "examples/polars_etl.rs" },
+    { type = "added", description = "examples/polars_elt.rs (ELT: transform-on-read, stale-while-revalidate refresh)", scope = "examples/polars_elt.rs" },
 ]

@@ -1,6 +1,6 @@
 [package]
 name = "thesix"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 rust-version = "1.98"
 description = "Policy-driven six-tier cache orchestration for Rust"
@@ -41,6 +41,7 @@ thiserror = "2"
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 criterion = "0.5"
+polars = { version = "0.55.2", default-features = false, features = ["lazy", "strings", "temporal", "fmt"] }
 
 [features]
 default = []
