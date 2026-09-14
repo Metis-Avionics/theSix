@@ -1,6 +1,6 @@
 [handover]
 status = "complete"
-phase = "spec_complete_pr_open"
+phase = "merged"
 last_updated = "2026-09-14T08:26:23+01:00"
 
 summary = """
@@ -8,8 +8,7 @@ Full spec completion + TETANUS compliance on PR #1 (branch implement-thesix). Al
 """
 
 remaining = [
-    "Review and merge PR #1",
-    "Optional follow-up (v0.3): async-native backends; richer capacity/latency telemetry for the policy ladder",
+    "PR #1 merged to main. Optional follow-up (v0.3): async-native backends; richer capacity/latency telemetry for the policy ladder",
 ]
 
 decisions = [
@@ -30,16 +29,14 @@ decisions = [
 blockers = []
 
 [handover.next_agent]
-focus = "Review PR #1 against specs/ and merge if approved"
+focus = "PR #1 merged; verify CI run on main is green"
 tasks = [
-    "Verify quality gates in CI (fmt, check, test incl doctest, clippy -D warnings, doc, package, publish-dry-run, deny, machete, miri)",
-    "Confirm specs/ and README match the implemented API surface",
-    "Merge PR #1 when green",
+    "Confirm the CI run on the main merge commit is green (fmt, check, test, clippy, doc, package, publish-dry-run, deny, machete, miri)",
 ]
 
 [session]
 start = "2026-09-14T00:00:00+01:00"
-end = "2026-09-14T08:26:23+01:00"
+end = "2026-09-14T08:27:10+01:00"
 agent = "opencode"
 type = "spec_completion_and_tetanus_hardening"
 summary = """
