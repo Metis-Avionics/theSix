@@ -1,415 +1,173 @@
 # theSix
 
-1. Repository layout
-
-theSix/
-├── Cargo.toml
-├── README.md
-├── LICENSE
-├── CHANGELOG.md
-├── deny.toml
-├── src/
-│   ├── lib.rs
-│   ├── manager.rs
-│   ├── policy.rs
-│   ├── control/mod.rs
-│   ├── control/cachelito.rs
-│   ├── tier/mod.rs
-│   ├── tier/trait.rs
-│   ├── tier/fixed_tier_stub.rs
-│   ├── tier/l0.rs – l5.rs
-│   ├── tier/test.rs
-│   ├── tier/backends/        # ByteValue codec + real backends
-│   │   ├── mod.rs
-│   │   ├── l3_redis.rs       # feature = "redis"
-│   │   ├── l4_sled.rs        # feature = "sled" (persistent)
-│   │   └── l5_origin.rs      # pluggable origin fetcher/writer
-│   ├── entry.rs
-│   ├── error.rs
-│   ├── identity.rs           # IdentityContext + CacheContext builder
-│   ├── key.rs                # Key trait + KeyRef borrowed view
-│   └── pool.rs               # MemoryPool fixed-capacity allocator
-├── specs/
-│   ├── thesix.toml
-│   ├── cache_manager.toml
-│   ├── cachelito.toml
-│   ├── policy.toml
-│   ├── tiers.toml
-│   └── stampede.toml
-├── tests/
-│   ├── common/mod.rs         # shared test helpers
-│   ├── hierarchy.rs
-│   ├── concurrency.rs
-│   ├── policy.rs
-│   ├── stampede.rs
-│   ├── integration.rs
-│   └── backends.rs           # feature-gated backend tests
-└── benches/
-    └── cache_operations.rs
-
-The important conceptual split is:
-
-theSix
-  │
-  ├── Cache Manager       API / orchestration
-  │
-  ├── Policy Engine       decides what should happen
-  │
-  ├── Cachelito           coordinates concurrent state
-  │
-  ├── Tier subsystem      actual cache implementations
-  │
-  └── Stampede subsystem  single-flight / population control
-
-The application should never need to know that L3 happens to be Redis.
-
-
----
-
-2. specs/thesix.toml
-
-This becomes the system-level contract.
-
-[system]
-name = "theSix"
-version = "0.1"
-description = "Policy-driven six-tier cache orchestration for Rust"
-model = "control-plane-over-data-plane"
-
-[architecture]
-tier_count = 6
-application_selects_tier = false
-manager_selects_tier = true
-policy_selects_tier = true
-control_plane = "cachelito"
-
-[principles]
-separate_control_plane = true
-separate_data_plane = true
-policy_driven_routing = true
-opaque_tier_topology = true
-single_flight_population = true
-generation_based_invalidation = true
-no_io_while_holding_control_guard = true
-
-[guarantees]
-concurrent_readers = true
-tier_selection_is_deterministic = true
-tier_failure_is_isolated = true
-stampede_detection = true
-population_coordination = true
-
-[non_goals]
-distributed_consensus = false
-general_persistence_layer = false
-application_business_logic = false
-global_cache_coherence = false
-
-That last section matters.
-
-You're explicitly saying:
-
-> theSix orchestrates caching. It is not trying to become a database, consensus protocol, or replacement for application semantics.
-
-
-
-Humanity has enough projects that accidentally become databases.
-
-
----
-
-3. specs/cache_manager.toml
-
-This defines the public abstraction.
-
-[manager]
-name = "CacheManager"
-
-[operations]
-get = true
-get_or_fetch = true
-set = true
-invalidate = true
-remove = true
-refresh = true
-exists = true
-
-[operations.promotion]
-enabled = true
-policy_controlled = true
-
-[operations.demote]
-enabled = true
-policy_controlled = true
-
-[routing]
-application_direct_tier_selection = false
-manager_resolves_policy = true
-manager_resolves_tier = true
-
-[execution]
-async = true
-never_hold_control_guard_across_io = true
-
-[errors]
-tier_failure_propagation = "policy"
-population_failure_propagation = "single_flight"
-
-The application API should therefore conceptually become:
-
-cache.get(key).await?;
-
-or:
-
-cache.get_or_fetch(key, fetcher).await?;
-
-not:
-
-cache.l3.get(key).await?;
-
-That distinction is the whole point.
-
-
----
-
-4. specs/cachelito.toml
-
-This is where your morning realization gets formalized.
-
-[control]
-name = "Cachelito"
-role = "cache-control-plane"
-
-[storage]
-structure = "sharded-concurrent-map"
-implementation = "fixed-capacity sharded slot map"
-
-[state]
-tracks_entry_state = true
-tracks_generation = true
-tracks_tier = true
-tracks_population = true
-tracks_expiration = true
-
-[entry_states]
-values = [
-    "absent",
-    "ready",
-    "stale",
-    "in_flight",
-    "failed"
-]
-
-[coordination]
-single_flight = true
-reader_coalescing = true
-writer_coordination = true
-
-[concurrency]
-multiple_readers = true
-sharded_state = true
-global_lock = false
-io_under_guard = false
-
-[invariants]
-control_state_does_not_store_payload = true
-control_guard_must_not_cross_await = true
-control_guard_must_not_cross_io = true
-
-This is the key architectural invariant:
-
-> Cachelito knows about cache state. It does not become another cache containing application payloads.
-
-
-
-That keeps it genuinely in the control plane.
-
-
----
-
-5. specs/policy.toml
-
-This defines how the system decides which tier to use.
-
-[policy]
-name = "default"
-mode = "deterministic"
-
-[selection]
-latency = true
-capacity = true
-consistency = true
-availability = true
-entry_size = true
-ttl = true
-cost = true
-
-[application]
-direct_tier_selection = false
-
-[resolution]
-input = [
-    "operation",
-    "key_metadata",
-    "entry_metadata",
-    "cache_state",
-    "tier_health"
-]
-
-output = [
-    "selected_tier",
-    "operation",
-    "population_strategy"
-]
-
-[precedence]
-explicit_policy = 1
-tier_health = 2
-consistency_requirement = 3
-latency_requirement = 4
-capacity_requirement = 5
-default_tier = 6
-
-You can later turn this into a real Rust trait:
-
-pub trait CachePolicy<K, V>: Send + Sync {
-    fn select(
-        &self,
-        request: &CacheRequest<K, V>,
-        state: &CacheState,
-    ) -> PolicyDecision;
+[![crates.io](https://img.shields.io/crates/v/thesix.svg)](https://crates.io/crates/thesix)
+[![docs.rs](https://img.shields.io/docsrs/thesix)](https://docs.rs/thesix)
+[![CI](https://github.com/Metis-Avionics/theSix/actions/workflows/ci.yml/badge.svg)](https://github.com/Metis-Avionics/theSix/actions)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+Policy-driven six-tier cache orchestration for Rust. theSix is a cache
+*orchestration* system, not merely a cache implementation: application code
+never selects tiers, a policy engine routes every operation, and a control
+plane (`Cachelito`) coordinates concurrent state — including single-flight
+population so a cache miss never triggers a stampede.
+
+```rust
+let value = manager
+    .get_or_fetch(&key, &ctx, || async { Ok("value".to_string()) })
+    .await?;
+```
+
+No `manager.l3.get(...)`. That distinction is the whole point.
+
+## Installation
+
+```toml
+[dependencies]
+thesix = "0.2"
+```
+
+Optional real backends (in-memory stubs are the default):
+
+| Feature | Backend | Notes |
+|---------|---------|-------|
+| `redis` | `L3RedisBackend` (distributed) | Synchronous client — call via `spawn_blocking` in async code |
+| `sled`  | `L4SledBackend` (persistent) | Embedded sled; TTL prefix + lazy eviction |
+
+```toml
+thesix = { version = "0.2", features = ["redis", "sled"] }
+```
+
+Backends store bytes, so values must implement `ByteValue` (`Vec<u8>` and
+`String` are provided; implement the two-method trait for your own types).
+
+**Requirements:** Rust 1.98+, edition 2024, Tokio runtime (the public API is
+`async`; the tier trait itself is synchronous by design).
+
+## Quick start
+
+```rust
+use std::sync::Arc;
+use thesix::{
+    CacheContext, CacheManager, CacheTier, Cachelito, DefaultPolicy,
+    IdentityContext, MemoryPool, TierRegistry,
+    L0Stub, L1Stub, L2Stub, L3Stub, L4Stub, L5Stub,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), thesix::CacheError> {
+    // Six tiers, dumb by design: policy + Cachelito decide everything.
+    let tiers: Vec<Arc<dyn CacheTier<String>>> = vec![
+        Arc::new(L0Stub::new()),
+        Arc::new(L1Stub::new()),
+        Arc::new(L2Stub::new()),
+        Arc::new(L3Stub::new()),
+        Arc::new(L4Stub::new()),
+        Arc::new(L5Stub::new()),
+    ];
+    let manager: CacheManager<String, String, DefaultPolicy> = CacheManager::new(
+        DefaultPolicy,
+        Cachelito::new(),
+        TierRegistry::new(),
+        tiers,
+        MemoryPool::new(1024).expect("pool allocation failed"),
+    );
+
+    // One request context per call site: identity + optional TTL.
+    let ctx = CacheContext::new(IdentityContext::new(
+        "alice".to_string(),
+        vec!["reader".to_string()],
+        "tenant-1".to_string(),
+    ))
+    .with_ttl(std::time::Duration::from_secs(60));
+
+    let key = "my-key".to_string();
+
+    // Single-flight: 100 concurrent callers → exactly one fetch.
+    let value = manager
+        .get_or_fetch(&key, &ctx, || async { Ok("value".to_string()) })
+        .await?;
+    assert_eq!(value, "value");
+
+    manager.set(&key, "new-value".to_string(), &ctx).await?;
+    assert!(manager.exists(&key, &ctx).await?);
+    manager.invalidate(&key, &ctx).await?;
+    Ok(())
 }
+```
 
-And now the hierarchy becomes replaceable without rewriting the manager.
+This exact program also lives in `examples/quickstart.rs` (`cargo run --example quickstart`).
 
+## How it works
 
----
+```
+Application
+    │
+    ▼
+CacheManager  ── API / orchestration (authn gate, policy authz, coordination)
+    │
+    ▼
+Policy Engine ── decides tier, operation, population strategy per request
+    │
+    ▼
+Cachelito     ── control plane: entry state, generation, tier, TTL,
+                   population ownership, tier health. Never stores payloads.
+    │
+    ▼
+Six-Tier Data Plane ── stores/retrieves values only
+    ├── L0 request-local
+    ├── L1 hot-local
+    ├── L2 local
+    ├── L3 distributed (stub, or Redis with `redis` feature)
+    ├── L4 persistent  (stub, or sled with `sled` feature)
+    └── L5 origin/fallback (stub, or pluggable fetcher/writer)
+```
 
-6. specs/tiers.toml
+**Control plane vs data plane** is the core constraint:
 
-I would not hard-code your backend implementations into the fundamental theSix contract.
+- `Cachelito` tracks state only. It must never store application payloads.
+- `CacheTier` implementations store values only. They never decide routing.
+- No control guard is ever held across `.await` or I/O — `acquire()` returns
+  a `ControlSnapshot` with an `Arc<Notify>`; waiters sleep on the notify.
+- The control plane is a pre-allocated sharded slot map (fixed capacity, no
+  per-operation allocation after init).
 
-Instead:
+## Identity and authorization
 
-[tiers]
-count = 6
+Every operation takes a `&CacheContext` (builder over `IdentityContext` plus
+an optional TTL). Two gates apply:
 
-[tier.l0]
-role = "request"
-scope = "request"
-persistent = false
-shared = false
+1. **Authentication** (`CacheManager::check_auth`, pre-policy):
+   unauthenticated callers get `CacheError::Unauthenticated`.
+2. **Authorization** (policy-driven, on all mutating ops — set, invalidate,
+   remove, promote, demote, refresh — plus reads): the policy's
+   `PolicyDecision.authorized` flag gates the call, else
+   `CacheError::Unauthorized`.
 
-[tier.l1]
-role = "hot-local"
-scope = "process"
-persistent = false
-shared = false
+`DefaultPolicy` is a permissive baseline; `StrictPolicy` denies anonymous
+writes. Implement `CachePolicy` for custom authz.
 
-[tier.l2]
-role = "local"
-scope = "process"
-persistent = false
-shared = false
+## Policy engine
 
-[tier.l3]
-role = "distributed"
-scope = "cluster"
-persistent = false
-shared = true
+Selection inputs per request: operation, key/entry metadata, live
+`CacheState`, and per-tier health. Precedence ladder (first match wins):
 
-[tier.l4]
-role = "persistent"
-scope = "host"
-persistent = true
-shared = false
+1. explicit policy override → 2. tier health → 3. consistency →
+   4. latency → 5. capacity → 6. default tier
 
-[tier.l5]
-role = "origin-fallback"
-scope = "external"
-persistent = false
-shared = true
+Tier health carries an `availability` signal (0.0–1.0); five consecutive
+failures open the circuit and the registry routes around the tier
+(`TierRegistry::fail` / `recover` are fed by real tier outcomes).
 
-[routing]
-manager_only = true
-policy_only = true
+## Single-flight and generations
 
-[health]
-health_checks = true
-failure_isolation = true
+A miss does not entitle every reader to populate:
 
-This is deliberately abstract.
-
-You can then have a configuration such as:
-
-[tier.l1]
-backend = "lru"
-
-[tier.l2]
-backend = "moka"
-
-# (moka is a planned optional backend; not yet wired as a feature)
-
-[tier.l3]
-backend = "redis"
-
-[tier.l4]
-backend = "sled"
-
-[tier.l5]
-backend = "origin"
-
-without making those technologies part of the fundamental architecture.
-
-That gives you freedom to eventually replace Sled, Redis, Moka, etc. without rewriting the conceptual system.
-
-
----
-
-7. specs/stampede.toml
-
-This one deserves its own specification because you already identified the failure mode.
-
-[stampede]
-enabled = true
-strategy = "single-flight"
-
-[ownership]
-one_population_owner = true
-waiters_join_existing_population = true
-
-[timeouts]
-population_timeout = "5s"
-wait_timeout = "5s"
-
-[failure]
-owner_failure_releases_state = true
-waiters_receive_population_error = true
-retry_after_failure = true
-
-[retry]
-enabled = true
-max_attempts = 3
-backoff = "exponential"
-
-[invariants]
-duplicate_population_for_same_key = false
-stale_infinite_inflight_state = false
-owner_loss_recoverable = true
-
-The important semantic distinction is:
-
-Cache miss
-    ≠
-permission for every reader to populate the cache
-
-Instead:
-
+```
 MISS
                │
         ┌──────┴──────┐
         │             │
-     ABSENT        IN_FLIGHT
+     ABSENT       IN_FLIGHT
         │             │
      become          wait
       owner            │
@@ -417,482 +175,70 @@ MISS
      fetch             │
         │              │
      publish ◄─────────┘
-
-That's where Cachelito earns its keep.
-
-
----
-
-8. Cargo manifest
-
-For crates.io, I'd keep the actual package lean.
-
-[package]
-name = "thesix"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.98"
-
-description = "Policy-driven six-tier cache orchestration for Rust"
-license = "MIT"
-readme = "README.md"
-repository = "https://github.com/Metis-Avionics/theSix"
-homepage = "https://github.com/Metis-Avionics/theSix"
-
-keywords = [
-    "cache",
-    "caching",
-    "concurrency",
-    "async",
-    "systems"
-]
-
-categories = [
-    "caching",
-    "concurrency",
-    "asynchronous"
-]
-
-[dependencies]
-dashmap = "..."
-tokio = { version = "...", features = ["sync", "time"] }
-thiserror = "..."
-
-[dev-dependencies]
-tokio = { version = "...", features = ["macros", "rt-multi-thread", "test-util"] }
-criterion = "..."
-
-[features]
-default = []
-redis = ["dep:redis"]
-sled = ["dep:sled"]
-
-[dependencies.redis]
-version = "..."
-optional = true
-
-[dependencies.sled]
-version = "..."
-optional = true
-
-I would not make every backend mandatory.
-
-The core crate should contain the orchestration machinery. Backend integrations should be features or separate crates if they become sufficiently large.
-
-Cargo's packaging process verifies that the packaged crate can actually build from a clean extraction, and crates.io publishes versions permanently, so 0.1.0 should represent a deliberately bounded API rather than “whatever happened to compile tomorrow morning.” 
-
-
----
-
-9. The coding-agent prompt
-
-This is the bit I'd actually hand to your agent tomorrow.
-
-Build theSix
-
-Implement "theSix", a production-oriented Rust library providing policy-driven six-tier cache orchestration.
-
-Mission
-
-Build a reusable Cargo package suitable for publication on crates.io.
-
-TheSix is a cache orchestration system, not merely a cache implementation.
-
-Its architecture is:
-
-Application
-    │
-    ▼
-CacheManager
-    │
-    ▼
-Policy Engine
-    │
-    ▼
-Cachelito Control Plane
-    │
-    ├── concurrency state
-    ├── entry state
-    ├── tier selection state
-    ├── generation state
-    ├── population ownership
-    └── stampede coordination
-    │
-    ▼
-Six-Tier Data Plane
-    │
-    ├── L0 request-local
-    ├── L1 hot-local
-    ├── L2 local
-    ├── L3 distributed
-    ├── L4 persistent
-    └── L5 origin/fallback
-
-Core architectural invariants
-
-1. Application code MUST NOT select cache tiers directly.
-2. CacheManager MUST own cache operations.
-3. Policy MUST determine tier selection.
-4. Cachelito MUST operate as the control plane.
-5. Cachelito MUST NOT own application payload data.
-6. Tier implementations MUST remain replaceable.
-7. No control-plane lock/guard may be held across ".await".
-8. No control-plane lock/guard may be held across network or disk I/O.
-9. Multiple readers MUST be supported concurrently.
-10. Cache population MUST support single-flight coordination.
-11. A cache miss MUST NOT permit unlimited concurrent population.
-12. A failed population MUST release the in-flight state.
-13. Stale in-flight state MUST be recoverable.
-14. Tier failure MUST be isolated where policy permits.
-15. Cache invalidation MUST support generation-based protection against stale writes.
-
-Public API
-
-Implement approximately:
-
-pub struct CacheManager<K, V, P> { ... }
-
-impl<K, V, P> CacheManager<K, V, P> {
-    pub async fn get(
-        &self,
-        key: &K,
-    ) -> Result<Option<V>, CacheError>;
-
-    pub async fn get_or_fetch<F, Fut>(
-        &self,
-        key: &K,
-        fetch: F,
-    ) -> Result<V, CacheError>
-    where
-        F: FnOnce() -> Fut;
-
-    pub async fn set(
-        &self,
-        key: K,
-        value: V,
-    ) -> Result<(), CacheError>;
-
-    pub async fn invalidate(
-        &self,
-        key: &K,
-    ) -> Result<(), CacheError>;
-
-    pub async fn remove(
-        &self,
-        key: &K,
-    ) -> Result<(), CacheError>;
-}
-
-Do not expose tier selection through the normal application API.
-
-If an administrative/debug API requires explicit tier inspection, keep it clearly separated from the normal data path.
-
-Cachelito
-
-Implement Cachelito as the control-plane state registry.
-
-Use a pre-allocated, sharded slot map (theSix removes DashMap per TETANUS Rule 3: no heap allocation after init).
-
-A control entry should contain enough metadata to represent:
-
-pub enum EntryState {
-    Absent,
-    Ready,
-    Stale,
-    InFlight,
-    Failed,
-}
-
-plus:
-
-- selected tier
-- generation
-- expiration
-- population ownership
-- population timestamp
-- failure state where required
-
-Do not store the actual cache payload in Cachelito.
-
-Single-flight
-
-For a given key:
-
-first caller  -> population owner
-other callers -> waiters
-
-Only one population operation may own the key at a time unless the policy explicitly permits duplicate population.
-
-The implementation MUST handle:
-
-- successful population
-- failed population
-- owner cancellation
-- owner timeout
-- waiter timeout
-- stale ownership
-- retry
-- generation changes during population
-
-Policy engine
-
-Define a policy abstraction capable of evaluating:
-
-- operation
-- key metadata
-- entry metadata
-- cache state
-- tier health
-- latency requirements
-- consistency requirements
-- entry size
-- TTL
-- capacity
-- availability
-
-The policy returns a decision containing at minimum:
-
-pub struct PolicyDecision {
-    pub tier: TierId,
-    pub operation: CacheOperation,
-    pub population: PopulationStrategy,
-}
-
-Do not couple the policy engine to Redis, Moka, LRU, Sled, or any particular storage technology.
-
-Tier abstraction
-
-Define a trait representing a cache tier.
-
-The trait MUST support asynchronous operations without forcing the implementation to use a particular runtime internally beyond what is required by the public API.
-
-At minimum support:
-
-- get
-- set
-- remove
-- contains
-- invalidate where applicable
-- health/state reporting
-
-Tier implementations must be independently testable.
-
-Tier topology
-
-The system exposes six logical tiers:
-
-L0 = request-local
-L1 = hot-local
-L2 = local
-L3 = distributed
-L4 = persistent
-L5 = origin/fallback
-
-The logical roles MUST remain stable even if backend implementations change.
-
-Backend selection is configuration.
-
-Concurrency
-
-Design explicitly for:
-
-- many concurrent readers
-- concurrent reads and writes
-- concurrent operations on unrelated keys
-- contention on the same key
-- contention on different shards
-- tier failures
-- population races
-
-Never solve concurrency by placing one global "RwLock" around the entire cache hierarchy.
-
-Do not hold a shard/slot guard or equivalent control-plane reference across an await point.
-
-Generation safety
-
-Every population operation must capture the relevant generation.
-
-A population result MUST NOT overwrite a newer generation.
-
-Example:
-
-generation 41
-    │
-    ├── population starts
-    │
-generation 42
-    │
-    └── invalidation
-         │
-population 41 completes
-         │
-         X reject stale publication
-
-Error model
-
-Define structured errors for:
-
-- cache miss
-- tier unavailable
-- policy failure
-- serialization failure
-- population failure
-- timeout
-- cancellation
-- stale generation
-- configuration error
-
-Do not collapse every failure into a generic string.
-
-Testing
-
-Build deterministic tests for:
-
-1. basic get/set
-2. tier traversal
-3. policy selection
-4. concurrent readers
-5. concurrent writer/readers
-6. single-flight population
-7. 100 concurrent requests for one missing key
-8. population failure
-9. owner cancellation
-10. waiter timeout
-11. stale generation rejection
-12. tier failure
-13. tier recovery
-14. invalidation
-15. promotion
-16. demotion
-17. concurrent unrelated keys
-18. shard contention
-19. policy replacement
-20. complete six-tier integration
-
-The test suite MUST prove that a concurrent cache miss does not produce uncontrolled duplicate population.
-
-Benchmarks
-
-Benchmark separately:
-
-- uncontended get
-- concurrent get
-- same-key contention
-- unrelated-key contention
-- policy evaluation
-- Cachelito lookup
-- single-flight coordination
-- tier traversal
-
-Do not optimize prematurely. Establish measurements first.
-
-Documentation
-
-Write crate-level documentation explaining:
-
-1. architecture
-2. control plane vs data plane
-3. CacheManager
-4. Cachelito
-5. policy engine
-6. six logical tiers
-7. single-flight semantics
-8. generation invalidation
-9. concurrency guarantees
-10. failure modes
-
-Include at least one complete example showing an application calling:
-
-manager.get_or_fetch(&key, fetcher).await
-
-without knowing which cache tier is used.
-
-Quality gates
-
-Before considering implementation complete:
-
-cargo fmt --check
-cargo check
-cargo test
-cargo clippy --all-targets --all-features -- -D warnings
-cargo doc --no-deps
-cargo package --list
-cargo publish --dry-run
-
-Do not publish automatically.
-
-API discipline
-
-Keep the initial public API small.
-
-Prefer private implementation details and explicit internal modules over exposing every internal structure.
-
-Do not expose the control-plane slot map directly.
-
-Do not expose individual cache tiers through the default API.
-
-Do not expose internal locks.
-
-Do not expose Cachelito's internal storage representation.
-
-TheSix's value is the orchestration abstraction.
-
-Design rule
-
-When an implementation decision conflicts with the architectural invariants, preserve the invariants and redesign the implementation.
-
-Do not introduce a workaround that makes the public API aware of internal cache topology.
-
-Deliverables
-
-Produce:
-
-- compilable crate
-- Cargo.toml
-- src/
-- tests/
-- benchmarks
-- README
-- API documentation
-- architecture documentation
-- TOML specifications under "specs/"
-- CHANGELOG
-- license
-- CI configuration suitable for a public crates.io project
-
-Do not claim the crate is production-ready until the concurrency and stampede tests demonstrate the required invariants.That prompt is deliberately strict about architecture before implementation. That's where I think theSix could become genuinely good rather than merely becoming “Rayan's six caches in a trench coat.”
-
-One thing I'd change from your current instinct
-
-Don't make theSix synonymous with your current six backend technologies.
-
-Make it synonymous with the six-tier orchestration model.
-
-That distinction gives you this:
-
-theSix 0.1
-   │
-   ├── L0 request
-   ├── L1 hot-local
-   ├── L2 local
-   ├── L3 distributed
-   ├── L4 persistent
-   └── L5 origin
-
-while the implementation can evolve:
-
-0.2 → fixed-capacity slot maps + L0–L2 in-memory + Redis + Sled + origin (moka planned)
-
-0.2 → different persistent tier
-
-0.3 → different distributed backend
-
-0.4 → smarter admission policy
-
-1.0 → stable orchestration API
-
-That is what makes it a crate rather than a snapshot of one particular infrastructure stack.
-
-And because crates.io versions are effectively permanent, I'd be particularly conservative about the public API before 1.0. 
-
-TheSix can then become one of those primitives you pull into a new project instead of spending three days rebuilding your own cache hierarchy because apparently suffering is a required dependency of software engineering.
+```
+
+- First caller becomes the population **owner**; others **wait** on the
+  snapshot notify (bounded by a 5 s default timeout, configurable via
+  `with_timeout`).
+- Owner fetch is retried in place (max 3 attempts, exponential backoff);
+  terminal errors propagate to waiters; fail-open policies fall back a tier.
+- Every population captures a **generation**; `invalidate`/`remove` bump it
+  and stale publications are rejected. TTL expiry lazily transitions
+  `Ready → Stale` (served stale while revalidating by `refresh`).
+
+## API reference
+
+All ops are `async` and take `(&key, &ctx)` (`get_or_fetch`/`refresh` also
+take a fetch closure returning `Result<V, CacheError>`):
+
+| Method | Effect |
+|--------|--------|
+| `get` | Tier lookup per policy; lazy TTL expiry |
+| `get_or_fetch` | `get`, else single-flight populate |
+| `set` | Policy-routed write (authz-gated) |
+| `invalidate` | Generation bump (stale writes rejected) |
+| `remove` | Generation bump + tier eviction |
+| `exists` | Presence check without fetching |
+| `refresh` | Stale-while-revalidate |
+| `promote` / `demote` | Policy-controlled tier movement |
+
+Errors are the single `Copy` type `CacheError`: miss, tier unavailable,
+policy/auth failures (`Unauthenticated` vs `Unauthorized`), population
+failure, timeout, cancellation, stale generation, serialization,
+configuration.
+
+Admin/test-only surface (kept off the data path): `manager.tier(&TierId)`,
+`manager.cachelito()`, `TestTier::set_healthy(bool)`.
+
+## Testing and quality gates
+
+29 integration tests prove the invariants — including 100-concurrent-requests
+single-flight, owner cancellation, waiter timeout, tier failure/recovery, TTL
+expiry, and strict-policy denial. Benchmarks in `benches/`.
+
+```bash
+cargo build
+cargo test --all-targets --all-features
+cargo bench
+```
+
+Every change must pass, in order: `cargo fmt --check` → `cargo check
+--all-targets --all-features` → `cargo clippy --all-targets --all-features --
+-D warnings` → `cargo test --all-targets --all-features` → `cargo doc
+--no-deps` → `cargo package --list` → `cargo publish --dry-run` → `cargo deny
+check` → `cargo machete`. CI enforces all of these plus miri (no-op guard;
+the crate declares `#![forbid(unsafe_code)]`).
+
+## Design notes
+
+- theSix is synonymous with the **six-tier orchestration model**, not with
+  any particular backend stack — L3 could be Redis today and something else
+  tomorrow without touching application code.
+- Non-goals (by design): distributed consensus, general persistence,
+  application business logic, global cache coherence.
+- Pre-1.0 the public API may still evolve (0.1 → 0.2 introduced
+  `CacheContext`); pin exact versions and read `CHANGELOG.md`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

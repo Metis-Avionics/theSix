@@ -1,5 +1,13 @@
 # CHANGELOG
 
+## v0.2.1 — 2026-09-14
+
+### Added
+- `examples/quickstart.rs` — runnable quick start mirroring the README
+
+### Changed
+- README rewritten as a crate README (was the original design/planning doc): accurate install, quick start, architecture, policy, single-flight, API reference, and quality-gate sections; stale signatures, `dashmap`/`moka` references, and "do not publish" removed
+
 ## v0.2.0 — 2026-09-14
 
 ### Added
