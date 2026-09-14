@@ -8,7 +8,7 @@ Full spec completion + TETANUS compliance on PR #1 (branch implement-thesix). Al
 """
 
 remaining = [
-    "Nothing pending. Optional follow-up (v0.3): async-native backends; richer capacity/latency telemetry for the policy ladder",
+    "Nothing pending. Published thesix v0.2.0 to crates.io. Optional follow-up (v0.3): async-native backends; richer capacity/latency telemetry for the policy ladder",
 ]
 
 decisions = [
@@ -33,6 +33,7 @@ focus = "Complete; PR #1 merged, Rust 1.98 upgrade landed, CI green on main — 
 tasks = [
     "Confirmed: CI on main is green across all jobs (fmt, check, test, clippy, doc, package, deny, machete, miri) on the 1.98 toolchain.",
     "Rust 1.98 upgrade landed: edition 2021 -> 2024, rust-version -> 1.98, CI toolchain -> 1.98; gen renamed (reserved keyword), let-chain + redundant-binding clippy lints fixed; CHANGELOG documents the upgrade; all gates green.",
+    "Published thesix v0.2.0 to crates.io (registry confirms edition 2024, rust_version 1.98, MIT); remote moved to Metis-Avionics/theSix; tag v0.2.0 pushed.",
 ]
 
 [session]
