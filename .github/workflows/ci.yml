@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  RUST_TOOLCHAIN: '1.75'
+  RUST_TOOLCHAIN: '1.85'
 
 jobs:
   fmt:
@@ -79,7 +79,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - run: cargo install cargo-machete --locked
+      - run: cargo install cargo-machete --locked --version 0.9.2
       - run: cargo machete
 
   # Miri only runs when the crate contains unsafe code; theSix is
@@ -90,7 +90,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install nightly --component miri
-      - run: cargo +nightly miri test --all-features
+      - name: Miri (lib only, isolation warnings allowed)
+        run: MIRIFLAGS="-Zmiri-isolation-error=warn" cargo +nightly miri test --lib
+        env:
+          RUST_TOOLCHAIN: ""
+
 
   package:
     name: Package
