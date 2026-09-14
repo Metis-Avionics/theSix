@@ -23,7 +23,7 @@ No `manager.l3.get(...)`. That distinction is the whole point.
 
 ```toml
 [dependencies]
-thesix = "0.2"
+thesix = "0.2.1"
 ```
 
 Optional real backends (in-memory stubs are the default):
@@ -34,7 +34,7 @@ Optional real backends (in-memory stubs are the default):
 | `sled`  | `L4SledBackend` (persistent) | Embedded sled; TTL prefix + lazy eviction |
 
 ```toml
-thesix = { version = "0.2", features = ["redis", "sled"] }
+thesix = { version = "0.2.1", features = ["redis", "sled"] }
 ```
 
 Backends store bytes, so values must implement `ByteValue` (`Vec<u8>` and

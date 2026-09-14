@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## v0.2.2 — 2026-09-14
+
+### Fixed
+- README install snippets point at `0.2.1` (were the `0.2` semver range)
+
 ## v0.2.1 — 2026-09-14
 
 ### Added
