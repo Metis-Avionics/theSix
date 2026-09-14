@@ -2,7 +2,7 @@
 name = "thesix"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Policy-driven six-tier cache orchestration for Rust"
 license = "MIT"
 readme = "README.md"
