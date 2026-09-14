@@ -1,18 +1,19 @@
 use std::time::Duration;
 
 use crate::error::CacheError;
+use crate::key::KeyRef;
 use crate::tier::TierId;
 
 pub trait CacheTier<V>: Send + Sync {
     fn name(&self) -> String;
 
-    fn get(&self, key: &[u8]) -> Result<Option<V>, CacheError>;
+    fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError>;
 
-    fn set(&self, key: &[u8], value: V, ttl: Option<Duration>) -> Result<(), CacheError>;
+    fn set(&self, key: &KeyRef<'_>, value: V, ttl: Option<Duration>) -> Result<(), CacheError>;
 
-    fn remove(&self, key: &[u8]) -> Result<(), CacheError>;
+    fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError>;
 
-    fn contains(&self, key: &[u8]) -> Result<bool, CacheError>;
+    fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError>;
 
     fn health(&self) -> TierHealth;
 

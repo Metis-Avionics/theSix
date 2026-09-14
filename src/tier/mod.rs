@@ -49,13 +49,17 @@ impl std::fmt::Display for TierId {
 #[derive(Debug)]
 pub struct TierRegistry {
     tiers: Vec<TierId>,
+    health: Vec<std::sync::RwLock<TierHealth>>,
 }
 
 impl TierRegistry {
+    #[allow(clippy::unwrap_used)]
     pub fn new() -> Self {
-        TierRegistry {
-            tiers: (0..6).map(|i| TierId::from_usize(i).unwrap()).collect(),
-        }
+        let tiers: Vec<TierId> = (0..6).map(|i| TierId::from_usize(i).unwrap()).collect();
+        let health = (0..6)
+            .map(|_| std::sync::RwLock::new(TierHealth::default()))
+            .collect();
+        TierRegistry { tiers, health }
     }
 
     pub fn all(&self) -> &[TierId] {
@@ -69,6 +73,50 @@ impl TierRegistry {
     pub fn is_empty(&self) -> bool {
         self.tiers.is_empty()
     }
+
+    pub fn tier_health(&self, tier: TierId) -> TierHealth {
+        self.health[tier.as_usize()]
+            .read()
+            .map(|h| h.clone())
+            .unwrap_or_default()
+    }
+
+    /// Record a failure against a tier; increments the consecutive-failure
+    /// counter and degrades the health score. Used by the circuit breaker.
+    pub fn fail(&self, tier: TierId) {
+        if let Ok(mut h) = self.health[tier.as_usize()].write() {
+            h.consecutive_failures += 1;
+            h.last_failure_timestamp = Some(std::time::SystemTime::now());
+            h.health_score = (h.health_score - 0.1).max(0.0);
+        }
+    }
+
+    /// Reset a tier's health after a successful operation.
+    pub fn recover(&self, tier: TierId) {
+        if let Ok(mut h) = self.health[tier.as_usize()].write() {
+            h.consecutive_failures = 0;
+            h.health_score = 1.0;
+            h.last_failure_timestamp = None;
+        }
+    }
+
+    pub fn is_circuit_open(&self, tier: TierId) -> bool {
+        self.health[tier.as_usize()]
+            .read()
+            .map_or(true, |h| h.is_circuit_open())
+    }
+
+    pub fn try_fallback_tier(&self, exclude: TierId) -> Option<TierId> {
+        for &tier in &self.tiers {
+            if tier == exclude {
+                continue;
+            }
+            if !self.is_circuit_open(tier) {
+                return Some(tier);
+            }
+        }
+        None
+    }
 }
 
 impl Default for TierRegistry {
@@ -77,6 +125,7 @@ impl Default for TierRegistry {
     }
 }
 
+pub mod fixed_tier_stub;
 pub mod l0;
 pub mod l1;
 pub mod l2;

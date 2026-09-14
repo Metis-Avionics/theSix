@@ -1,48 +1,58 @@
-use std::sync::Arc;
+use std::sync::Mutex;
 
-use crate::error::CacheError;
+use crate::tier::fixed_tier_stub::FixedTierStub;
 use crate::tier::tier_trait::{CacheTier, TierHealth};
 use crate::tier::TierId;
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct L1Stub<V> {
-    store: Arc<dashmap::DashMap<Vec<u8>, V>>,
+    inner: Mutex<FixedTierStub<V>>,
 }
 
 impl<V> L1Stub<V> {
     pub fn new() -> Self {
         L1Stub {
-            store: Arc::new(dashmap::DashMap::new()),
+            inner: Mutex::new(FixedTierStub::new()),
         }
     }
 }
 
-impl<V: Clone + Send + Sync> CacheTier<V> for L1Stub<V> {
+impl<V: Clone + Send + Sync + 'static> CacheTier<V> for L1Stub<V> {
     fn name(&self) -> String {
         "L1-hot-local".into()
     }
 
-    fn get(&self, key: &[u8]) -> Result<Option<V>, CacheError> {
-        Ok(self.store.get(key).map(|e| e.value().clone()))
+    fn get(&self, key: &crate::key::KeyRef<'_>) -> Result<Option<V>, crate::error::CacheError> {
+        self.inner
+            .lock()
+            .map_err(|_| crate::error::CacheError::ConfigurationError)?
+            .get(key)
     }
 
     fn set(
         &self,
-        key: &[u8],
+        key: &crate::key::KeyRef<'_>,
         value: V,
-        _ttl: Option<std::time::Duration>,
-    ) -> Result<(), CacheError> {
-        self.store.insert(key.to_vec(), value);
-        Ok(())
+        ttl: Option<std::time::Duration>,
+    ) -> Result<(), crate::error::CacheError> {
+        self.inner
+            .lock()
+            .map_err(|_| crate::error::CacheError::ConfigurationError)?
+            .set(key, value, ttl)
     }
 
-    fn remove(&self, key: &[u8]) -> Result<(), CacheError> {
-        self.store.remove(key);
-        Ok(())
+    fn remove(&self, key: &crate::key::KeyRef<'_>) -> Result<(), crate::error::CacheError> {
+        self.inner
+            .lock()
+            .map_err(|_| crate::error::CacheError::ConfigurationError)?
+            .remove(key)
     }
 
-    fn contains(&self, key: &[u8]) -> Result<bool, CacheError> {
-        Ok(self.store.contains_key(key))
+    fn contains(&self, key: &crate::key::KeyRef<'_>) -> Result<bool, crate::error::CacheError> {
+        self.inner
+            .lock()
+            .map_err(|_| crate::error::CacheError::ConfigurationError)?
+            .contains(key)
     }
 
     fn health(&self) -> TierHealth {

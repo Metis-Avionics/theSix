@@ -1,26 +1,15 @@
+#![allow(unused_imports)]
+mod common;
+
 use std::sync::Arc;
 
 use thesix::{
     CacheError, CacheManager, CacheOperation, CachePolicy, CacheRequest, CacheState, Cachelito,
-    DefaultPolicy, IdentityContext, L0Stub, L1Stub, L2Stub, L3Stub, L4Stub, L5Stub, PolicyDecision,
-    TierId, TierRegistry,
+    DefaultPolicy, IdentityContext, KeyRef, L0Stub, L1Stub, L2Stub, L3Stub, L4Stub, L5Stub,
+    MemoryPool, PolicyDecision, TierId, TierRegistry,
 };
 
-fn make_manager<V: Clone + Send + Sync + 'static>(
-    policy: DefaultPolicy,
-) -> Arc<CacheManager<String, V, DefaultPolicy>> {
-    let cachelito = Cachelito::new();
-    let tier_registry = TierRegistry::new();
-    let tiers: Vec<Arc<dyn thesix::CacheTier<V>>> = vec![
-        Arc::new(L0Stub::new()),
-        Arc::new(L1Stub::new()),
-        Arc::new(L2Stub::new()),
-        Arc::new(L3Stub::new()),
-        Arc::new(L4Stub::new()),
-        Arc::new(L5Stub::new()),
-    ];
-    Arc::new(CacheManager::new(policy, cachelito, tier_registry, tiers))
-}
+use common::{make_manager, test_ctx};
 
 #[derive(Debug, Clone)]
 struct DenyPolicy;
@@ -64,9 +53,12 @@ async fn test_policy_replacement() {
     let manager = make_manager(DefaultPolicy);
     let key = "policy-key".to_string();
 
-    manager.set(key.clone(), "value".to_string()).await.unwrap();
+    manager
+        .set(&key, "value".to_string(), &test_ctx())
+        .await
+        .unwrap();
 
-    let result = manager.get(&key).await.unwrap();
+    let result = manager.get(&key, &test_ctx()).await.unwrap();
     assert_eq!(result, Some("value".to_string()));
 
     let cachelito = Cachelito::new();
@@ -79,11 +71,14 @@ async fn test_policy_replacement() {
         Arc::new(L4Stub::new()),
         Arc::new(L5Stub::new()),
     ];
-    let manager_deny = CacheManager::new(DenyPolicy, cachelito, tier_registry, tiers);
+    let pool = MemoryPool::new(1024).expect("MemoryPool allocation failed");
+    let manager_deny = CacheManager::new(DenyPolicy, cachelito, tier_registry, tiers, pool);
 
-    let result = manager_deny.get(&key).await;
+    let result = manager_deny.get(&key, &test_ctx()).await;
     assert!(matches!(result, Err(CacheError::Unauthorized)));
 
-    let result = manager_deny.set(key, "value".to_string()).await;
+    let result = manager_deny
+        .set(&key, "value".to_string(), &test_ctx())
+        .await;
     assert!(matches!(result, Err(CacheError::Unauthorized)));
 }

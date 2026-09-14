@@ -1,17 +1,16 @@
+#![allow(unused_imports)]
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::sync::Arc;
 
 use thesix::{
-    CacheManager, CachePolicy, Cachelito, DefaultPolicy, L0Stub, L1Stub, L2Stub, L3Stub, L4Stub,
-    L5Stub, TierRegistry,
+    CacheManager, CachePolicy, Cachelito, DefaultPolicy, KeyRef, L0Stub, L1Stub, L2Stub, L3Stub,
+    L4Stub, L5Stub, MemoryPool, TierRegistry,
 };
 
-fn make_manager<V: Clone + Send + Sync + 'static>(
-    policy: DefaultPolicy,
-) -> Arc<CacheManager<String, V, DefaultPolicy>> {
+fn make_manager() -> Arc<CacheManager<String, String, DefaultPolicy>> {
     let cachelito = Cachelito::new();
     let tier_registry = TierRegistry::new();
-    let tiers: Vec<Arc<dyn thesix::CacheTier<V>>> = vec![
+    let tiers: Vec<Arc<dyn thesix::CacheTier<String>>> = vec![
         Arc::new(L0Stub::new()),
         Arc::new(L1Stub::new()),
         Arc::new(L2Stub::new()),
@@ -19,18 +18,33 @@ fn make_manager<V: Clone + Send + Sync + 'static>(
         Arc::new(L4Stub::new()),
         Arc::new(L5Stub::new()),
     ];
-    Arc::new(CacheManager::new(policy, cachelito, tier_registry, tiers))
+    let pool = MemoryPool::new(1024).expect("MemoryPool allocation failed");
+    Arc::new(CacheManager::new(
+        DefaultPolicy,
+        cachelito,
+        tier_registry,
+        tiers,
+        pool,
+    ))
 }
 
 fn bench_uncontended_get(c: &mut Criterion) {
-    let manager = make_manager(DefaultPolicy);
+    let manager = make_manager();
     let rt = tokio::runtime::Runtime::new().unwrap();
+    let ctx = thesix::CacheContext::new(thesix::IdentityContext::new(
+        "bench".to_string(),
+        vec![],
+        "bench".to_string(),
+    ));
     c.bench_function("uncontended_get", |b| {
         b.iter(|| {
             let m = Arc::clone(&manager);
+            let ctx = ctx.clone();
             rt.block_on(async move {
-                m.set("key".to_string(), "value".to_string()).await.unwrap();
-                m.get(&"key".to_string()).await.unwrap();
+                m.set(&"key".to_string(), "value".to_string(), &ctx)
+                    .await
+                    .unwrap();
+                m.get(&"key".to_string(), &ctx).await.unwrap();
             });
         });
     });

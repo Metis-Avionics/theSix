@@ -1,53 +1,62 @@
 use crate::error::CacheError;
+use crate::key::KeyRef;
+use crate::pool::MemoryPool;
 use crate::tier::tier_trait::{CacheTier, TierHealth};
 use crate::tier::TierId;
 
+#[derive(Debug)]
 pub struct L5Stub<V> {
-    _private: std::marker::PhantomData<V>,
+    _pool: MemoryPool<V>,
+    _slots: Vec<Option<(u64, usize)>>,
 }
 
-impl<V> Default for L5Stub<V> {
-    fn default() -> Self {
+impl<V> L5Stub<V> {
+    #[allow(clippy::expect_used)]
+    pub fn new() -> Self {
+        Self::with_capacity(1024)
+    }
+
+    #[allow(clippy::expect_used)]
+    pub fn with_capacity(capacity: usize) -> Self {
         L5Stub {
-            _private: std::marker::PhantomData,
+            _pool: MemoryPool::new(capacity).expect("MemoryPool allocation failed"),
+            _slots: vec![None; capacity],
         }
     }
 }
 
-impl<V> L5Stub<V> {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl<V: Clone + Send + Sync> CacheTier<V> for L5Stub<V> {
+impl<V: Clone + Send + Sync + 'static> CacheTier<V> for L5Stub<V> {
     fn name(&self) -> String {
         "L5-origin-fallback".into()
     }
 
-    fn get(&self, _key: &[u8]) -> Result<Option<V>, CacheError> {
+    fn get(&self, _key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
         Err(CacheError::TierUnavailable)
     }
 
     fn set(
         &self,
-        _key: &[u8],
+        _key: &KeyRef<'_>,
         _value: V,
         _ttl: Option<std::time::Duration>,
     ) -> Result<(), CacheError> {
         Err(CacheError::TierUnavailable)
     }
 
-    fn remove(&self, _key: &[u8]) -> Result<(), CacheError> {
+    fn remove(&self, _key: &KeyRef<'_>) -> Result<(), CacheError> {
         Err(CacheError::TierUnavailable)
     }
 
-    fn contains(&self, _key: &[u8]) -> Result<bool, CacheError> {
+    fn contains(&self, _key: &KeyRef<'_>) -> Result<bool, CacheError> {
         Err(CacheError::TierUnavailable)
     }
 
     fn health(&self) -> TierHealth {
-        TierHealth::default()
+        TierHealth {
+            consecutive_failures: 5,
+            last_failure_timestamp: Some(std::time::SystemTime::now()),
+            health_score: 0.0,
+        }
     }
 
     fn tier_id(&self) -> TierId {

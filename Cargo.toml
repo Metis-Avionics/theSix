@@ -3,12 +3,20 @@ name = "thesix"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-
 description = "Policy-driven six-tier cache orchestration for Rust"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/Metis-Avionics/theSix"
 homepage = "https://github.com/Metis-Avionics/theSix"
+exclude = [
+    ".kilo/**",
+    "specs/**",
+    "target/**",
+    "*.lock",
+    ".gitignore",
+    ".github/**",
+    "living.toml",
+]
 
 keywords = [
     "cache",
@@ -25,7 +33,6 @@ categories = [
 ]
 
 [dependencies]
-dashmap = "6"
 tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread"] }
 thiserror = "2"
 

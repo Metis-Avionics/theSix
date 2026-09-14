@@ -1,3 +1,29 @@
+#![deny(warnings)]
+#![warn(
+    clippy::pedantic,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic
+)]
+#![allow(
+    clippy::unused_async,
+    clippy::unused_async_trait_impl,
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate,
+    clippy::return_self_not_must_use,
+    clippy::new_without_default,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::unnecessary_wraps,
+    clippy::unused_self,
+    clippy::ignored_unit_patterns,
+    clippy::needless_continue,
+    clippy::match_same_arms,
+    clippy::needless_as_bytes
+)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 //! # theSix
 //!
 //! Policy-driven six-tier cache orchestration for Rust.
@@ -30,11 +56,12 @@
 //!
 //! The application should never need to know that L3 happens to be Redis.
 //!
-//! ## CacheManager
+//! ## `CacheManager`
 //!
 //! `CacheManager` is the public API. It exposes cache operations
-//! (`get`, `get_or_fetch`, `set`, `invalidate`, `remove`, `promote`, `demote`)
-//! and enforces authentication and authorization before any state is touched.
+//! (`get`, `get_or_fetch`, `set`, `invalidate`, `remove`, `exists`,
+//! `refresh`, `promote`, `demote`) and enforces authentication and
+//! authorization before any state is touched.
 //!
 //! Tier selection is delegated to the policy engine; the application never
 //! selects a tier directly.
@@ -42,7 +69,7 @@
 //! ## Cachelito
 //!
 //! Cachelito is the control-plane state registry. It uses a sharded
-//! `DashMap` to track per-key control state (entry state, generation, tier,
+//! fixed-size slot map to track per-key control state (entry state, generation, tier,
 //! population ownership, tier health) without storing application payloads.
 //!
 //! Key invariants:
@@ -100,7 +127,7 @@
 //! - Concurrent reads and writes on unrelated keys do not block each other.
 //! - Contention on the same key is coordinated via Cachelito's single-flight.
 //! - No global lock around the entire cache hierarchy.
-//! - No DashMap guard held across await points.
+//! - No control guard held across await points.
 //!
 //! ## Failure Modes
 //!
@@ -114,13 +141,14 @@
 //! ## Example
 //!
 //! ```no_run
-//! use thesix::{CacheManager, CacheTier, CachePolicy, IdentityContext};
+//! use thesix::{CacheManager, CacheTier, CacheContext, MemoryPool, IdentityContext};
 //! use std::sync::Arc;
 //!
-//! // Create tier stubs, cachelito, policy, and registry
+//! # async fn example() {
+//! // Create tier stubs, cachelito, policy, registry, and the value pool.
 //! let cachelito = thesix::Cachelito::new();
 //! let policy = thesix::DefaultPolicy;
-//! let mut registry = thesix::TierRegistry::new();
+//! let registry = thesix::TierRegistry::new();
 //! let tiers: Vec<Arc<dyn CacheTier<String>>> = vec![
 //!     Arc::new(thesix::L0Stub::<String>::new()),
 //!     Arc::new(thesix::L1Stub::<String>::new()),
@@ -129,16 +157,24 @@
 //!     Arc::new(thesix::L4Stub::<String>::new()),
 //!     Arc::new(thesix::L5Stub::<String>::new()),
 //! ];
+//! let pool = MemoryPool::<String>::new(1024).expect("pool allocation failed");
 //!
 //! let manager: CacheManager<String, String, thesix::DefaultPolicy> =
-//!     CacheManager::new(policy, cachelito, registry, tiers);
+//!     CacheManager::new(policy, cachelito, registry, tiers, pool);
+//!
+//! // Build a request context carrying the caller identity (builder pattern).
+//! let ctx = CacheContext::new(IdentityContext::new(
+//!     "alice".to_string(),
+//!     vec!["reader".to_string()],
+//!     "tenant-1".to_string(),
+//! ));
 //!
 //! // Application code never selects a tier:
-//! // get_or_fetch takes a closure that returns a future:
-//! // let value = manager.get_or_fetch(&"key", || async {
-//! //     /* fetch from origin */
-//! //     Ok("value".to_string())
-//! // }).await;
+//! let key = "my-key".to_string();
+//! let value = manager
+//!     .get_or_fetch(&key, &ctx, || async { Ok("value".to_string()) })
+//!     .await;
+//! # }
 //! ```
 //!
 //! ## Crate Layout
@@ -152,24 +188,30 @@
 //! | `src/entry` | Entry state, generation, cache entry |
 //! | `src/error` | Structured error types |
 //! | `src/identity` | Authentication context |
+//! | `src/key` | `Key` trait and `KeyRef` borrowed key view |
+//! | `src/pool` | `MemoryPool` fixed-capacity value allocator |
 
 pub mod control;
 pub mod entry;
 pub mod error;
 pub mod identity;
+pub mod key;
 pub mod manager;
 pub mod policy;
+pub mod pool;
 pub mod tier;
 
 pub use control::cachelito::Cachelito;
 pub use entry::{CacheEntry, EntryState, Generation};
 pub use error::CacheError;
-pub use identity::IdentityContext;
+pub use identity::{CacheContext, IdentityContext};
+pub use key::{Key, KeyRef};
 pub use manager::CacheManager;
 pub use policy::{
     CacheOperation, CachePolicy, CacheRequest, CacheState, DefaultPolicy, FailMode, PolicyDecision,
-    PopulationStrategy,
+    PopulationStrategy, StrictPolicy,
 };
+pub use pool::MemoryPool;
 pub use tier::{
     l0::L0Stub, l1::L1Stub, l2::L2Stub, l3::L3Stub, l4::L4Stub, l5::L5Stub, test::TestTier,
 };
