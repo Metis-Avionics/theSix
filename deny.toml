@@ -21,6 +21,10 @@ allow = [
 [advisories]
 # Fail on any known security advisory in the dependency tree.
 yanked = "deny"
+# `fxhash` (via sled) and `instant` (via sled -> parking_lot) are flagged as
+# unmaintained but carry no vulnerability and have no maintained drop-in for
+# sled 0.34. Flag unmaintained only for workspace crates, not transitive deps.
+unmaintained = "workspace"
 
 [bans]
 # Reject duplicate versions of the same crate where avoidable.

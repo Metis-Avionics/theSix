@@ -8,7 +8,6 @@
 )]
 #![allow(
     clippy::unused_async,
-    clippy::unused_async_trait_impl,
     clippy::missing_errors_doc,
     clippy::missing_panics_doc,
     clippy::must_use_candidate,
@@ -23,6 +22,9 @@
     clippy::match_same_arms,
     clippy::needless_as_bytes
 )]
+// This lint name differs across clippy versions; allow it without failing on
+// toolchains that pre-date it (CI pins an older clippy than some local builds).
+#![allow(unknown_lints, clippy::unused_async_trait_impl)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 //! # theSix
