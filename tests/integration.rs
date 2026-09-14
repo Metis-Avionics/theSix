@@ -70,14 +70,14 @@ async fn test_complete_six_tier_integration() {
     let manager = make_manager(DefaultPolicy);
 
     for i in 0..6 {
-        let key = format!("integration-key-{}", i);
+        let key = format!("{i}");
         manager
-            .set(&key, format!("value-{}", i), &test_ctx())
+            .set(&key, format!("{i}"), &test_ctx())
             .await
             .unwrap();
 
         let result = manager.get(&key, &test_ctx()).await.unwrap();
-        assert_eq!(result, Some(format!("value-{}", i)));
+        assert_eq!(result, Some(format!("{i}")));
     }
 
     manager

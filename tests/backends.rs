@@ -26,7 +26,8 @@ fn test_byte_value_roundtrip() {
 fn test_l4_sled_backend_get_set_remove() {
     use thesix::L4SledBackend;
 
-    let dir = std::env::temp_dir().join(format!("thesix-sled-{}", std::process::id()));
+    let pid = std::process::id();
+    let dir = std::env::temp_dir().join(format!("thesix-sled-{pid}"));
     let backend = L4SledBackend::<Vec<u8>>::open(&dir).expect("sled open");
 
     let key = KeyRef(b"sled-key".as_slice());

@@ -45,9 +45,7 @@ async fn test_concurrent_writer_readers() {
         let k = key.clone();
         handles.push(tokio::spawn(async move {
             if i % 3 == 0 {
-                m.set(&k, format!("value-{}", i), &test_ctx())
-                    .await
-                    .unwrap();
+                m.set(&k, format!("{i}"), &test_ctx()).await.unwrap();
             } else {
                 let _ = m.get(&k, &test_ctx()).await;
             }
@@ -67,7 +65,7 @@ async fn test_concurrent_unrelated_keys() {
     for i in 0..20 {
         let m = Arc::clone(&manager);
         handles.push(tokio::spawn(async move {
-            let key = format!("key-{}", i);
+            let key = format!("{i}");
             m.set(&key, i.to_string(), &test_ctx()).await.unwrap();
             let result = m.get(&key, &test_ctx()).await.unwrap();
             assert_eq!(result, Some(i.to_string()));
@@ -87,7 +85,8 @@ async fn test_shard_contention() {
     for i in 0..50 {
         let m = Arc::clone(&manager);
         handles.push(tokio::spawn(async move {
-            let key = format!("shard-key-{}", i % 4);
+            let shard_idx = i % 4;
+            let key = format!("shard-key-{shard_idx}");
             m.set(&key, i.to_string(), &test_ctx()).await.unwrap();
             let result = m.get(&key, &test_ctx()).await.unwrap();
             assert!(result.is_some());
