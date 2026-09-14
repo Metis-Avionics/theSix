@@ -201,6 +201,21 @@ impl DefaultPolicy {
         }
         TierId::from_usize(idx).unwrap_or(TierId::L5)
     }
+
+    /// Precedence 5 (latency): a tight latency budget prefers hotter tiers by
+    /// remaining where the base tier already is (hot). Documented as a no-further-
+    /// demotion guard: we never push *toward* origin when latency is constrained.
+    /// Precedence 6 (capacity): when the base tier reports no availability, fall
+    /// back toward the origin so the entry still lands somewhere writable.
+    fn capacity_fallback(start: crate::tier::TierId, state: &CacheState) -> crate::tier::TierId {
+        use crate::tier::TierId;
+        if state.tier != start || state.tier_health.availability > 0.0 {
+            return start;
+        }
+        // Base tier is full: move one step toward origin (bounded by tier count).
+        let next = (start.as_usize() + 1).min(TierId::L5.as_usize());
+        TierId::from_usize(next).unwrap_or(TierId::L5)
+    }
 }
 
 impl<K, V> CachePolicy<K, V> for DefaultPolicy {
@@ -220,6 +235,14 @@ impl<K, V> CachePolicy<K, V> for DefaultPolicy {
 
         // Precedence 2 (tier_health): route away from an open-circuit tier.
         decision.tier = Self::healthy_fallback(decision.tier, state);
+        // Precedence 6 (capacity): for writes only, if the chosen tier is full
+        // fall back toward origin so the entry still lands somewhere writable.
+        if matches!(
+            request.operation,
+            CacheOperation::Set | CacheOperation::Refresh
+        ) {
+            decision.tier = Self::capacity_fallback(decision.tier, state);
+        }
         decision
     }
 }

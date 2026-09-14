@@ -11,23 +11,28 @@ pub struct L3Stub<V> {
 }
 
 impl<V> L3Stub<V> {
-    #[allow(clippy::expect_used)]
+    /// Create the stub with default capacity.
+    ///
+    /// # Panics
+    /// Panics only on startup pool-allocation failure (the sanctioned init-time
+    /// failure mode). Use `with_capacity` for a fallible constructor.
+    #[allow(clippy::expect_used)] // sanctioned init-time failure mode
     pub fn new() -> Self {
-        Self::with_capacity(1024)
+        Self::with_capacity(1024).expect("stub init: pool allocation failed at startup")
     }
 
-    #[allow(clippy::expect_used)]
-    pub fn with_capacity(capacity: usize) -> Self {
-        L3Stub {
-            _pool: MemoryPool::new(capacity).expect("MemoryPool allocation failed"),
+    /// Fallible constructor. Returns `Err` on zero capacity or pool failure.
+    pub fn with_capacity(capacity: usize) -> Result<Self, crate::error::CacheError> {
+        Ok(L3Stub {
+            _pool: MemoryPool::new(capacity)?,
             _slots: vec![None; capacity],
-        }
+        })
     }
 }
 
 impl<V: Clone + Send + Sync + 'static> CacheTier<V> for L3Stub<V> {
     fn name(&self) -> String {
-        "L3-distributed".into()
+        "L3-X".into()
     }
 
     fn get(&self, _key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
@@ -56,6 +61,7 @@ impl<V: Clone + Send + Sync + 'static> CacheTier<V> for L3Stub<V> {
             consecutive_failures: 5,
             last_failure_timestamp: Some(std::time::SystemTime::now()),
             health_score: 0.0,
+            availability: 0.0,
         }
     }
 

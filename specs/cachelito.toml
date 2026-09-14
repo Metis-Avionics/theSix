@@ -4,7 +4,10 @@ role = "cache-control-plane"
 
 [storage]
 structure = "sharded-concurrent-map"
-implementation = "DashMap"
+implementation = "fixed-capacity sharded slot map"
+# DashMap was removed per TETANUS Rule 3: all control-plane storage is
+# pre-allocated at init; no heap allocation in hot paths after init.
+allocation_after_init = false
 
 [state]
 tracks_entry_state = true
@@ -12,7 +15,9 @@ tracks_generation = true
 tracks_tier = true
 tracks_population = true
 tracks_expiration = true
-tracks_tier_health = true
+tracks_tier_health = false
+# Tier health is tracked per-tier in TierRegistry (interior-mutable), not in
+# the control plane. The circuit breaker consults the registry.
 
 [entry_states]
 values = [

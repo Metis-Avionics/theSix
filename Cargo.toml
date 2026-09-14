@@ -43,17 +43,11 @@ criterion = "0.5"
 [features]
 default = []
 redis = ["dep:redis"]
-moka = ["dep:moka"]
 sled = ["dep:sled"]
 
 [dependencies.redis]
 version = "0.24"
 optional = true
-
-[dependencies.moka]
-version = "0.12"
-optional = true
-features = ["sync"]
 
 [dependencies.sled]
 version = "0.34"

@@ -28,19 +28,32 @@ impl Slot {
 }
 
 impl<V> FixedTierStub<V> {
-    #[allow(clippy::expect_used)]
+    /// Create a stub with default capacity.
+    ///
+    /// # Panics
+    /// Panics only if the process cannot allocate the fixed-capacity pool at
+    /// startup (allocation failure or zero default capacity). This is the
+    /// TETANUS-sanctioned init-time failure mode: construction is infallible
+    /// for valid configurations and only ever fails before any data-plane work.
+    /// Use [`FixedTierStub::with_capacity`] for a fallible constructor.
+    #[allow(clippy::expect_used)] // sanctioned init-time failure mode; see doc above
     pub fn new() -> Self {
         Self::with_capacity(DEFAULT_CAPACITY)
+            .expect("FixedTierStub init: pool allocation failed at startup")
     }
 
-    #[allow(clippy::expect_used)]
-    pub fn with_capacity(capacity: usize) -> Self {
-        let pool = MemoryPool::new(capacity).expect("MemoryPool allocation failed");
+    /// Fallible constructor. Returns `Err(CacheError::ConfigurationError)` when
+    /// `capacity` is zero, or propagates pool-allocation failure.
+    pub fn with_capacity(capacity: usize) -> Result<Self, CacheError> {
+        if capacity == 0 {
+            return Err(CacheError::ConfigurationError);
+        }
+        let pool = MemoryPool::new(capacity)?;
         let mut slots = Vec::with_capacity(capacity);
         for _ in 0..capacity {
             slots.push(None);
         }
-        FixedTierStub { pool, slots }
+        Ok(FixedTierStub { pool, slots })
     }
 
     fn hash_key(key: &KeyRef<'_>) -> u64 {
@@ -147,6 +160,7 @@ impl<V> FixedTierStub<V> {
         let hash = Self::hash_key(key);
         if let Some(idx) = self.find_slot(hash) {
             if let Some(slot) = self.slots[idx].take() {
+                // Slot index is always in-range here; dealloc cannot fail.
                 let _ = self.pool.deallocate(slot.pool_idx);
             }
         }
@@ -156,11 +170,5 @@ impl<V> FixedTierStub<V> {
     pub fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
         let hash = Self::hash_key(key);
         Ok(self.find_slot(hash).is_some())
-    }
-}
-
-impl<V> Default for FixedTierStub<V> {
-    fn default() -> Self {
-        Self::new()
     }
 }

@@ -53,9 +53,16 @@ pub struct TierRegistry {
 }
 
 impl TierRegistry {
-    #[allow(clippy::unwrap_used)]
     pub fn new() -> Self {
-        let tiers: Vec<TierId> = (0..6).map(|i| TierId::from_usize(i).unwrap()).collect();
+        // Fixed tier set; no fallible operation, so no unwrap is needed.
+        let tiers: Vec<TierId> = vec![
+            TierId::L0,
+            TierId::L1,
+            TierId::L2,
+            TierId::L3,
+            TierId::L4,
+            TierId::L5,
+        ];
         let health = (0..6)
             .map(|_| std::sync::RwLock::new(TierHealth::default()))
             .collect();
@@ -133,6 +140,8 @@ pub mod l3;
 pub mod l4;
 pub mod l5;
 pub mod test;
+
+pub mod backends;
 
 #[path = "trait.rs"]
 pub mod tier_trait;

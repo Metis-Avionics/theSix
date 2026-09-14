@@ -282,6 +282,7 @@ where
         let key_ref = Self::encode_key(key, &mut buf)?;
 
         for tier in &self.tiers {
+            // Best-effort: a tier may legitimately not hold the key.
             let _ = tier.remove(&key_ref);
         }
         self.cachelito.release(key_ref.0)?;
@@ -482,6 +483,7 @@ where
                     if matches!(e, CacheError::StaleGeneration) {
                         return Err(CacheError::StaleGeneration);
                     }
+                    // Record terminal failure; ignore a missing entry (already released).
                     let _ = self.cachelito.fail_with_error(key_ref.0, error_kind(e));
                     if decision.fail_mode == FailMode::Open {
                         return self.try_fallback_tier(key).await;

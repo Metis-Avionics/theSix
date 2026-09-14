@@ -359,6 +359,9 @@ impl Cachelito {
     }
 
     pub fn with_shards(shard_count: usize) -> Self {
+        // Rule 2/5: a zero shard count would cause modulo-by-zero in shard_for;
+        // clamp to at least one shard (invalid configuration made safe).
+        let shard_count = shard_count.max(1);
         let capacity_per_shard = DEFAULT_CAPACITY_PER_SHARD;
         let mut shards = Vec::with_capacity(shard_count);
         for _ in 0..shard_count {

@@ -16,10 +16,14 @@ pub struct TestTier<V> {
 }
 
 impl<V> TestTier<V> {
+    /// Test-only tier; construction is infallible (init-time allocation only).
+    #[allow(clippy::expect_used)] // sanctioned init-time failure mode; test-only tier
     pub fn new(tier_id: TierId) -> Self {
         TestTier {
             healthy: std::sync::Arc::new(AtomicBool::new(true)),
-            inner: Mutex::new(FixedTierStub::with_capacity(1024)),
+            // Init-time allocation with a fixed, non-zero capacity is infallible
+            // in practice; the panic-on-init-failure mode is the sanctioned one.
+            inner: Mutex::new(FixedTierStub::with_capacity(1024).expect("TestTier init")),
             tier_id,
             failure_count: std::sync::Arc::new(AtomicU64::new(0)),
         }
@@ -98,6 +102,7 @@ impl<V: Clone + Send + Sync + 'static> CacheTier<V> for TestTier<V> {
             } else {
                 (1.0_f64 - (failures as f64 * 0.1)).max(0.0_f64)
             },
+            availability: 1.0,
         }
     }
 

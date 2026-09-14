@@ -7,6 +7,11 @@ pub struct MemoryPool<V> {
 
 impl<V> MemoryPool<V> {
     pub fn new(capacity: usize) -> Result<Self, crate::error::CacheError> {
+        // Rule 7: validate parameters on entry. A zero-capacity pool would make
+        // every allocation fail; reject the misconfiguration explicitly.
+        if capacity == 0 {
+            return Err(crate::error::CacheError::ConfigurationError);
+        }
         let mut slots = Vec::with_capacity(capacity);
         let mut free_indices = Vec::with_capacity(capacity);
         for i in 0..capacity {

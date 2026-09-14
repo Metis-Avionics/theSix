@@ -1,4 +1,5 @@
 #![deny(warnings)]
+#![forbid(unsafe_code)]
 #![warn(
     clippy::pedantic,
     clippy::unwrap_used,
@@ -216,3 +217,9 @@ pub use tier::{
     l0::L0Stub, l1::L1Stub, l2::L2Stub, l3::L3Stub, l4::L4Stub, l5::L5Stub, test::TestTier,
 };
 pub use tier::{CacheTier, TierHealth, TierId, TierRegistry};
+
+#[cfg(feature = "redis")]
+pub use tier::backends::L3RedisBackend;
+#[cfg(feature = "sled")]
+pub use tier::backends::L4SledBackend;
+pub use tier::backends::{ByteValue, L5OriginBackend, OriginFetcher, OriginWriter};
