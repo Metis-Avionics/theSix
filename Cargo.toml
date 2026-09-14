@@ -16,6 +16,8 @@ exclude = [
     ".gitignore",
     ".github/**",
     "living.toml",
+    "AGENTS.md",
+    "deny.toml",
 ]
 
 keywords = [

@@ -1,5 +1,35 @@
 # CHANGELOG
 
+## v0.2.0 — 2026-09-14
+
+### Added
+- `CacheContext` builder carrying `IdentityContext` + optional TTL; threaded through all operations
+- `exists()` and `refresh()` (stale-while-revalidate) operations
+- `StrictPolicy` — authz-deny for anonymous mutating operations
+- TTL/expiration tracked in the control plane and tiers; lazy `Ready -> Stale` transition
+- Populate retry: max 3 attempts, exponential backoff, fail-open/closed honoured
+- `waiters_receive_population_error` via a control-plane error marker
+- `ByteValue` codec + real feature-gated backends: `L3RedisBackend`, `L4SledBackend` (persistent), `L5OriginBackend`
+- Policy precedence ladder (tier-health, capacity) and an `availability` signal on `TierHealth`
+- `deny.toml`; CI gates for `cargo deny`, `cargo machete`, `miri`, and `cargo publish --dry-run`
+
+### Changed
+- **BREAKING**: all `CacheManager` operations now take a `&CacheContext` (identity + TTL via builder)
+- `CacheError` is now `Copy`
+- `TierRegistry` is interior-mutable with real `fail`/`recover` wired to tier outcomes
+- `Cachelito` pre-allocates its control pool; DashMap removed (fixed-capacity sharded slot map)
+
+### Fixed
+- `Cachelito::acquire` CAS now claims from the actual entry state (Failed/Stale reclaimable for retry)
+- Populate tier now matches the policy decision waiters observe (fixes a waiter `Miss` regression)
+- Stale `lib.rs` doctest corrected; doc example compiles
+
+### Security
+- Real authn gate: unauthenticated requests rejected with `CacheError::Unauthenticated` pre-policy
+
+### Removed
+- DashMap dependency; dead `moka` feature
+
 ## v0.1.0 — 2026-09-13
 
 ### Added

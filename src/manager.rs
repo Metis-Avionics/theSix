@@ -97,32 +97,30 @@ where
 
     /// Resolve the policy decision for an operation using the caller's context,
     /// a fresh (absent) cache state, and no value.
+    /// Select from a fresh (absent) cache state.
     fn resolve(
         &self,
-        op: CacheOperation,
-        key: &K,
+        request: &CacheRequest<K, V>,
         ctx: &CacheContext,
-    ) -> Result<crate::policy::PolicyDecision, CacheError> {
-        let request = Self::request_for(op, key, ctx);
+    ) -> crate::policy::PolicyDecision {
         let state = CacheState::new();
-        Ok(self.policy.select(&request, &state, ctx.identity()))
+        self.policy.select(request, &state, ctx.identity())
     }
 
-    /// Resolve the policy decision against a real snapshot from the control
-    /// plane (used on the populate/hit paths).
+    /// Select against a real snapshot from the control plane (populate/hit paths).
     fn resolve_with_snapshot(
         &self,
-        op: CacheOperation,
-        key: &K,
+        request: &CacheRequest<K, V>,
         ctx: &CacheContext,
         snapshot: &ControlSnapshot,
-    ) -> Result<crate::policy::PolicyDecision, CacheError> {
-        let request = Self::request_for(op, key, ctx);
+    ) -> crate::policy::PolicyDecision {
         let health = self.tier_registry.tier_health(snapshot.tier);
         let state = CacheState::from_snapshot(snapshot, health);
-        Ok(self.policy.select(&request, &state, ctx.identity()))
+        self.policy.select(request, &state, ctx.identity())
     }
 
+    /// Build the operation's `CacheRequest` once (single key clone), reusing it
+    /// for every policy resolution in the operation.
     fn request_for(op: CacheOperation, key: &K, ctx: &CacheContext) -> CacheRequest<K, V> {
         let mut request = CacheRequest::new(op, key.clone());
         if let Some(ttl) = ctx.ttl() {
@@ -164,7 +162,8 @@ where
         let mut buf = [0u8; MAX_KEY_SIZE];
         let key_ref = Self::encode_key(key, &mut buf)?;
 
-        let decision = self.resolve(CacheOperation::Get, key, ctx)?;
+        let request = Self::request_for(CacheOperation::Get, key, ctx);
+        let decision = self.resolve(&request, ctx);
         Self::authorize(&decision)?;
 
         let snapshot = self.cachelito.acquire(key_ref.0, TierId::L0)?;
@@ -209,7 +208,8 @@ where
         let mut buf = [0u8; MAX_KEY_SIZE];
         let key_ref = Self::encode_key(key, &mut buf)?;
 
-        let decision = self.resolve(CacheOperation::Get, key, ctx)?;
+        let request = Self::request_for(CacheOperation::Get, key, ctx);
+        let decision = self.resolve(&request, ctx);
         Self::authorize(&decision)?;
 
         let snapshot = self.cachelito.acquire(key_ref.0, TierId::L0)?;
@@ -246,7 +246,8 @@ where
         let key_ref = Self::encode_key(key, &mut buf)?;
 
         let snapshot = self.cachelito.acquire(key_ref.0, TierId::L0)?;
-        let decision = self.resolve_with_snapshot(CacheOperation::Set, key, ctx, &snapshot)?;
+        let request = Self::request_for(CacheOperation::Set, key, ctx);
+        let decision = self.resolve_with_snapshot(&request, ctx, &snapshot);
         Self::authorize(&decision)?;
 
         let tier = self.tier_for(&decision.tier);
@@ -264,7 +265,8 @@ where
 
     pub async fn invalidate(&self, key: &K, ctx: &CacheContext) -> Result<(), CacheError> {
         Self::check_auth(ctx)?;
-        let decision = self.resolve(CacheOperation::Invalidate, key, ctx)?;
+        let request = Self::request_for(CacheOperation::Invalidate, key, ctx);
+        let decision = self.resolve(&request, ctx);
         Self::authorize(&decision)?;
 
         let mut buf = [0u8; MAX_KEY_SIZE];
@@ -275,7 +277,8 @@ where
 
     pub async fn remove(&self, key: &K, ctx: &CacheContext) -> Result<(), CacheError> {
         Self::check_auth(ctx)?;
-        let decision = self.resolve(CacheOperation::Remove, key, ctx)?;
+        let request = Self::request_for(CacheOperation::Remove, key, ctx);
+        let decision = self.resolve(&request, ctx);
         Self::authorize(&decision)?;
 
         let mut buf = [0u8; MAX_KEY_SIZE];
@@ -291,7 +294,8 @@ where
 
     pub async fn exists(&self, key: &K, ctx: &CacheContext) -> Result<bool, CacheError> {
         Self::check_auth(ctx)?;
-        let decision = self.resolve(CacheOperation::Exists, key, ctx)?;
+        let request = Self::request_for(CacheOperation::Exists, key, ctx);
+        let decision = self.resolve(&request, ctx);
         Self::authorize(&decision)?;
 
         let mut buf = [0u8; MAX_KEY_SIZE];
@@ -319,7 +323,8 @@ where
 
         let mut buf = [0u8; MAX_KEY_SIZE];
         let key_ref = Self::encode_key(key, &mut buf)?;
-        let decision = self.resolve(CacheOperation::Refresh, key, ctx)?;
+        let request = Self::request_for(CacheOperation::Refresh, key, ctx);
+        let decision = self.resolve(&request, ctx);
         Self::authorize(&decision)?;
 
         let snapshot = self.cachelito.acquire(key_ref.0, TierId::L0)?;
@@ -341,7 +346,8 @@ where
 
     pub async fn promote(&self, key: &K, ctx: &CacheContext) -> Result<(), CacheError> {
         Self::check_auth(ctx)?;
-        let decision = self.resolve(CacheOperation::Promote, key, ctx)?;
+        let request = Self::request_for(CacheOperation::Promote, key, ctx);
+        let decision = self.resolve(&request, ctx);
         Self::authorize(&decision)?;
 
         let mut buf = [0u8; MAX_KEY_SIZE];
@@ -362,7 +368,8 @@ where
 
     pub async fn demote(&self, key: &K, ctx: &CacheContext) -> Result<(), CacheError> {
         Self::check_auth(ctx)?;
-        let decision = self.resolve(CacheOperation::Demote, key, ctx)?;
+        let request = Self::request_for(CacheOperation::Demote, key, ctx);
+        let decision = self.resolve(&request, ctx);
         Self::authorize(&decision)?;
 
         let mut buf = [0u8; MAX_KEY_SIZE];
