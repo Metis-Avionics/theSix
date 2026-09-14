@@ -18,6 +18,7 @@
 - `CacheError` is now `Copy`
 - `TierRegistry` is interior-mutable with real `fail`/`recover` wired to tier outcomes
 - `Cachelito` pre-allocates its control pool; DashMap removed (fixed-capacity sharded slot map)
+- Edition 2021 -> 2024; MSRV 1.88 -> 1.98 (`gen` renamed — reserved keyword in edition 2024)
 
 ### Fixed
 - `Cachelito::acquire` CAS now claims from the actual entry state (Failed/Stale reclaimable for retry)
