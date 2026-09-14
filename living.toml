@@ -1,7 +1,7 @@
 [handover]
 status = "complete"
 phase = "spec_complete_pr_open"
-last_updated = "2026-09-14T00:00:00+01:00"
+last_updated = "2026-09-14T08:26:23+01:00"
 
 summary = """
 Full spec completion + TETANUS compliance on PR #1 (branch implement-thesix). All spec'd operations implemented (get, get_or_fetch, set, invalidate, remove, promote, demote, exists, refresh). Identity flows via a CacheContext builder carrying IdentityContext + TTL. Real authn gate (Unauthenticated) + policy authz on all mutating ops (StrictPolicy denies anonymous writes; DefaultPolicy is the permissive baseline). Control plane tracks expiration (TTL) with lazy Ready->Stale expiry. Population: single-owner, in-place fetch retry (max 3, exponential backoff), fail-open/closed honoured, waiters receive the owner's terminal error. Real feature-gated backends: L3 redis, L4 sled (persistent), L5 origin-fallback over a ByteValue codec. All quality gates pass locally including cargo deny + cargo machete.
@@ -39,7 +39,7 @@ tasks = [
 
 [session]
 start = "2026-09-14T00:00:00+01:00"
-end = "2026-09-14T00:00:00+01:00"
+end = "2026-09-14T08:26:23+01:00"
 agent = "opencode"
 type = "spec_completion_and_tetanus_hardening"
 summary = """
