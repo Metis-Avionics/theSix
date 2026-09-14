@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use crate::error::CacheError;
 use crate::key::KeyRef;
+use crate::tier::TierId;
 use crate::tier::backends::ByteValue;
 use crate::tier::tier_trait::{CacheTier, TierHealth};
-use crate::tier::TierId;
 
 /// Fetches a value from the origin for a key. Returns `Ok(None)` on a
 /// genuine absence, `Err` on an origin failure.

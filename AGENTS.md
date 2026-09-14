@@ -122,7 +122,7 @@ Optional backend features `redis` and `sled` are implemented (see Real Backends)
 
 ## CI
 
-`.github/workflows/ci.yml` runs on push/PR to `main` (Rust 1.75). Jobs: fmt, check, test (incl. doctest), clippy `-D warnings`, doc, package + publish-dry-run, plus TETANUS static-analysis gates: cargo-deny, cargo-machete, miri (no-op; `#![forbid(unsafe_code)]`).
+`.github/workflows/ci.yml` runs on push/PR to `main` (Rust 1.98). Jobs: fmt, check, test (incl. doctest), clippy `-D warnings`, doc, package + publish-dry-run, plus TETANUS static-analysis gates: cargo-deny, cargo-machete, miri (no-op; `#![forbid(unsafe_code)]`).
 
 ## Important Constraints
 
@@ -137,7 +137,7 @@ Optional backend features `redis` and `sled` are implemented (see Real Backends)
 
 ## Repository Config
 
-- Edition: **2021** (README mentions 2024 but Cargo rejects it due to `rust-version = "1.75"` mismatch)
-- Rust toolchain: 1.75
+- Edition: **2024**
+- Rust toolchain / MSRV: **1.98**
 - No `kilo.json` at repo root (Kilo config is in `.kilo/` directory)
 - `living.toml` tracks handover/session/changelog state

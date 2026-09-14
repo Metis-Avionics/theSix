@@ -1,8 +1,8 @@
 use crate::error::CacheError;
 use crate::key::KeyRef;
 use crate::pool::MemoryPool;
-use crate::tier::tier_trait::{CacheTier, TierHealth};
 use crate::tier::TierId;
+use crate::tier::tier_trait::{CacheTier, TierHealth};
 
 #[derive(Debug)]
 pub struct L4Stub<V> {

@@ -11,9 +11,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::CacheError;
 use crate::key::KeyRef;
+use crate::tier::TierId;
 use crate::tier::backends::ByteValue;
 use crate::tier::tier_trait::{CacheTier, TierHealth};
-use crate::tier::TierId;
 
 const NO_EXPIRY: u64 = 0;
 const PREFIX_LEN: usize = 8;

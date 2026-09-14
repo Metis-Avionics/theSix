@@ -431,7 +431,7 @@ For crates.io, I'd keep the actual package lean.
 name = "thesix"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.XX"
+rust-version = "1.98"
 
 description = "Policy-driven six-tier cache orchestration for Rust"
 license = "MIT"

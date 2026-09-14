@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use std::sync::Arc;
 
 use thesix::{

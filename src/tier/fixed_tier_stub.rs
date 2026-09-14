@@ -116,10 +116,10 @@ impl<V> FixedTierStub<V> {
         V: Clone,
     {
         let hash = Self::hash_key(key);
-        if let Some(idx) = self.find_slot(hash) {
-            if let Some(slot) = self.slots[idx] {
-                return Ok(self.pool.get(slot.pool_idx).cloned());
-            }
+        if let Some(idx) = self.find_slot(hash)
+            && let Some(slot) = self.slots[idx]
+        {
+            return Ok(self.pool.get(slot.pool_idx).cloned());
         }
         Ok(None)
     }
@@ -158,11 +158,11 @@ impl<V> FixedTierStub<V> {
 
     pub fn remove(&mut self, key: &KeyRef<'_>) -> Result<(), CacheError> {
         let hash = Self::hash_key(key);
-        if let Some(idx) = self.find_slot(hash) {
-            if let Some(slot) = self.slots[idx].take() {
-                // Slot index is always in-range here; dealloc cannot fail.
-                let _ = self.pool.deallocate(slot.pool_idx);
-            }
+        if let Some(idx) = self.find_slot(hash)
+            && let Some(slot) = self.slots[idx].take()
+        {
+            // Slot index is always in-range here; dealloc cannot fail.
+            let _ = self.pool.deallocate(slot.pool_idx);
         }
         Ok(())
     }

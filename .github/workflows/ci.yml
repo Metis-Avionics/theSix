@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  RUST_TOOLCHAIN: '1.88'
+  RUST_TOOLCHAIN: '1.98'
 
 jobs:
   fmt:

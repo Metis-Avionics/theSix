@@ -10,9 +10,9 @@ use redis::Commands;
 
 use crate::error::CacheError;
 use crate::key::KeyRef;
+use crate::tier::TierId;
 use crate::tier::backends::ByteValue;
 use crate::tier::tier_trait::{CacheTier, TierHealth};
-use crate::tier::TierId;
 
 pub struct L3RedisBackend<V> {
     conn: Mutex<redis::Connection>,

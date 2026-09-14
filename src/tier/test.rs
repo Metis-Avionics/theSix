@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::CacheError;
 use crate::key::KeyRef;
+use crate::tier::TierId;
 use crate::tier::fixed_tier_stub::FixedTierStub;
 use crate::tier::tier_trait::{CacheTier, TierHealth};
-use crate::tier::TierId;
 
 #[derive(Debug)]
 pub struct TestTier<V> {

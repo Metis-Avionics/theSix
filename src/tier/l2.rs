@@ -1,8 +1,8 @@
 use std::sync::Mutex;
 
+use crate::tier::TierId;
 use crate::tier::fixed_tier_stub::FixedTierStub;
 use crate::tier::tier_trait::{CacheTier, TierHealth};
-use crate::tier::TierId;
 
 #[derive(Debug)]
 pub struct L2Stub<V> {

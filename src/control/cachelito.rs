@@ -6,8 +6,8 @@ use tokio::sync::Notify;
 
 use crate::entry::{EntryState, Generation};
 use crate::error::CacheError;
-use crate::tier::tier_trait::TierHealth;
 use crate::tier::TierId;
+use crate::tier::tier_trait::TierHealth;
 
 const DEFAULT_SHARD_COUNT: usize = 16;
 const DEFAULT_CAPACITY_PER_SHARD: usize = 1024;
@@ -110,9 +110,9 @@ impl ControlEntry {
         Generation::new(self.generation.load(std::sync::atomic::Ordering::Acquire))
     }
 
-    pub fn set_generation(&self, gen: Generation) {
+    pub fn set_generation(&self, generation: Generation) {
         self.generation
-            .store(gen.0, std::sync::atomic::Ordering::Release);
+            .store(generation.0, std::sync::atomic::Ordering::Release);
     }
 
     pub fn increment_generation(&self) -> Generation {

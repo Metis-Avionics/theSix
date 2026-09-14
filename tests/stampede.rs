@@ -1,8 +1,8 @@
 #![allow(unused_imports, dead_code, unused_variables)]
 mod common;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use thesix::{
@@ -46,14 +46,12 @@ async fn test_100_concurrent_requests_one_missing_key() {
         let fc = fetch_count.clone();
         let k = key.clone();
         handles.push(tokio::spawn(async move {
-            let result = m
-                .get_or_fetch(&k, &test_ctx(), || async {
-                    fc.fetch_add(1, Ordering::SeqCst);
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    Ok("burst-value".to_string())
-                })
-                .await;
-            result
+            m.get_or_fetch(&k, &test_ctx(), || async {
+                fc.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                Ok("burst-value".to_string())
+            })
+            .await
         }));
     }
 
@@ -99,7 +97,6 @@ async fn test_owner_cancellation() {
     let key = "cancel-key".to_string();
 
     let key_bytes = b"cancel-key".to_vec();
-    let gen = Generation::new(1);
     manager
         .cachelito()
         .set_generation(&key_bytes, Generation::new(1))
