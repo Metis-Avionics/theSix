@@ -1,6 +1,6 @@
 [handover]
 status = "complete"
-phase = "merged"
+phase = "merged_ci_green"
 last_updated = "2026-09-14T08:26:23+01:00"
 
 summary = """
@@ -29,9 +29,9 @@ decisions = [
 blockers = []
 
 [handover.next_agent]
-focus = "PR #1 merged; verify CI run on main is green"
+focus = "Complete; PR #1 merged and CI green on main"
 tasks = [
-    "Confirm the CI run on the main merge commit is green (fmt, check, test, clippy, doc, package, publish-dry-run, deny, machete, miri)",
+    "Confirmed: CI on main is green across all jobs (fmt, check, test, clippy, doc, package, deny, machete, miri). MSRV set to 1.88.",
 ]
 
 [session]
