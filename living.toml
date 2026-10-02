@@ -1,29 +1,53 @@
 [handover]
-status = "complete"
-phase = "merged_ci_green"
-last_updated = "2026-09-14T10:09:13+01:00"
+status = "pr_open"
+phase = "v1_tier_capability"
+last_updated = "2026-10-02T00:00:00+01:00"
 
 summary = """
-Full spec completion + TETANUS compliance on PR #1 (branch implement-thesix). All spec'd operations implemented (get, get_or_fetch, set, invalidate, remove, promote, demote, exists, refresh). Identity flows via a CacheContext builder carrying IdentityContext + TTL. Real authn gate (Unauthenticated) + policy authz on all mutating ops (StrictPolicy denies anonymous writes; DefaultPolicy is the permissive baseline). Control plane tracks expiration (TTL) with lazy Ready->Stale expiry. Population: single-owner, in-place fetch retry (max 3, exponential backoff), fail-open/closed honoured, waiters receive the owner's terminal error. Real feature-gated backends: L3 redis, L4 sled (persistent), L5 origin-fallback over a ByteValue codec. All quality gates pass locally including cargo deny + cargo machete.
+1.0.0: the data plane can finally host real I/O backends, and a consumer can
+find out what it has. Four defects made 0.2.3 misleading in ways its own docs
+denied, and all four are now fixed at the source rather than documented around.
+
+The trait was synchronous while every real backend is I/O, so Postgres, Neo4j,
+HelixDB, RocksDB and Oxigraph could only be reached by blocking inside a sync
+method - which deadlocks on a runtime thread. CacheTier is now async; the
+control plane deliberately stays synchronous.
+
+There was no way to ask what a tier was bound to. A consumer discovered it by
+issuing an operation and receiving TierUnavailable, which is indistinguishable
+between not-compiled-in, bound-but-down, and never-implemented - three
+conditions needing three different responses. BackendKind and
+CacheManager::capabilities() answer it up front, and a tier that is not bound
+now reports Unavailable instead of silently handing back L0's data.
+
+L3, L4 and L5 returned Err(TierUnavailable) on EVERY operation, so a default
+six-rung manager permanently failed on its upper three rungs, while AGENTS.md
+claimed tier stubs L0-L5 all wrap FixedTierStub. They now store values and
+report themselves as InMemoryFallback - working, but never passable off as the
+distributed or durable rung they nominally are.
+
+L6 exists as the authority tier (Postgres + pgvector intended) and is excluded
+from the cache ladder by a named bound rather than by L5.as_usize() appearing
+in three places. put_never_writes_l6_authority and invalidate_skips_l6_authority
+are tripwired here, not only in the consuming project.
 """
 
 remaining = [
-    "Nothing pending. Published thesix v0.2.0, v0.2.1, v0.2.2, v0.2.3 to crates.io (registry default 0.2.3). Optional follow-up (v0.3): async-native backends; richer capacity/latency telemetry for the policy ladder",
+    "Postgres/pgvector, Neo4j and HelixDB backends. Each needs a live service to verify; an unrunnable tier in a cache library is a liability, so they follow once there is something to test against.",
+    "RocksDB at L4 was proposed and NOT admitted: it compiles RocksDB's C++ and would pull cmake/clang and bindgen into a stock-toolchain crate, making every --all-features CI run a native compile.",
+    "Moka as a concurrent in-memory tier (previously a dead feature, removed in 0.2.0). The sharded stubs remove the coarse lock; Moka would add a dependency for a better constant factor. Optional.",
 ]
 
 decisions = [
-    "Rule 3 boundary: control-plane + tier storage pre-allocated at init (MemoryPool + slot maps); data plane stores payloads",
-    "KeyRef<'a> + Key trait replace ad-hoc Vec<u8>; callers encode keys via a stack buffer (no per-byte alloc)",
-    "Identity via CacheContext builder (CacheContext::new(IdentityContext).with_ttl(..)); applications build once per request",
-    "DefaultPolicy is permissive; StrictPolicy enforces authz-deny for anonymous mutations (spec precedence 4)",
-    "Populate owns the entry once; fetch is retried in place (no re-acquire churn); fail_open -> try_fallback_tier",
-    "Failed/Stale entries are claimable (retry_after_failure); publish validates generation, releases to Ready",
-    "Waiters receive the owner's terminal error via a control-plane error marker (waiters_receive_population_error)",
-    "TTL measured from publish time; Ready entries lazily transition to Stale on expiry; tiers also store TTL (sled) or native EX (redis)",
-    "Real backends gate behind features and require V: ByteValue; core CacheTier<V> unchanged",
-    "moka feature removed as dead (Rule 8 cfg discipline); cargo-deny/machete/miri added to CI",
-    "#![forbid(unsafe_code)] declared; crate has zero unsafe (miri is a no-op guard)",
-    "Infallible tier new() constructors panic only on startup pool-allocation failure (sanctioned init mode); with_capacity() is fallible",
+    "CacheTier is async via #[async_trait], not native AFIT: the trait is held as Arc<dyn CacheTier<V>> and AFIT is not dyn-compatible",
+    "The control plane stays SYNCHRONOUS. Cachelito is a pre-allocated sharded slot map whose acquire() returns an owned ControlSnapshot, so no shard guard is alive across an await. tests/await_safety.rs proves it rather than asserting it, and a companion test proves the watchdog would notice a block",
+    "DashMap rejected for the control plane and for tier storage: it allocates after init (Rule 3) and its caller-chosen guard lifetime deadlocks a shard when held across an await - which is precisely the pattern the async trait makes possible",
+    "L3/L4/L5 became working in-memory fallbacks rather than error returns, and report BackendKind::InMemoryFallback so a stand-in can never read as the tier it substitutes for",
+    "A capability report must correspond to working behaviour. An intermediate version reported InMemoryFallback for tiers that still refused everything; reported_fallbacks_actually_store now drives a round-trip through each upper rung",
+    "CacheTier::backend() is REQUIRED in 1.0 rather than defaulted: a tier that cannot say what it is cannot be reported on",
+    "L6 is authority, excluded from the ladder via a named policy::LAST_CACHE_TIER, and enforced by tripwires upstream as well as downstream",
+    "Values travel through the Oxigraph backend as hex, not String::from_utf8_lossy: the lossy path replaced every invalid byte with U+FFFD and corrupted binary payloads silently",
+    "A poisoned-shard handler exists but is unreachable through the public API, because every guard is scoped inside a method and released before returning. Recorded rather than asserted",
 ]
 
 blockers = []
@@ -110,8 +134,8 @@ tests_passing = [
 ]
 
 [changelog]
-version = "0.2.3"
-date = "2026-09-14"
+version = "1.0.0"
+date = "2026-10-02"
 entries = [
     { type = "added", description = "CacheContext builder carrying IdentityContext + optional TTL", scope = "src/identity.rs" },
     { type = "added", description = "exists() and refresh() (stale-while-revalidate) operations", scope = "src/manager.rs" },

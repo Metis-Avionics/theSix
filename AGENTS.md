@@ -66,7 +66,7 @@ src/
 └── pool.rs             # MemoryPool fixed-capacity allocator
 ```
 
-**Note**: `src/control.rs` and `src/tier.rs` do NOT exist — modules are in `mod.rs` and subdirectories. `src/metrics.rs` also does not exist (listed in README but not implemented).
+**Note**: `src/control.rs` and `src/tier.rs` do NOT exist — modules are in `mod.rs` and subdirectories. `src/metrics.rs` also does not exist. This line previously claimed it was "listed in README"; it was not, so that cross-reference was itself the rot.
 
 ## Key Types
 
@@ -94,21 +94,49 @@ Policies: `DefaultPolicy` (permissive baseline) and `StrictPolicy` (denies anony
 
 **Admin/test-only** (not part of the data-plane API):
 - `CacheManager::tier(&TierId)` — returns `Arc<dyn CacheTier<V>>` for test/admin access
+- `CacheManager::capabilities()` — what each rung is actually bound to
+- `CacheManager::has_tier(&TierId)` — distinguishes "bound" from "substituted" (`tier_for` returns L0 for an unbound id)
 - `CacheManager::cachelito()` — returns `&Cachelito` for test access
 - `CacheManager::with_timeout(policy, cachelito, registry, tiers, pool, duration)` — custom wait timeout
 
 ## Real Backends (feature-gated)
 
-In addition to in-memory stubs, real backends exist behind features and require `V: ByteValue`:
+In addition to the in-memory tiers, real backends exist behind features and require `V: ByteValue`:
 - `L3RedisBackend` (`feature = "redis"`) — distributed, sync connection
 - `L4SledBackend` (`feature = "sled"`) — persistent, embedded sled; stores TTL prefix + lazy eviction
 - `L5OriginBackend` — origin-fallback via pluggable `OriginFetcher`/`OriginWriter` callbacks
+- `L5OxigraphBackend` (`feature = "oxigraph"`) — RDF/SPO; one quad per entry, so entries are SPARQL-queryable. Built with `default-features = false` on purpose: oxigraph's default feature is `rocksdb`
 
-`moka` was removed as a dead feature; reintroduce when implemented. The core `CacheTier<V>` trait is unchanged (sync, `Clone + Send + Sync + 'static`).
+`moka` remains removed as a dead feature; reintroduce when implemented. The core `CacheTier<V>` trait is **async** as of 1.0 (`#[async_trait]`) and still `Clone + Send + Sync + 'static`. Every real backend is I/O, so a sync trait could only reach one by blocking inside a sync method, which deadlocks on a runtime thread.
+
+### What is deliberately NOT here
+
+Postgres/pgvector, Neo4j and HelixDB are **not** implemented, and `rocksdb` is not a feature. Each of the first three needs a live service to verify, and a tier that cannot be run is a liability in a cache library. RocksDB would compile RocksDB's C++ and pull cmake/clang and bindgen into a stock-toolchain crate, turning every `--all-features` CI run into a native compile. `L4SledBackend` remains the persistent rung.
 
 ## Tier Stubs
 
-Tier stubs (L0-L5, TestTier) wrap `FixedTierStub` (fixed-capacity slot map). `new()` is infallible (panics only on startup pool-alloc failure — sanctioned init mode); `with_capacity(n)` is fallible and returns `Result` (rejects capacity 0).
+Stubs (L0-L2, TestTier) wrap a sharded fixed-capacity slot map; L3-L5 wrap the same
+thing as **fallbacks**. `new()` is infallible (panics only on startup pool-alloc
+failure — sanctioned init mode); `with_capacity(n)` is fallible and returns
+`Result` (rejects capacity 0).
+
+**L3/L4/L5 are fallbacks, not implementations of their tiers' contracts.** They
+store values, so the ladder works out of the box, and they report
+`BackendKind::InMemoryFallback` so they can never read as the distributed or
+durable rung they nominally are. `BackendKind::is_native()` is false for a
+fallback for exactly this reason. This doc previously claimed stubs L0-L5 all
+wrap `FixedTierStub` while the code had L3/L4/L5 return
+`Err(TierUnavailable)` on every operation.
+
+`L6` is the authority tier (Postgres + pgvector intended) and has no in-memory
+stub on purpose: an in-process L6 would be exactly the misrepresentation the
+capability surface exists to prevent.
+
+Storage is sharded across independently locked, pre-allocated tables keyed by a
+hash of the key — the same pattern `Cachelito` uses. One `Mutex` per tier
+serialised all access to L0. `DashMap` is rejected: it allocates after init
+(TETANUS Rule 3) and its caller-chosen guard lifetime deadlocks a shard when
+held across an `.await`, which the now-async tiers make possible.
 
 ## Test Patterns
 
@@ -118,7 +146,13 @@ Integration tests share a `make_manager()` helper pattern. Stampede tests use `m
 
 ## Crate Features
 
-Optional backend features `redis` and `sled` are implemented (see Real Backends). `moka` was removed as a dead feature. The default feature build is in-memory stubs only.
+Optional backend features `redis`, `sled` and `oxigraph` are implemented (see Real
+Backends). `moka` was removed as a dead feature. The default feature build is
+in-memory tiers only: L0-L2 in-memory, L3-L5 in-memory fallbacks, L6 unbound.
+
+`CacheManager::capabilities()` returns what every rung is actually bound to,
+including `BackendKind::Unavailable` for rungs that are not bound. Prefer it to
+inferring a backend from an operation's error.
 
 ## CI
 

@@ -23,7 +23,7 @@ No `manager.l3.get(...)`. That distinction is the whole point.
 
 ```toml
 [dependencies]
-thesix = "0.2.1"
+thesix = "1.0"
 ```
 
 Optional real backends (in-memory stubs are the default):
@@ -32,16 +32,38 @@ Optional real backends (in-memory stubs are the default):
 |---------|---------|-------|
 | `redis` | `L3RedisBackend` (distributed) | Synchronous client — call via `spawn_blocking` in async code |
 | `sled`  | `L4SledBackend` (persistent) | Embedded sled; TTL prefix + lazy eviction |
+| `oxigraph` | `L5OxigraphBackend` (RDF/SPO) | In-process store; one quad per entry, SPARQL-queryable. Uses `default-features = false` because oxigraph's default feature is `rocksdb` |
+
+Not implemented, deliberately: Postgres/pgvector, Neo4j and HelixDB. Each needs
+a live service to verify, and a tier that cannot be run is a liability in a cache
+library. `rocksdb` is not a feature for the same reason — it compiles RocksDB's
+C++ and would make every `--all-features` CI run a native compile.
 
 ```toml
-thesix = { version = "0.2.1", features = ["redis", "sled"] }
+thesix = { version = "1.0", features = ["redis", "sled", "oxigraph"] }
 ```
+
+### What is each tier bound to?
+
+A default build binds L0-L2 as in-memory tiers, L3-L5 as **in-memory fallbacks**,
+and leaves L6 unbound. Ask rather than infer:
+
+```rust,ignore
+let caps = manager.capabilities();
+assert!(!caps[&thesix::TierId::L3].is_shared()); // a fallback is not the distributed rung
+assert_eq!(caps[&thesix::TierId::L6], thesix::BackendKind::Unavailable); // not bound
+```
+
+Before 1.0 there was no way to ask. You found out by issuing an operation and
+catching `TierUnavailable`, which is indistinguishable between not-compiled-in,
+bound-but-down, and never-implemented.
 
 Backends store bytes, so values must implement `ByteValue` (`Vec<u8>` and
 `String` are provided; implement the two-method trait for your own types).
 
 **Requirements:** Rust 1.98+, edition 2024, Tokio runtime (the public API is
-`async`; the tier trait itself is synchronous by design).
+`async`; the tier trait is async as of 1.0, while the control plane stays
+synchronous).
 
 ## Quick start
 
