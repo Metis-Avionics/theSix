@@ -13,9 +13,9 @@ mod common;
 use std::sync::Arc;
 
 use thesix::{
-    CacheContext, CacheError, CacheManager, CacheTier, Cachelito, DefaultPolicy, KeyRef, L0Stub,
-    L1Stub, L2Stub, L3Stub, L4Stub, L5Stub, MemoryPool, StrictPolicy, TierHealth, TierId,
-    TierRegistry,
+    BackendKind, CacheContext, CacheError, CacheManager, CacheTier, Cachelito, DefaultPolicy,
+    KeyRef, L0Stub, L1Stub, L2Stub, L3Stub, L4Stub, L5Stub, MemoryPool, StrictPolicy, TierHealth,
+    TierId, TierRegistry,
 };
 
 use common::test_ctx;
@@ -31,6 +31,10 @@ struct RecordingTier {
 impl<V: Clone + Send + Sync + 'static> CacheTier<V> for RecordingTier {
     fn name(&self) -> String {
         format!("{}-recording", self.id)
+    }
+
+    fn backend(&self) -> BackendKind {
+        BackendKind::Test
     }
     async fn get(&self, _k: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
         Ok(None)

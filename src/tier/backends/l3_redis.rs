@@ -12,7 +12,7 @@ use crate::error::CacheError;
 use crate::key::KeyRef;
 use crate::tier::TierId;
 use crate::tier::backends::ByteValue;
-use crate::tier::tier_trait::{CacheTier, TierHealth};
+use crate::tier::tier_trait::{BackendKind, CacheTier, TierHealth};
 
 pub struct L3RedisBackend<V> {
     conn: Mutex<redis::Connection>,
@@ -81,6 +81,10 @@ impl<V: ByteValue> L3RedisBackend<V> {
 impl<V: ByteValue> CacheTier<V> for L3RedisBackend<V> {
     fn name(&self) -> String {
         "L3-redis-distributed".to_string()
+    }
+
+    fn backend(&self) -> BackendKind {
+        BackendKind::Redis
     }
 
     async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {

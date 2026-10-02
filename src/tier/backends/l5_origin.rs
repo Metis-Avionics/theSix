@@ -12,7 +12,7 @@ use crate::error::CacheError;
 use crate::key::KeyRef;
 use crate::tier::TierId;
 use crate::tier::backends::ByteValue;
-use crate::tier::tier_trait::{CacheTier, TierHealth};
+use crate::tier::tier_trait::{BackendKind, CacheTier, TierHealth};
 
 /// Fetches a value from the origin for a key. Returns `Ok(None)` on a
 /// genuine absence, `Err` on an origin failure.
@@ -72,6 +72,10 @@ impl<V: ByteValue> L5OriginBackend<V> {
 impl<V: ByteValue> CacheTier<V> for L5OriginBackend<V> {
     fn name(&self) -> String {
         "L5-origin-fallback".to_string()
+    }
+
+    fn backend(&self) -> BackendKind {
+        BackendKind::Origin
     }
 
     async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {

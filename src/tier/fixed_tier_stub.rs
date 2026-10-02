@@ -152,7 +152,10 @@ impl<V> FixedTierStub<V> {
             });
             Ok(())
         } else {
-            Err(CacheError::ConfigurationError)
+            // The slot table is full. That is a runtime condition under load,
+            // not a misconfiguration, so it gets its own variant rather than
+            // being reported as one.
+            Err(CacheError::CapacityExhausted)
         }
     }
 

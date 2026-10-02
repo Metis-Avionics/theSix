@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use crate::tier::TierId;
 use crate::tier::fixed_tier_stub::FixedTierStub;
-use crate::tier::tier_trait::{CacheTier, TierHealth};
+use crate::tier::tier_trait::{BackendKind, CacheTier, TierHealth};
 
 #[derive(Debug)]
 pub struct L1Stub<V> {
@@ -21,6 +21,10 @@ impl<V> L1Stub<V> {
 impl<V: Clone + Send + Sync + 'static> CacheTier<V> for L1Stub<V> {
     fn name(&self) -> String {
         "L1-hot-local".into()
+    }
+
+    fn backend(&self) -> BackendKind {
+        BackendKind::InMemory
     }
 
     async fn get(

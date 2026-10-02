@@ -13,7 +13,7 @@ use crate::error::CacheError;
 use crate::key::KeyRef;
 use crate::tier::TierId;
 use crate::tier::backends::ByteValue;
-use crate::tier::tier_trait::{CacheTier, TierHealth};
+use crate::tier::tier_trait::{BackendKind, CacheTier, TierHealth};
 
 const NO_EXPIRY: u64 = 0;
 const PREFIX_LEN: usize = 8;
@@ -85,6 +85,10 @@ impl<V: ByteValue> L4SledBackend<V> {
 impl<V: ByteValue> CacheTier<V> for L4SledBackend<V> {
     fn name(&self) -> String {
         "L4-sled-persistent".to_string()
+    }
+
+    fn backend(&self) -> BackendKind {
+        BackendKind::Sled
     }
 
     async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {

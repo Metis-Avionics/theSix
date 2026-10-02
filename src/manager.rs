@@ -10,7 +10,7 @@ use crate::key::Key;
 use crate::key::KeyRef;
 use crate::policy::{CacheOperation, CachePolicy, CacheRequest, CacheState, FailMode};
 use crate::pool::MemoryPool;
-use crate::tier::tier_trait::CacheTier;
+use crate::tier::tier_trait::{BackendKind, CacheTier};
 use crate::tier::{TierId, TierRegistry};
 
 const MAX_KEY_SIZE: usize = 256;
@@ -444,6 +444,33 @@ where
             return self.tiers[0].clone();
         }
         self.tiers[idx].clone()
+    }
+
+    /// What every configured tier is actually bound to, keyed by tier id.
+    ///
+    /// This is the answer to the question that could previously only be
+    /// discovered by issuing an operation and catching `TierUnavailable`. A
+    /// caller can now fail fast at construction - refuse to start if the
+    /// distributed tier is really an in-memory fallback, say - instead of
+    /// discovering it on a live read path in production.
+    ///
+    /// Tiers that are not bound at all are reported as
+    /// [`BackendKind::Unavailable`], which is distinct from a bound tier whose
+    /// backend is merely down: the former is a build/config error, the latter a
+    /// runtime condition.
+    #[must_use]
+    pub fn capabilities(&self) -> std::collections::BTreeMap<TierId, BackendKind> {
+        TierId::ALL
+            .iter()
+            .map(|id| {
+                let kind = if self.has_tier(id) {
+                    self.tier_for(id).backend()
+                } else {
+                    BackendKind::Unavailable
+                };
+                (*id, kind)
+            })
+            .collect()
     }
 
     /// Whether `tier_id` is actually bound in this manager.

@@ -1,31 +1,50 @@
+use std::sync::Mutex;
+
 use crate::error::CacheError;
 use crate::key::KeyRef;
-use crate::pool::MemoryPool;
 use crate::tier::TierId;
-use crate::tier::tier_trait::{CacheTier, TierHealth};
+use crate::tier::fixed_tier_stub::FixedTierStub;
+use crate::tier::tier_trait::{BackendKind, CacheTier, TierHealth};
 
+/// A working stand-in for the distributed tier.
+///
+/// In 0.2.x this type refused every operation with
+/// `Err(CacheError::TierUnavailable)`, which made a default six-rung manager
+/// permanently fail on its upper three rungs. It now stores values in a
+/// `FixedTierStub` like `L0Stub`, so the ladder functions out of the box.
+///
+/// It reports `BackendKind::InMemoryFallback` rather than claiming the tier's
+/// real backend, and that is the whole point: it keeps reads and writes working
+/// while being explicit that this rung is process-local and not the shared or
+/// durable store the tier nominally is. Silently promoting a fallback to
+/// "distributed" is how a consumer ends up relying on cross-process sharing it
+/// does not have.
 #[derive(Debug)]
 pub struct L3Stub<V> {
-    _pool: MemoryPool<V>,
-    _slots: Vec<Option<(u64, usize)>>,
+    inner: Mutex<FixedTierStub<V>>,
 }
 
 impl<V> L3Stub<V> {
     /// Create the stub with default capacity.
     ///
     /// # Panics
-    /// Panics only on startup pool-allocation failure (the sanctioned init-time
-    /// failure mode). Use `with_capacity` for a fallible constructor.
-    #[allow(clippy::expect_used)] // sanctioned init-time failure mode
+    ///
+    /// Panics only if the process cannot allocate the fixed-capacity pool at
+    /// startup (allocation failure or zero default capacity). This is the
+    /// TETANUS-sanctioned init-time failure mode: construction is infallible for
+    /// valid configurations and only ever fails before any data-plane work.
+    /// Use [`L3Stub::with_capacity`] for a fallible constructor.
+    #[allow(clippy::expect_used)] // sanctioned init-time failure mode; see doc above
     pub fn new() -> Self {
-        Self::with_capacity(1024).expect("stub init: pool allocation failed at startup")
+        L3Stub {
+            inner: Mutex::new(FixedTierStub::new()),
+        }
     }
 
     /// Fallible constructor. Returns `Err` on zero capacity or pool failure.
-    pub fn with_capacity(capacity: usize) -> Result<Self, crate::error::CacheError> {
+    pub fn with_capacity(capacity: usize) -> Result<Self, CacheError> {
         Ok(L3Stub {
-            _pool: MemoryPool::new(capacity)?,
-            _slots: vec![None; capacity],
+            inner: Mutex::new(FixedTierStub::with_capacity(capacity)?),
         })
     }
 }
@@ -33,37 +52,51 @@ impl<V> L3Stub<V> {
 #[async_trait::async_trait]
 impl<V: Clone + Send + Sync + 'static> CacheTier<V> for L3Stub<V> {
     fn name(&self) -> String {
-        "L3-X".into()
+        "L3-in-memory-fallback".into()
     }
 
-    async fn get(&self, _key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
-        Err(CacheError::TierUnavailable)
+    fn backend(&self) -> BackendKind {
+        BackendKind::InMemoryFallback
+    }
+
+    async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
+        self.inner
+            .lock()
+            .map_err(|_| CacheError::ConfigurationError)?
+            .get(key)
     }
 
     async fn set(
         &self,
-        _key: &KeyRef<'_>,
-        _value: V,
-        _ttl: Option<std::time::Duration>,
+        key: &KeyRef<'_>,
+        value: V,
+        ttl: Option<std::time::Duration>,
     ) -> Result<(), CacheError> {
-        Err(CacheError::TierUnavailable)
+        self.inner
+            .lock()
+            .map_err(|_| CacheError::ConfigurationError)?
+            .set(key, value, ttl)
     }
 
-    async fn remove(&self, _key: &KeyRef<'_>) -> Result<(), CacheError> {
-        Err(CacheError::TierUnavailable)
+    async fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError> {
+        self.inner
+            .lock()
+            .map_err(|_| CacheError::ConfigurationError)?
+            .remove(key)
     }
 
-    async fn contains(&self, _key: &KeyRef<'_>) -> Result<bool, CacheError> {
-        Err(CacheError::TierUnavailable)
+    async fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
+        self.inner
+            .lock()
+            .map_err(|_| CacheError::ConfigurationError)?
+            .contains(key)
     }
 
     fn health(&self) -> TierHealth {
-        TierHealth {
-            consecutive_failures: 5,
-            last_failure_timestamp: Some(std::time::SystemTime::now()),
-            health_score: 0.0,
-            availability: 0.0,
-        }
+        // Honest: a fallback holds in-process state with a fixed capacity, so it
+        // is neither shared nor durable, and it reports healthy because it is
+        // genuinely usable - just not what the tier nominally promises.
+        TierHealth::default()
     }
 
     fn tier_id(&self) -> TierId {

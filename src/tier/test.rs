@@ -5,7 +5,7 @@ use crate::error::CacheError;
 use crate::key::KeyRef;
 use crate::tier::TierId;
 use crate::tier::fixed_tier_stub::FixedTierStub;
-use crate::tier::tier_trait::{CacheTier, TierHealth};
+use crate::tier::tier_trait::{BackendKind, CacheTier, TierHealth};
 
 #[derive(Debug)]
 pub struct TestTier<V> {
@@ -38,6 +38,10 @@ impl<V> TestTier<V> {
 impl<V: Clone + Send + Sync + 'static> CacheTier<V> for TestTier<V> {
     fn name(&self) -> String {
         format!("test-{:?}", self.tier_id)
+    }
+
+    fn backend(&self) -> BackendKind {
+        BackendKind::Test
     }
 
     async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {

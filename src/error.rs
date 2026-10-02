@@ -34,4 +34,12 @@ pub enum CacheError {
 
     #[error("configuration error")]
     ConfigurationError,
+    /// A fixed-capacity tier is full.
+    ///
+    /// Was reported as `ConfigurationError`, which is a category error: a full
+    /// table is a runtime condition reached under load, not a misconfiguration,
+    /// and a caller reacting to it as the latter will treat a busy cache as a
+    /// fatal deployment fault.
+    #[error("tier capacity exhausted")]
+    CapacityExhausted,
 }

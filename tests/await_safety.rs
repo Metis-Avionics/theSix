@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use thesix::{
-    CacheContext, CacheError, CacheManager, CacheTier, Cachelito, DefaultPolicy, IdentityContext,
-    KeyRef, MemoryPool, TierHealth, TierId, TierRegistry,
+    BackendKind, CacheContext, CacheError, CacheManager, CacheTier, Cachelito, DefaultPolicy,
+    IdentityContext, KeyRef, MemoryPool, TierHealth, TierId, TierRegistry,
 };
 
 /// A tier whose reads park forever until released. It is the "I/O that never
@@ -29,6 +29,10 @@ struct HangingTier {
 impl<V: Clone + Send + Sync + 'static> CacheTier<V> for HangingTier {
     fn name(&self) -> String {
         format!("{}-hanging", self.id)
+    }
+
+    fn backend(&self) -> BackendKind {
+        BackendKind::Unavailable
     }
 
     async fn get(&self, _key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {

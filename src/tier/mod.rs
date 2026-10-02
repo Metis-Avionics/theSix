@@ -13,6 +13,18 @@ pub enum TierId {
 }
 
 impl TierId {
+    /// Every rung, in ladder order. `capabilities()` iterates this so a new
+    /// rung cannot be forgotten by a hand-written list.
+    pub const ALL: [TierId; 7] = [
+        TierId::L0,
+        TierId::L1,
+        TierId::L2,
+        TierId::L3,
+        TierId::L4,
+        TierId::L5,
+        TierId::L6,
+    ];
+
     pub fn as_usize(&self) -> usize {
         match self {
             TierId::L0 => 0,
@@ -156,4 +168,4 @@ pub mod backends;
 #[path = "trait.rs"]
 pub mod tier_trait;
 
-pub use tier_trait::{CacheTier, TierHealth};
+pub use tier_trait::{BackendKind, CacheTier, TierHealth};
