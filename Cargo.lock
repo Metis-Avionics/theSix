@@ -3006,6 +3006,7 @@ dependencies = [
 name = "thesix"
 version = "0.2.3"
 dependencies = [
+ "async-trait",
  "criterion",
  "polars",
  "redis",

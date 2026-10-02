@@ -17,19 +17,23 @@ impl<V> L2Stub<V> {
     }
 }
 
+#[async_trait::async_trait]
 impl<V: Clone + Send + Sync + 'static> CacheTier<V> for L2Stub<V> {
     fn name(&self) -> String {
         "L2-local".into()
     }
 
-    fn get(&self, key: &crate::key::KeyRef<'_>) -> Result<Option<V>, crate::error::CacheError> {
+    async fn get(
+        &self,
+        key: &crate::key::KeyRef<'_>,
+    ) -> Result<Option<V>, crate::error::CacheError> {
         self.inner
             .lock()
             .map_err(|_| crate::error::CacheError::ConfigurationError)?
             .get(key)
     }
 
-    fn set(
+    async fn set(
         &self,
         key: &crate::key::KeyRef<'_>,
         value: V,
@@ -41,14 +45,17 @@ impl<V: Clone + Send + Sync + 'static> CacheTier<V> for L2Stub<V> {
             .set(key, value, ttl)
     }
 
-    fn remove(&self, key: &crate::key::KeyRef<'_>) -> Result<(), crate::error::CacheError> {
+    async fn remove(&self, key: &crate::key::KeyRef<'_>) -> Result<(), crate::error::CacheError> {
         self.inner
             .lock()
             .map_err(|_| crate::error::CacheError::ConfigurationError)?
             .remove(key)
     }
 
-    fn contains(&self, key: &crate::key::KeyRef<'_>) -> Result<bool, crate::error::CacheError> {
+    async fn contains(
+        &self,
+        key: &crate::key::KeyRef<'_>,
+    ) -> Result<bool, crate::error::CacheError> {
         self.inner
             .lock()
             .map_err(|_| crate::error::CacheError::ConfigurationError)?

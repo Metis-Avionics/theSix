@@ -30,16 +30,17 @@ impl<V> L4Stub<V> {
     }
 }
 
+#[async_trait::async_trait]
 impl<V: Clone + Send + Sync + 'static> CacheTier<V> for L4Stub<V> {
     fn name(&self) -> String {
         "L4-X".into()
     }
 
-    fn get(&self, _key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
+    async fn get(&self, _key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
         Err(CacheError::TierUnavailable)
     }
 
-    fn set(
+    async fn set(
         &self,
         _key: &KeyRef<'_>,
         _value: V,
@@ -48,11 +49,11 @@ impl<V: Clone + Send + Sync + 'static> CacheTier<V> for L4Stub<V> {
         Err(CacheError::TierUnavailable)
     }
 
-    fn remove(&self, _key: &KeyRef<'_>) -> Result<(), CacheError> {
+    async fn remove(&self, _key: &KeyRef<'_>) -> Result<(), CacheError> {
         Err(CacheError::TierUnavailable)
     }
 
-    fn contains(&self, _key: &KeyRef<'_>) -> Result<bool, CacheError> {
+    async fn contains(&self, _key: &KeyRef<'_>) -> Result<bool, CacheError> {
         Err(CacheError::TierUnavailable)
     }
 

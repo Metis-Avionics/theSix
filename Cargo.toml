@@ -37,6 +37,7 @@ categories = [
 [dependencies]
 tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread"] }
 thiserror = "2"
+async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

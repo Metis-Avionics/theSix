@@ -4,16 +4,46 @@ use crate::error::CacheError;
 use crate::key::KeyRef;
 use crate::tier::TierId;
 
+/// The data plane: a tier stores and retrieves values. It decides nothing.
+///
+/// Routing, authorization, single-flight ownership, generation and health live
+/// in the control plane (`Cachelito`), which stays synchronous. A tier must
+/// therefore never hold entry state, generation counters or population
+/// ownership — if a backend needs those, it is doing the control plane's job.
+///
+/// # Why these methods are `async`
+///
+/// Real backends are I/O: `Redis`, `Postgres`, `Neo4j`, `HelixDB`, `RocksDB` and `Oxigraph`
+/// all block or await. Before 1.0 this trait was synchronous, so those backends
+/// could only be reached by blocking inside a sync method — which deadlocks
+/// whenever the caller is already on a runtime thread. `CacheManager`'s own
+/// methods were already `async`, so this trait was the last synchronous edge in
+/// the data path.
+///
+/// The control plane stays sync deliberately: `Cachelito` is a pre-allocated
+/// sharded slot map (no `DashMap`, TETANUS Rule 3) whose `acquire()` returns an
+/// owned `ControlSnapshot`. Because the snapshot is owned, no shard guard is
+/// ever held across an `.await`. `tiers_and_await_safety` asserts that property
+/// rather than trusting it, since async-ing the tiers made it load-bearing.
+///
+/// `#[async_trait]` rather than native `async fn in trait`: this trait is used
+/// as `Arc<dyn CacheTier<V>>`, and native AFIT is not dyn-compatible.
+#[async_trait::async_trait]
 pub trait CacheTier<V>: Send + Sync {
     fn name(&self) -> String;
 
-    fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError>;
+    async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError>;
 
-    fn set(&self, key: &KeyRef<'_>, value: V, ttl: Option<Duration>) -> Result<(), CacheError>;
+    async fn set(
+        &self,
+        key: &KeyRef<'_>,
+        value: V,
+        ttl: Option<Duration>,
+    ) -> Result<(), CacheError>;
 
-    fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError>;
+    async fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError>;
 
-    fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError>;
+    async fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError>;
 
     fn health(&self) -> TierHealth;
 

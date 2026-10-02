@@ -81,12 +81,13 @@ impl<V: ByteValue> L4SledBackend<V> {
     }
 }
 
+#[async_trait::async_trait]
 impl<V: ByteValue> CacheTier<V> for L4SledBackend<V> {
     fn name(&self) -> String {
         "L4-sled-persistent".to_string()
     }
 
-    fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
+    async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
         let result = self.tree.get(key.0);
         match result {
             Ok(Some(raw)) => {
@@ -119,7 +120,12 @@ impl<V: ByteValue> CacheTier<V> for L4SledBackend<V> {
         }
     }
 
-    fn set(&self, key: &KeyRef<'_>, value: V, ttl: Option<Duration>) -> Result<(), CacheError> {
+    async fn set(
+        &self,
+        key: &KeyRef<'_>,
+        value: V,
+        ttl: Option<Duration>,
+    ) -> Result<(), CacheError> {
         let payload = value.encode_bytes()?;
         let deadline = ttl.map_or(NO_EXPIRY, |t| {
             now_millis().saturating_add(t.as_millis() as u64)
@@ -130,11 +136,11 @@ impl<V: ByteValue> CacheTier<V> for L4SledBackend<V> {
         self.finish_mutation(&self.tree.insert(key.0, record))
     }
 
-    fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError> {
+    async fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError> {
         self.finish_mutation(&self.tree.remove(key.0))
     }
 
-    fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
+    async fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
         match self.tree.get(key.0) {
             Ok(Some(raw)) => {
                 if raw.len() < PREFIX_LEN {

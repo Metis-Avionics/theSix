@@ -77,12 +77,13 @@ impl<V: ByteValue> L3RedisBackend<V> {
     }
 }
 
+#[async_trait::async_trait]
 impl<V: ByteValue> CacheTier<V> for L3RedisBackend<V> {
     fn name(&self) -> String {
         "L3-redis-distributed".to_string()
     }
 
-    fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
+    async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
         let mut conn = self
             .conn
             .lock()
@@ -104,7 +105,12 @@ impl<V: ByteValue> CacheTier<V> for L3RedisBackend<V> {
         }
     }
 
-    fn set(&self, key: &KeyRef<'_>, value: V, ttl: Option<Duration>) -> Result<(), CacheError> {
+    async fn set(
+        &self,
+        key: &KeyRef<'_>,
+        value: V,
+        ttl: Option<Duration>,
+    ) -> Result<(), CacheError> {
         let bytes = value.encode_bytes()?;
         // Saturate at redis u64 seconds; TTL of None uses plain SET.
         let secs: Option<u64> = ttl.map(|d| d.as_secs());
@@ -119,7 +125,7 @@ impl<V: ByteValue> CacheTier<V> for L3RedisBackend<V> {
         self.finish_unit(&result)
     }
 
-    fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError> {
+    async fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError> {
         let mut conn = self
             .conn
             .lock()
@@ -128,7 +134,7 @@ impl<V: ByteValue> CacheTier<V> for L3RedisBackend<V> {
         self.finish_unit(&result)
     }
 
-    fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
+    async fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
         let mut conn = self
             .conn
             .lock()

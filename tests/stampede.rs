@@ -180,7 +180,7 @@ async fn test_tier_failure() {
     let key = "tier-fail".to_string();
     let key_ref = KeyRef(b"tier-fail".as_slice());
     let l3 = manager.tier(&TierId::L3);
-    l3.set(&key_ref, "value".to_string(), None).unwrap();
+    l3.set(&key_ref, "value".to_string(), None).await.unwrap();
 
     test_tier.set_healthy(false);
 

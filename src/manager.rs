@@ -171,7 +171,7 @@ where
         match snapshot.state {
             EntryState::Ready if !snapshot.expired => {
                 let tier = self.tier_for(&snapshot.tier);
-                let result = tier.get(&key_ref);
+                let result = tier.get(&key_ref).await;
                 self.record_read(snapshot.tier, &result);
                 result
             }
@@ -185,7 +185,7 @@ where
                 let mut buf2 = [0u8; MAX_KEY_SIZE];
                 let key_ref2 = Self::encode_key(key, &mut buf2)?;
                 let tier = self.tier_for(&snapshot.tier);
-                let result = tier.get(&key_ref2);
+                let result = tier.get(&key_ref2).await;
                 self.record_read(snapshot.tier, &result);
                 result
             }
@@ -216,7 +216,7 @@ where
 
         if snapshot.state == EntryState::Ready && !snapshot.expired {
             let tier = self.tier_for(&snapshot.tier);
-            if let Some(v) = tier.get(&key_ref)? {
+            if let Some(v) = tier.get(&key_ref).await? {
                 return Ok(v);
             }
         }
@@ -251,7 +251,7 @@ where
         Self::authorize(&decision)?;
 
         let tier = self.tier_for(&decision.tier);
-        let set_result = tier.set(&key_ref, value, ctx.ttl());
+        let set_result = tier.set(&key_ref, value, ctx.ttl()).await;
         self.record_outcome(decision.tier, set_result);
         set_result?;
 
@@ -286,7 +286,7 @@ where
 
         for tier in &self.tiers {
             // Best-effort: a tier may legitimately not hold the key.
-            let _ = tier.remove(&key_ref);
+            let _ = tier.remove(&key_ref).await;
         }
         self.cachelito.release(key_ref.0)?;
         Ok(())
@@ -306,7 +306,7 @@ where
             return Ok(false);
         }
         let tier = self.tier_for(&snapshot.tier);
-        tier.contains(&key_ref)
+        tier.contains(&key_ref).await
     }
 
     pub async fn refresh<F, Fut>(
@@ -331,7 +331,7 @@ where
         let current_tier = snapshot.tier;
         let current = {
             let tier = self.tier_for(&current_tier);
-            tier.get(&key_ref).unwrap_or(None)
+            tier.get(&key_ref).await.unwrap_or(None)
         };
 
         match self
@@ -364,6 +364,7 @@ where
         let new_tier_id =
             TierId::from_usize(current_idx - 1).ok_or(CacheError::ConfigurationError)?;
         self.move_entry(key, &key_ref, &snapshot, new_tier_id, ctx)
+            .await
     }
 
     pub async fn demote(&self, key: &K, ctx: &CacheContext) -> Result<(), CacheError> {
@@ -386,9 +387,14 @@ where
         let new_tier_id =
             TierId::from_usize(current_idx + 1).ok_or(CacheError::ConfigurationError)?;
         self.move_entry(key, &key_ref, &snapshot, new_tier_id, ctx)
+            .await
     }
 
-    fn move_entry(
+    /// Moves an entry between tiers, so it awaits the source read and the
+    /// destination write. It is async for that reason alone: the control-plane
+    /// work around those two awaits (`cachelito.set_tier`, `record_outcome`)
+    /// holds no guard across them, per the no-guard-across-await rule.
+    async fn move_entry(
         &self,
         key: &K,
         key_ref: &KeyRef<'_>,
@@ -397,12 +403,12 @@ where
         ctx: &CacheContext,
     ) -> Result<(), CacheError> {
         let from_tier = self.tier_for(&snapshot.tier);
-        let value = from_tier.get(key_ref)?.ok_or(CacheError::Miss)?;
+        let value = from_tier.get(key_ref).await?.ok_or(CacheError::Miss)?;
 
         let to_tier = self.tier_for(&new_tier_id);
         let mut buf2 = [0u8; MAX_KEY_SIZE];
         let key_ref2 = Self::encode_key(key, &mut buf2)?;
-        let set_result = to_tier.set(&key_ref2, value, ctx.ttl());
+        let set_result = to_tier.set(&key_ref2, value, ctx.ttl()).await;
         self.record_outcome(new_tier_id, set_result);
         set_result?;
 
@@ -447,7 +453,7 @@ where
         let key_ref = Self::encode_key(key, &mut buf)?;
 
         let tier = self.tier_for(&snapshot.tier);
-        match tier.get(&key_ref)? {
+        match tier.get(&key_ref).await? {
             Some(v) => Ok(v),
             None => Err(CacheError::Miss),
         }
@@ -525,7 +531,7 @@ where
         let tier = self.tier_for(&tier_id);
         let mut buf2 = [0u8; MAX_KEY_SIZE];
         let key_ref2 = Self::encode_key(key, &mut buf2)?;
-        let set_result = tier.set(&key_ref2, value.clone(), ctx.ttl());
+        let set_result = tier.set(&key_ref2, value.clone(), ctx.ttl()).await;
         self.record_outcome(tier_id, set_result);
         set_result?;
 
@@ -548,7 +554,7 @@ where
             let tier = self.tier_for(tier_id);
             let mut buf = [0u8; MAX_KEY_SIZE];
             let key_ref = Self::encode_key(key, &mut buf)?;
-            match tier.get(&key_ref) {
+            match tier.get(&key_ref).await {
                 Ok(Some(v)) => return Ok(v),
                 Ok(None) => continue,
                 Err(_) => continue,

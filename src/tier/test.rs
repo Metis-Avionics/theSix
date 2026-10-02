@@ -34,12 +34,13 @@ impl<V> TestTier<V> {
     }
 }
 
+#[async_trait::async_trait]
 impl<V: Clone + Send + Sync + 'static> CacheTier<V> for TestTier<V> {
     fn name(&self) -> String {
         format!("test-{:?}", self.tier_id)
     }
 
-    fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
+    async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
         if !self.healthy.load(Ordering::SeqCst) {
             self.failure_count.fetch_add(1, Ordering::SeqCst);
             return Err(CacheError::TierUnavailable);
@@ -50,7 +51,7 @@ impl<V: Clone + Send + Sync + 'static> CacheTier<V> for TestTier<V> {
             .get(key)
     }
 
-    fn set(
+    async fn set(
         &self,
         key: &KeyRef<'_>,
         value: V,
@@ -66,7 +67,7 @@ impl<V: Clone + Send + Sync + 'static> CacheTier<V> for TestTier<V> {
             .set(key, value, ttl)
     }
 
-    fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError> {
+    async fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError> {
         if !self.healthy.load(Ordering::SeqCst) {
             self.failure_count.fetch_add(1, Ordering::SeqCst);
             return Err(CacheError::TierUnavailable);
@@ -77,7 +78,7 @@ impl<V: Clone + Send + Sync + 'static> CacheTier<V> for TestTier<V> {
             .remove(key)
     }
 
-    fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
+    async fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
         if !self.healthy.load(Ordering::SeqCst) {
             self.failure_count.fetch_add(1, Ordering::SeqCst);
             return Err(CacheError::TierUnavailable);
