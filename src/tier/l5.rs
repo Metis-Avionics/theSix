@@ -1,9 +1,7 @@
-use std::sync::Mutex;
-
 use crate::error::CacheError;
 use crate::key::KeyRef;
 use crate::tier::TierId;
-use crate::tier::fixed_tier_stub::FixedTierStub;
+use crate::tier::sharded_stub::ShardedTierStub;
 use crate::tier::tier_trait::{BackendKind, CacheTier, TierHealth};
 
 /// A working stand-in for the origin tier.
@@ -21,7 +19,7 @@ use crate::tier::tier_trait::{BackendKind, CacheTier, TierHealth};
 /// does not have.
 #[derive(Debug)]
 pub struct L5Stub<V> {
-    inner: Mutex<FixedTierStub<V>>,
+    inner: ShardedTierStub<V>,
 }
 
 impl<V> L5Stub<V> {
@@ -37,14 +35,17 @@ impl<V> L5Stub<V> {
     #[allow(clippy::expect_used)] // sanctioned init-time failure mode; see doc above
     pub fn new() -> Self {
         L5Stub {
-            inner: Mutex::new(FixedTierStub::new()),
+            inner: ShardedTierStub::new(),
         }
     }
 
     /// Fallible constructor. Returns `Err` on zero capacity or pool failure.
     pub fn with_capacity(capacity: usize) -> Result<Self, CacheError> {
         Ok(L5Stub {
-            inner: Mutex::new(FixedTierStub::with_capacity(capacity)?),
+            inner: ShardedTierStub::with_shards(
+                crate::tier::sharded_stub::DEFAULT_SHARDS,
+                capacity,
+            )?,
         })
     }
 }
@@ -60,10 +61,7 @@ impl<V: Clone + Send + Sync + 'static> CacheTier<V> for L5Stub<V> {
     }
 
     async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
-        self.inner
-            .lock()
-            .map_err(|_| CacheError::ConfigurationError)?
-            .get(key)
+        self.inner.get(key)
     }
 
     async fn set(
@@ -72,24 +70,15 @@ impl<V: Clone + Send + Sync + 'static> CacheTier<V> for L5Stub<V> {
         value: V,
         ttl: Option<std::time::Duration>,
     ) -> Result<(), CacheError> {
-        self.inner
-            .lock()
-            .map_err(|_| CacheError::ConfigurationError)?
-            .set(key, value, ttl)
+        self.inner.set(key, value, ttl)
     }
 
     async fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError> {
-        self.inner
-            .lock()
-            .map_err(|_| CacheError::ConfigurationError)?
-            .remove(key)
+        self.inner.remove(key)
     }
 
     async fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
-        self.inner
-            .lock()
-            .map_err(|_| CacheError::ConfigurationError)?
-            .contains(key)
+        self.inner.contains(key)
     }
 
     fn health(&self) -> TierHealth {
