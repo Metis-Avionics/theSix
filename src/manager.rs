@@ -250,6 +250,14 @@ where
         let decision = self.resolve_with_snapshot(&request, ctx, &snapshot);
         Self::authorize(&decision)?;
 
+        // Authority rule (tripwired by `put_never_writes_l6_authority`): L6 is
+        // the judge, not a rung. A blind put would write a projection into the
+        // authority and let a cache tier decide what is true. Authority writes
+        // go through the owning repository, which then invalidates downward.
+        if decision.tier == TierId::L6 {
+            return Err(CacheError::PolicyDenied);
+        }
+
         let tier = self.tier_for(&decision.tier);
         let set_result = tier.set(&key_ref, value, ctx.ttl()).await;
         self.record_outcome(decision.tier, set_result);
@@ -284,7 +292,13 @@ where
         let mut buf = [0u8; MAX_KEY_SIZE];
         let key_ref = Self::encode_key(key, &mut buf)?;
 
-        for tier in &self.tiers {
+        for (idx, tier) in self.tiers.iter().enumerate() {
+            // Authority rule (tripwired by `invalidate_skips_l6_authority`):
+            // removing the authority row would delete the record of truth. Only
+            // cache rungs are cleared; authority writes invalidate downward.
+            if idx == TierId::L6.as_usize() {
+                continue;
+            }
             // Best-effort: a tier may legitimately not hold the key.
             let _ = tier.remove(&key_ref).await;
         }
@@ -416,13 +430,29 @@ where
         Ok(())
     }
 
+    /// Resolves a tier by id.
+    ///
+    /// A tier outside the configured set falls back to `L0` rather than
+    /// panicking, but that fallback is now *observable* rather than silent:
+    /// `unbound_tier_falls_back_and_reports` asserts it, and
+    /// `CacheManager::capabilities` reports which ids are actually bound. A
+    /// consumer that asks for an L6 it did not bind used to get L0's data with
+    /// no indication that anything was wrong.
     pub fn tier_for(&self, tier_id: &TierId) -> Arc<dyn CacheTier<V>> {
         let idx = tier_id.as_usize();
         if idx >= self.tiers.len() {
-            // Defensive: configuration guarantees 6 tiers; fall back to L0.
             return self.tiers[0].clone();
         }
         self.tiers[idx].clone()
+    }
+
+    /// Whether `tier_id` is actually bound in this manager.
+    ///
+    /// Distinct from `tier_for`, which substitutes. A caller that must not
+    /// silently receive another tier's data asks this first.
+    #[must_use]
+    pub fn has_tier(&self, tier_id: &TierId) -> bool {
+        tier_id.as_usize() < self.tiers.len()
     }
 
     pub fn tier(&self, tier_id: &TierId) -> Arc<dyn CacheTier<V>> {

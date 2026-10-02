@@ -1,5 +1,5 @@
 [tiers]
-count = 6
+count = 7
 
 [tier.l0]
 role = "request"
@@ -37,9 +37,20 @@ scope = "external"
 persistent = false
 shared = true
 
+[tier.l6]
+role = "authoritative"
+scope = "database"
+persistent = true
+shared = true
+authority = true
+# L6 is the judge, not a cache rung. Never blind-written, never invalidated:
+# authority writes flow through the owning repository, then invalidate downward.
+selected_by_ladder = false
+
 [routing]
 manager_only = true
 policy_only = true
+last_cache_tier = "L5"
 
 [health]
 health_checks = true

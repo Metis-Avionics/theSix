@@ -157,6 +157,15 @@ impl PolicyDecision {
 #[derive(Debug, Clone)]
 pub struct DefaultPolicy;
 
+/// The last rung the cache ladder may *select*.
+///
+/// `L6` is authority and is deliberately excluded: the ladder routes writes and
+/// fallbacks, and an entry must never be routed onto the authority tier. `L6` is
+/// reachable only by an explicit authority read. Keeping the bound as a named
+/// constant means adding a seventh *cache* tier later is a deliberate edit here
+/// rather than an accident of `L5.as_usize()` appearing in three places.
+pub const LAST_CACHE_TIER: crate::tier::TierId = crate::tier::TierId::L5;
+
 /// Decision precedence, per `specs/policy.toml`. Lower number = applied first.
 pub mod precedence {
     pub const EXPLICIT_POLICY: u8 = 1;
@@ -193,13 +202,13 @@ impl DefaultPolicy {
             return start;
         }
         let mut idx = start.as_usize();
-        for _ in 0..TierId::L5.as_usize() {
-            if idx >= TierId::L5.as_usize() {
+        for _ in 0..crate::policy::LAST_CACHE_TIER.as_usize() {
+            if idx >= crate::policy::LAST_CACHE_TIER.as_usize() {
                 break;
             }
             idx += 1;
         }
-        TierId::from_usize(idx).unwrap_or(TierId::L5)
+        TierId::from_usize(idx).unwrap_or(crate::policy::LAST_CACHE_TIER)
     }
 
     /// Precedence 5 (latency): a tight latency budget prefers hotter tiers by
@@ -213,8 +222,8 @@ impl DefaultPolicy {
             return start;
         }
         // Base tier is full: move one step toward origin (bounded by tier count).
-        let next = (start.as_usize() + 1).min(TierId::L5.as_usize());
-        TierId::from_usize(next).unwrap_or(TierId::L5)
+        let next = (start.as_usize() + 1).min(crate::policy::LAST_CACHE_TIER.as_usize());
+        TierId::from_usize(next).unwrap_or(crate::policy::LAST_CACHE_TIER)
     }
 }
 
