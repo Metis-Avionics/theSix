@@ -38,6 +38,10 @@ categories = [
 tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread"] }
 thiserror = "2"
 async-trait = "0.1"
+# default-features = false is load-bearing: oxigraph defaults to `rocksdb`, which
+# would drag the C++ toolchain back in for a backend whose whole point is
+# avoiding that. Without it the store is in-process.
+oxigraph = { version = "0.5", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
@@ -46,6 +50,7 @@ polars = { version = "0.55.2", default-features = false, features = ["lazy", "st
 
 [features]
 default = []
+oxigraph = ["dep:oxigraph"]
 redis = ["dep:redis"]
 sled = ["dep:sled"]
 

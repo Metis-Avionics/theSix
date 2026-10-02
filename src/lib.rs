@@ -226,3 +226,5 @@ pub use tier::backends::L3RedisBackend;
 #[cfg(feature = "sled")]
 pub use tier::backends::L4SledBackend;
 pub use tier::backends::{ByteValue, L5OriginBackend, OriginFetcher, OriginWriter};
+#[cfg(feature = "oxigraph")]
+pub use tier::backends::L5OxigraphBackend;
