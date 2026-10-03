@@ -25,6 +25,27 @@ yanked = "deny"
 # unmaintained but carry no vulnerability and have no maintained drop-in for
 # sled 0.34. Flag unmaintained only for workspace crates, not transitive deps.
 unmaintained = "workspace"
+ignore = [
+    # quick-xml 0.37.5, reached only as oxrdfxml -> oxrdfio -> oxigraph under
+    # `--all-features`. Two advisories, both in namespace resolution:
+    #   RUSTSEC-2026-0194 duplicate-start-tag check
+    #   RUSTSEC-2026-0195 unbounded `NamespaceResolver::push` allocation
+    #
+    # Not fixable in-tree: `oxrdfxml` pins `quick-xml = "0.37"` and the patched
+    # release is `>= 0.41.0`, so there is no in-semver upgrade to take.
+    #
+    # Not reachable: `cargo tree` shows zero `quick-xml` nodes for the default
+    # feature set, for `--features oxigraph`, and for
+    # `--features redis,sled,oxigraph`. It appears only under `--all-features`,
+    # which additionally enables oxigraph's own optional features that thesix does
+    # not use. `L5OxigraphBackend` never touches XML - it calls `Store::new`,
+    # `insert`, `remove` and `quads_for_pattern`, and hex-encodes keys and values
+    # rather than parsing them - so there is no XML input to be unbounded on.
+    #
+    # Revisit when oxigraph bumps its `oxrdfxml` pin past 0.41.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml 0.37 is pinned transitively by oxrdfxml; unreachable from any thesix feature, and thesix never parses XML" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml 0.37 is pinned transitively by oxrdfxml; unreachable from any thesix feature, and thesix never parses XML" },
+]
 
 [bans]
 # Reject duplicate versions of the same crate where avoidable.

@@ -47,6 +47,7 @@ decisions = [
     "CacheTier::backend() is REQUIRED in 1.0 rather than defaulted: a tier that cannot say what it is cannot be reported on",
     "L6 is authority, excluded from the ladder via a named policy::LAST_CACHE_TIER, and enforced by tripwires upstream as well as downstream",
     "Values travel through the Oxigraph backend as hex, not String::from_utf8_lossy: the lossy path replaced every invalid byte with U+FFFD and corrupted binary payloads silently",
+    "cargo deny all-features advisories on quick-xml 0.37.5 (RUSTSEC-2026-0194/0195) are ignored with a reason rather than left to fail CI: the crate is pinned by oxrdfxml below the patched 0.41.0, and cargo tree shows zero quick-xml nodes for the default set, for --features oxigraph, and for --features redis,sled,oxigraph. It appears only under --all-features, and L5OxigraphBackend never parses XML. Local advisory-db was a month stale, which is why this passed locally and failed in CI - refresh it before trusting a deny gate",
     "A poisoned-shard handler exists but is unreachable through the public API, because every guard is scoped inside a method and released before returning. Recorded rather than asserted",
 ]
 

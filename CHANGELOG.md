@@ -16,6 +16,7 @@
 - `specs/tiers.toml` records `count = 7`, `[tier.l6]`, and `routing.last_cache_tier`
 
 ### Fixed
+- `cargo deny` advisories: RUSTSEC-2026-0194 and RUSTSEC-2026-0195 on `quick-xml 0.37.5`, reached only as `oxrdfxml -> oxrdfio -> oxigraph` under `--all-features`. Not fixable in-tree (`oxrdfxml` pins `quick-xml = "0.37"`, patched release is `>= 0.41.0`) and unreachable from any thesix feature, so both are ignored with a documented reason in `deny.toml`
 - Shard count rounds up to a power of two. Rounding down stranded shards the mask could never produce: with 3 shards and mask 2 the index was only ever 0 or 2
 - `tier_for` silently substituted L0 for an unbound tier; `has_tier` now distinguishes substituted from bound
 
