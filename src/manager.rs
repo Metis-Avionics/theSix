@@ -394,12 +394,15 @@ where
             return Err(CacheError::Miss);
         }
 
-        let current_idx = snapshot.tier.as_usize();
-        if current_idx == TierId::L5.as_usize() {
+        // Bounded by the ladder constant rather than by a literal tier, so the
+        // bound lives in exactly one place. L6 is terminal as well as L5: the
+        // authority is never a promotion target, so an entry already sitting on
+        // it has nowhere to move and this is a no-op rather than an error.
+        if snapshot.tier >= crate::policy::LAST_CACHE_TIER {
             return Ok(());
         }
-        let new_tier_id =
-            TierId::from_usize(current_idx + 1).ok_or(CacheError::ConfigurationError)?;
+        let new_tier_id = TierId::from_usize(snapshot.tier.as_usize() + 1)
+            .ok_or(CacheError::ConfigurationError)?;
         self.move_entry(key, &key_ref, &snapshot, new_tier_id, ctx)
             .await
     }
