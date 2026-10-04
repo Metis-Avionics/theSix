@@ -991,3 +991,51 @@ rationale = """
 check: a gate that claims to cover the repository should ask the tool to cover the
 repository. Both new assertions were mutation-tested.
 """
+
+[[bug]]
+id = "B14"
+title = "The fuzz job named an installer tag that does not exist, so cargo-fuzz was never installed"
+severity = "blocking"
+status = "resolved"
+resolved_at = "second-review-remediation"
+accepted_by = "user"
+verified = true
+blocks_merge = true
+locations = [".github/workflows/ci.yml"]
+violates = ["verification_required = true"]
+source = "second CI run on this branch, from the advisory fuzz job's exit-3 result"
+summary = """
+B7 fixed the fuzz job's shell syntax, and the smoke loop became structurally
+correct. It still could not run, because the fuzzer it drives was never installed:
+
+    INPUT_TOOL:
+    ##[warning]no tool specified; this could be caused by a dependabot bug
+    where @<tool_name> tags on this action are replaced by @<version> tags
+
+`taiki-e/install-action@cargo-fuzz` refers to a tag that does not exist. The action
+handles an unrecognised ref by warning and installing nothing, then exiting 0 -- so
+the step reports success and the job proceeds with no `cargo-fuzz` binary. Every
+`cargo +nightly fuzz run` in the loop then fails, and under `continue-on-error`
+that reads as an allowed advisory failure.
+
+Confirmed by querying the action rather than guessing: among its 1347 tags,
+`cargo-nextest`, `cargo-deny` and `cargo-machete` each exist exactly once and
+`cargo-fuzz` exists zero times, and `TOOLS.md` never mentions the tool. So this was
+never going to work, and the tag predates this branch's changes -- B7's fix made a
+loop correct that had never had a fuzzer to run.
+"""
+resolution = """
+`cargo +nightly install cargo-fuzz --locked` in the job. The fuzz job already
+installs nightly with `llvm-tools-preview`, which is what cargo-fuzz needs, so
+compiling it from source adds no new prerequisite. `--locked` because an unlocked
+`cargo install` resolving different transitive versions on a nightly compiler is
+how an advisory job starts failing for reasons unrelated to the code under test.
+"""
+rationale = """
+The general defect is a build step that reports success having done nothing. This
+workflow had two of them -- B11's missing sccache and this -- and both were
+invisible locally because both only fail where the tool is absent. The honest
+summary is that CI executing for the first time found three separate things that
+had never run, which is an argument for the unfiltered `pull_request` trigger and
+against every claim in this repository that the gates were already covering it.
+"""

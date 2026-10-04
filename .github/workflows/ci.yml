@@ -334,7 +334,14 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
-      - uses: taiki-e/install-action@cargo-fuzz
+      # Not `taiki-e/install-action@cargo-fuzz`: that action has no cargo-fuzz
+      # support at all -- there is no `@cargo-fuzz` tag among its 1347, and its
+      # TOOLS.md never mentions the tool. Naming it anyway does not fail. The
+      # action logs "no tool specified", installs nothing, and exits 0, so the
+      # fuzzer is silently absent and every smoke run then fails looking like a
+      # crash. Verified by reading the job log, not inferred.
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: fuzz
