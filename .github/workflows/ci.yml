@@ -44,7 +44,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: mozilla-actions/sccache-action@v0.8
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
@@ -65,7 +69,11 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
-      - uses: mozilla-actions/sccache-action@v0.8
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
@@ -86,7 +94,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: mozilla-actions/sccache-action@v0.8
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
@@ -104,7 +116,11 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - uses: mozilla-actions/sccache-action@v0.8
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
@@ -128,7 +144,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: mozilla-actions/sccache-action@v0.8
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
@@ -153,7 +173,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: mozilla-actions/sccache-action@v0.8
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
       - uses: taiki-e/install-action@cargo-nextest
@@ -174,7 +198,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: mozilla-actions/sccache-action@v0.8
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
@@ -190,7 +218,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: mozilla-actions/sccache-action@v0.8
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
       - uses: taiki-e/install-action@cargo-nextest
@@ -209,7 +241,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: mozilla-actions/sccache-action@v0.8
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
       - uses: taiki-e/install-action@cargo-nextest
@@ -234,7 +270,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: mozilla-actions/sccache-action@v0.8
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
       - uses: taiki-e/install-action@cargo-deny
@@ -254,7 +294,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: mozilla-actions/sccache-action@v0.8
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
@@ -283,7 +327,11 @@ jobs:
         with:
           toolchain: nightly
           components: llvm-tools-preview
-      - uses: mozilla-actions/sccache-action@v0.8
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
       - uses: taiki-e/install-action@cargo-fuzz
@@ -327,7 +375,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: mozilla-actions/sccache-action@v0.8
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
@@ -345,7 +397,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: mozilla-actions/sccache-action@v0.8
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
       - name: Assert the crate forbids unsafe
