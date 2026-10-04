@@ -803,6 +803,11 @@ description = "Compiles all nine libFuzzer targets. Coverage-guided runs are a s
 rust_memory_safety_required = true
 unsafe_requires_justification = true
 hidden_blocking = false
+# Every third-party action must be pinned by commit SHA. A tag is a mutable
+# pointer: whoever controls the tag can repoint it at new code that then runs
+# with this repository's credentials. Pinned by SHA, the code that ran is the
+# code that was reviewed.
+ci_actions_sha_pinned = true
 runtime_block_on = false
 lock_across_await = false
 silent_backend_substitution = false

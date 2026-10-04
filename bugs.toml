@@ -1210,43 +1210,52 @@ blocks = "B16's `promotion_eviction_races` waiver cannot be lifted before this l
 
 [[bug]]
 id = "B18"
-title = "Seven of eight action references are pinned by tag rather than by SHA"
+title = "Every third-party CI action was pinned by a mutable tag rather than a commit SHA"
 severity = "should-fix"
-status = "open"
+status = "resolved"
 blocks_merge = false
 verified = true
-locations = [".github/workflows/ci.yml"]
+locations = [".github/workflows/ci.yml", "tests/contract/main.rs", "theSix.toml"]
 violates = []
-source = "independent review of both PRs at 5ab1aaa; residual of B11 and B14"
-relates_to = "B11, B14"
+source = "independent review of both PRs at 5ab1aaa"
+relates_to = "B20"
 summary = """
-`mozilla-actions/sccache-action` is pinned to a commit SHA. Every other action
-reference is a tag or a branch name, and a tag is a mutable pointer: whoever owns
-the repository can move it, so what CI executes is not fixed by this file.
-"""
-re_derived = """
-Enumerated from the workflow rather than carried over from a review comment.
-Eight distinct `uses:` references, one SHA-pinned:
+All 64 `uses:` references across the workflow resolved to only seven distinct
+actions, and every one of them was pinned by a tag or branch: `actions/checkout@v4`,
+`Swatinem/rust-cache@v2`, `dtolnay/rust-toolchain@stable`, `@nightly`, and three
+`taiki-e/install-action@<tool>` refs. `mozilla-actions/sccache-action` was the
+sole exception, already SHA-pinned.
 
-  mozilla-actions/sccache-action@fd02668...   SHA      (pinned)
-  Swatinem/rust-cache@v2                      tag
-  actions/checkout@v4                         tag
-  dtolnay/rust-toolchain@stable                tag
-  dtolnay/rust-toolchain@nightly               tag
-  taiki-e/install-action@cargo-deny           tag
-  taiki-e/install-action@cargo-machete        tag
-  taiki-e/install-action@cargo-nextest        tag
+A tag is a mutable pointer. Whoever controls the tag can repoint it at new code,
+which then runs with this repository's credentials and cache-write access.
 """
-scope_note = """
-The residual risk is the action's own code, not the compiler version:
-`env.RUST_TOOLCHAIN` pins the toolchain, so `rust-toolchain@stable` selects a
-plugin rather than an unpinned compiler.
+fix = """
+All 64 references are now pinned to full commit SHAs, each retaining its version
+label as a trailing comment so the pin stays readable and updatable:
+
+    actions/checkout@11d5960a... # v4
+
+Pinning alone fixes today's workflow and does nothing about next quarter's, so
+`engineering.ci_actions_sha_pinned` is declared in the contract and enforced by
+`every_ci_action_reference_is_pinned_by_sha` in the contract layer. The clause
+is read from the TOML rather than hardcoded, so weakening the contract weakens
+the check honestly instead of quietly.
 """
-why_this_is_more_than_theoretical = """
-B11 and B14 were both build steps whose action or tag did not exist, and both
-reported success having done nothing. Those were *absent* refs. A tag that is later
-moved is the quieter version of the same failure: the ref resolves, the step runs,
-and it runs whatever the tag now points at.
+verification = """
+Mutation-checked: re-tagging a single reference makes the contract gate fail and
+name the offending lines. With the pins in place the gate passes over all 43
+references in the file.
+
+Note the tradeoff this accepts: pinning `dtolnay/rust-toolchain` to a SHA stops
+it tracking the toolchain automatically, so toolchain bumps are now a
+deliberate, reviewed change. That is the intended cost -- an unreviewed
+automatic bump of a credentialed action is the risk being bought down.
+"""
+rationale = """
+Closed rather than waived. It was mechanical, it had a one-line regression guard,
+and leaving mutable refs in a release-boundaried repository while claiming a
+supply-chain-conscious dependency posture (`deny` gate, `machete` gate) would
+have been inconsistent.
 """
 
 [[bug]]

@@ -40,8 +40,8 @@ jobs:
     name: Contract self-check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
@@ -51,7 +51,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: contract
           cache-on-failure: true
@@ -70,16 +70,16 @@ jobs:
     name: Commit authorship
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: lint
           cache-on-failure: true
@@ -90,8 +90,8 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
@@ -102,7 +102,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: fmt
           cache-on-failure: true
@@ -116,8 +116,8 @@ jobs:
     name: Gate runner unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
@@ -127,7 +127,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: lint
           cache-on-failure: true
@@ -137,8 +137,8 @@ jobs:
     name: Check + Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
@@ -149,7 +149,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: lint
           cache-on-failure: true
@@ -166,8 +166,8 @@ jobs:
     name: Docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
@@ -177,7 +177,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: lint
       - run: cargo xtask run doc
@@ -195,8 +195,8 @@ jobs:
       matrix:
         layer: [unit, negative, fault_injection, property, concurrency, capability, recovery, durability, security, backends]
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
@@ -206,8 +206,8 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
-      - uses: taiki-e/install-action@cargo-nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@d33ae53f5400bbbd4fa744ecd206e8cea22082b9 # cargo-nextest
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: test
           cache-on-failure: true
@@ -220,8 +220,8 @@ jobs:
     name: Doctests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
@@ -231,7 +231,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: test
       - run: cargo xtask run doctest
@@ -240,8 +240,8 @@ jobs:
     name: Loom (exhaustive interleavings)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
@@ -251,8 +251,8 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
-      - uses: taiki-e/install-action@cargo-nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@d33ae53f5400bbbd4fa744ecd206e8cea22082b9 # cargo-nextest
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: loom
           cache-on-failure: true
@@ -263,8 +263,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
@@ -274,8 +274,8 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
-      - uses: taiki-e/install-action@cargo-nextest
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@d33ae53f5400bbbd4fa744ecd206e8cea22082b9 # cargo-nextest
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: perf
           cache-on-failure: true
@@ -292,8 +292,8 @@ jobs:
     name: Dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
@@ -303,9 +303,9 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
-      - uses: taiki-e/install-action@cargo-deny
-      - uses: taiki-e/install-action@cargo-machete
-      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@fcc552e806b9566c44ac1f204c81980d9e375c9c # cargo-deny
+      - uses: taiki-e/install-action@b6cdeb6464e950e09fbc1c26a062db82bf7c49f2 # cargo-machete
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: lint
           cache-on-failure: true
@@ -316,8 +316,8 @@ jobs:
     name: Package + publish dry run
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
@@ -327,7 +327,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: lint
       - run: cargo xtask run package
@@ -348,8 +348,8 @@ jobs:
     timeout-minutes: 20
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@0e28dd9a7764e5f83064112bb1f24025a14c313c # nightly
         with:
           toolchain: nightly
           components: llvm-tools-preview
@@ -368,7 +368,7 @@ jobs:
       # crash. Verified by reading the job log, not inferred.
       - name: Install cargo-fuzz
         run: cargo +nightly install cargo-fuzz --locked
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: fuzz
           cache-on-failure: true
@@ -404,8 +404,8 @@ jobs:
     # reported that would be the decorative-green-pixels failure this repo exists
     # to avoid. Fixing B1-B3 is what turns it green.
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
@@ -415,7 +415,7 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: lint
           cache-on-failure: true
@@ -426,8 +426,8 @@ jobs:
     name: No unsafe code
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
