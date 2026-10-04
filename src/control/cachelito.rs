@@ -1087,6 +1087,13 @@ impl Cachelito {
                 self.commit(&token, None)?;
                 Ok(RecoveryOutcome::Completed { kind: intent.kind })
             }
+            // Declines rather than guessing. Completing a move forward needs the
+            // source rung read and the destination written, and this call has the
+            // key but no tier handles — so a caller wanting the move finished
+            // must drive `CacheManager`, which has both. Reporting failure here is
+            // the honest answer; silently committing the control-plane half would
+            // publish a move whose data half never happened.
+            RecoveryDirection::ExternalReconciliation => Err(CacheError::ConfigurationError),
         }
     }
 

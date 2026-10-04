@@ -24,7 +24,8 @@ use std::time::{Duration, Instant};
 
 use testkit::{Tally, framed_key, manager_from_parts, manager_with_telemetry, test_ctx};
 use thesix::{
-    CacheTier, KeyRef, L0Stub, L1Stub, LatencyPercentiles, RingTelemetry, TelemetrySink, TierId,
+    CacheTier, KeyRef, L0Stub, L1Stub, LatencyPercentiles, RecoveryReport, RingTelemetry,
+    TelemetrySink, TierId,
 };
 
 const SETTLE: Duration = Duration::from_millis(50);
@@ -385,7 +386,9 @@ fn recovery_latency_is_bounded() {
                 )
                 .expect("prepare");
         }
-        let (recovered, failed) = m.recover_older_than(Duration::from_secs(0));
+        let RecoveryReport {
+            recovered, failed, ..
+        } = m.recover_older_than(Duration::from_secs(0));
         let elapsed = started.elapsed();
         println!("recovered {recovered} intents in {elapsed:?}");
 

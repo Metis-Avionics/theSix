@@ -17,7 +17,7 @@ use std::time::Duration;
 use testkit::{FaultyTier, Tally, make_manager_with_timeout, test_ctx};
 use thesix::{
     CacheError, CacheTier, ContinuityState, DefaultPolicy, EntryState, Generation, IntentKind,
-    KeyRef, L0Stub, L1Stub, RecoveryDirection, RecoveryOutcome, TierId,
+    KeyRef, L0Stub, L1Stub, RecoveryDirection, RecoveryOutcome, RecoveryReport, TierId,
 };
 
 fn mgr() -> Arc<thesix::CacheManager<String, String, DefaultPolicy>> {
@@ -251,13 +251,14 @@ async fn recovery_is_idempotent() {
     }
 
     let first = m.recover_older_than(Duration::from_secs(0));
-    assert_eq!(first, (3, 0), "the first sweep did not resolve everything");
+    assert_eq!(first.recovered, 3, "the first sweep did not resolve everything");
+    assert_eq!(first.failed, 0, "the first sweep reported a failure");
 
     // Repeat, repeatedly. Each pass must be a no-op.
     for round in 0..5 {
         assert_eq!(
             m.recover_older_than(Duration::from_secs(0)),
-            (0, 0),
+            RecoveryReport::default(),
             "recovery pass {round} was not idempotent"
         );
     }
@@ -291,7 +292,7 @@ async fn concurrent_recovery_is_safe() {
 
     let mut total = 0;
     for h in handles {
-        let (recovered, failed) = h.await.expect("join");
+        let RecoveryReport { recovered, failed, .. } = h.await.expect("join");
         assert_eq!(failed, 0, "a concurrent sweep reported a failure");
         total += recovered;
     }
@@ -301,7 +302,10 @@ async fn concurrent_recovery_is_safe() {
     );
 
     // Nothing left behind.
-    assert_eq!(m.recover_older_than(Duration::from_secs(0)), (0, 0));
+    assert_eq!(
+        m.recover_older_than(Duration::from_secs(0)),
+        RecoveryReport::default()
+    );
 }
 
 /// A move intent must complete forward, or committed data is lost.
@@ -318,12 +322,25 @@ async fn a_prepared_move_completes_forward() {
         .expect("prepare");
     let intent = cachelito.peek(b"m").expect("peek").intent.expect("intent");
 
+    // Without the key, a sweep has no direction it can execute. `CompleteForward`
+    // is still the right instruction for a caller that *does* hold the key, which
+    // is the case below — the two are not in conflict, they answer different
+    // questions.
     assert_eq!(
         RecoveryDirection::for_kind(intent.kind),
-        RecoveryDirection::CompleteForward,
-        "a move would be resolved by aborting, discarding a committed value"
+        RecoveryDirection::ExternalReconciliation,
+        "a sweep holding only a hash must not be told to complete a move"
+    );
+    assert!(
+        !RecoveryDirection::for_kind(intent.kind).is_executable_here(),
+        "the sweep claimed it could execute this direction"
+    );
+    assert!(
+        !RecoveryDirection::Abort.is_success_without_the_key(),
+        "aborting a prepared move would discard a committed value"
     );
 
+    // This caller *has* the key, so complete-forward is executable and correct.
     let outcome = cachelito
         .resolve_intent(b"m", intent, RecoveryDirection::CompleteForward)
         .expect("resolve");
@@ -334,9 +351,15 @@ async fn a_prepared_move_completes_forward() {
     let _ = mover;
 }
 
-/// Recovery of a move without the key must be reported, not silently skipped.
+/// A move is reported in its own bucket, distinctly from a write.
+///
+/// This is the distinction the contract previously lacked. `failed` used to hold
+/// both "the sweep tried and could not resolve this" and "the sweep has no
+/// information to resolve this with", so a permanently stuck key was
+/// indistinguishable from ordinary contention. A caller reading the report could
+/// not tell whether to retry, escalate, or call an operator.
 #[tokio::test]
-async fn an_unresolvable_move_is_reported() {
+async fn an_unresolvable_move_is_reported_separately_from_a_failure() {
     let m = mgr();
     let ctx = test_ctx();
     let framed = testkit::framed_key(&ctx, "m");
@@ -344,20 +367,42 @@ async fn an_unresolvable_move_is_reported() {
         .prepare(&framed, None, TierId::L2, IntentKind::Move)
         .expect("prepare");
 
-    // The sweep can abort writes but not moves, because completing a move needs
-    // the key bytes and the control plane keeps only a hash. Reporting that as a
-    // failure is the whole point: a silent skip would look identical to a sweep
-    // with nothing to do.
-    let (recovered, failed) = m.recover_older_than(Duration::from_secs(0));
-    assert_eq!(recovered, 0);
-    assert_eq!(failed, 1, "an unresolvable move was not reported");
+    let report = m.recover_older_than(Duration::from_secs(0));
+    assert_eq!(report.recovered, 0, "a move was resolved without the key");
+    assert_eq!(
+        report.needs_reconciliation, 1,
+        "the move was not reported as needing external reconciliation"
+    );
+    assert_eq!(
+        report.failed, 0,
+        "an unresolvable move was miscounted as a sweep failure; the two need \
+         different responses from a caller"
+    );
 
-    // The intent survives, so a caller holding the key can still finish it.
+    // The intent survives untouched, so an external reconciler holding the key can
+    // still finish it. A sweep that cleared it would destroy the only record that
+    // a move was in flight.
     let snap = m.cachelito().peek(&framed).expect("peek");
     assert!(
         snap.intent.is_some(),
-        "a failed recovery discarded the intent"
+        "the sweep discarded the move intent, destroying the only evidence that a \
+         move was in flight"
     );
+    assert_eq!(
+        snap.state,
+        EntryState::Prepared,
+        "the entry left an unresolvable move no longer marked as in-flight"
+    );
+
+    // And the distinction is real, not cosmetic: a write in the same sweep is
+    // resolved, a move is not, and the report says which happened.
+    m.cachelito()
+        .prepare(&testkit::framed_key(&ctx, "w"), None, TierId::L2, IntentKind::Write)
+        .expect("prepare a write");
+    let both = m.recover_older_than(Duration::from_secs(0));
+    assert_eq!(both.recovered, 1, "the write was not resolved");
+    assert_eq!(both.needs_reconciliation, 1, "the move was resolved or lost");
+    assert_eq!(both.failed, 0);
 }
 
 /// A recovered entry must be usable, not merely present.
@@ -370,7 +415,7 @@ async fn a_recovered_key_is_usable_again() {
         .prepare(&framed, None, TierId::L1, IntentKind::Write)
         .expect("prepare");
 
-    let (recovered, _) = m.recover_older_than(Duration::from_secs(0));
+    let RecoveryReport { recovered, .. } = m.recover_older_than(Duration::from_secs(0));
     assert_eq!(recovered, 1);
 
     let value = m
@@ -393,7 +438,9 @@ async fn recovery_does_not_resurrect_removed_entries() {
         .await
         .expect("remove");
 
-    let (recovered, failed) = m.recover_older_than(Duration::from_secs(0));
+    let RecoveryReport {
+        recovered, failed, ..
+    } = m.recover_older_than(Duration::from_secs(0));
     assert_eq!((recovered, failed), (0, 0));
     assert_eq!(
         m.get(&"gone".to_string(), &test_ctx()).await.unwrap_err(),
@@ -523,7 +570,7 @@ async fn the_sweep_finds_a_generation_zero_intent() {
         .expect("prepare");
     let found = m.cachelito().stale_intents(0);
     assert_eq!(found.len(), 1, "the sweep missed a generation-0 intent");
-    let (recovered, _) = m.recover_older_than(Duration::from_secs(0));
+    let RecoveryReport { recovered, .. } = m.recover_older_than(Duration::from_secs(0));
     assert_eq!(recovered, 1);
 }
 
@@ -553,4 +600,173 @@ async fn a_prepared_entry_is_invisible_to_readers() {
             .unwrap_or(false);
         assert!(!present, "{id} holds a value for an uncommitted entry");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cancellation safety of the write path
+// ---------------------------------------------------------------------------
+
+/// A `set` cancelled mid-write must not leave the key wedged.
+///
+/// This is the exact shape of the defect: `prepare` puts the entry into
+/// `Prepared` and claims population ownership, and only `commit` or `abort`
+/// clears that. Before `IntentGuard` existed, dropping the future between the two
+/// left `population_owner = true` with no owner, so every later operation joined
+/// as a waiter against a claimant that would never arrive and failed on the
+/// timeout.
+///
+/// The test asserts the *observable* consequence — that the key works again
+/// immediately — rather than only the internal flags, because a guard that
+/// cleared the flags but left the entry unreadable would pass the former.
+#[tokio::test]
+async fn a_cancelled_set_releases_its_commit_intent() {
+    use testkit::HangingTier;
+
+    let pool = thesix::MemoryPool::new(64).expect("pool");
+    // L0 hangs, so the write parks in phase 2 with the intent already prepared.
+    let hanging = HangingTier::wrap(Arc::new(L0Stub::new()));
+    let reached = hanging.reached();
+    let manager = Arc::new(thesix::CacheManager::with_timeout(
+        DefaultPolicy,
+        thesix::Cachelito::new(),
+        thesix::TierRegistry::new(),
+        vec![hanging],
+        pool,
+        Duration::from_millis(300),
+    ));
+
+    let ctx = test_ctx();
+    let in_task = ctx.clone();
+    let handle = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move {
+            manager
+                .set(&"doomed".to_string(), "v".to_string(), &in_task)
+                .await
+        })
+    };
+
+    // Wait for the write to actually reach the stall. Without this the task might
+    // be cancelled before `prepare`, and the test would pass for the wrong reason.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while reached.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the write never reached the hanging tier, so nothing was cancelled");
+
+    // The intent exists and the entry is unreadable: we are genuinely mid-commit.
+    let mid = manager
+        .cachelito()
+        .peek(testkit::framed_key(&ctx, "doomed").as_slice())
+        .expect("peek");
+    assert_eq!(
+        mid.state,
+        EntryState::Prepared,
+        "the test must cancel a write that really prepared an intent"
+    );
+    assert!(mid.population_owner);
+
+    handle.abort();
+    let _ = handle.await;
+
+    // The guard's Drop must have aborted the intent.
+    let after = manager
+        .cachelito()
+        .peek(testkit::framed_key(&ctx, "doomed").as_slice())
+        .expect("peek");
+    assert_ne!(
+        after.state,
+        EntryState::Prepared,
+        "the cancelled set left its intent behind"
+    );
+    assert!(
+        !after.population_owner,
+        "the cancelled set left the key claimed with no owner to release it"
+    );
+}
+
+/// The consequence that matters: the population path is not wedged by a
+/// cancelled write.
+///
+/// Asserted separately from the flag check because it is the property a consumer
+/// depends on, and because it is a *different* property from the control-plane
+/// flags — a guard that cleared the flags but left the entry unreadable would
+/// pass the former and fail this.
+///
+/// The symptom is narrower than it first appears, and narrowing it down changed
+/// what this test had to assert:
+///
+/// * `set` was never wedged. `prepare` has no claimability precondition, so a
+///   second write simply re-prepares over the abandoned intent.
+/// * `get` was never wedged either. It reports `Miss` on a `Prepared` entry.
+/// * `get_or_fetch` was wedged, because it must *claim* the entry to populate it,
+///   and `acquire` declines while `population_owner` is set. It joined as a
+///   waiter against an owner that would never arrive and failed on the timeout.
+///
+/// So this is the only read path that observes the defect, and it is the one the
+/// regression test has to drive.
+#[tokio::test]
+async fn a_cancelled_write_does_not_wedge_the_population_path() {
+    use thesix::fault::{FaultClass, FaultPlan, OpKind};
+
+    let faulty = FaultyTier::wrap(Arc::new(L0Stub::new()));
+    let ledger = faulty.ledger();
+    // One-shot: `take_for` removes the fault once claimed, so this delays the
+    // first write and leaves every later operation alone.
+    faulty.arm(FaultPlan::new().push_latency_ms(OpKind::Set, 5_000));
+
+    let pool = thesix::MemoryPool::new(64).expect("pool");
+    let manager = Arc::new(thesix::CacheManager::with_timeout(
+        DefaultPolicy,
+        thesix::Cachelito::new(),
+        thesix::TierRegistry::new(),
+        vec![faulty],
+        pool,
+        Duration::from_millis(600),
+    ));
+
+    let ctx = test_ctx();
+    let in_task = ctx.clone();
+    let handle = {
+        let manager = Arc::clone(&manager);
+        tokio::spawn(async move {
+            manager
+                .set(&"wedged".to_string(), "v".to_string(), &in_task)
+                .await
+        })
+    };
+
+    // Anti-vacuity: the stall must have actually fired, or the cancellation below
+    // proves nothing.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while ledger.fired(FaultClass::Latency) == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the armed latency never fired, so no write was cancelled");
+
+    handle.abort();
+    let _ = handle.await;
+
+    // With the claim abandoned this joined as a waiter and burned the full 600ms
+    // before failing. With the guard, it claims immediately and populates.
+    let started = std::time::Instant::now();
+    let got = manager
+        .get_or_fetch(&"wedged".to_string(), &ctx, || async {
+            Ok("fetched".to_string())
+        })
+        .await;
+    let elapsed = started.elapsed();
+    assert_eq!(
+        got.as_deref(),
+        Ok("fetched"),
+        "the population path could not claim a key whose write was cancelled"
+    );
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "population waited {elapsed:?}; it joined the abandoned claim instead of taking it"
+    );
 }

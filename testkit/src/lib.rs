@@ -396,6 +396,15 @@ pub struct FaultyTier<V> {
     plan: std::sync::Mutex<FaultPlan>,
     ledger: Arc<FaultLedger>,
     remaining_ok: AtomicU64,
+    /// Whether an armed plan withdraws `ATOMIC_WRITE_OR_ERROR` from the inner
+    /// tier's capability.
+    ///
+    /// Defaults to true, because a fault-injecting tier is simulating a backend
+    /// that is no longer well behaved. A test that needs to prove the manager
+    /// *skips* compensation for a tier that does promise atomicity sets this
+    /// false — without that, the skip path is untested and the compensating
+    /// remove could silently start destroying good values.
+    withholds_atomicity: std::sync::atomic::AtomicBool,
     /// Whether a `FailureAfterN` window has been opened yet. Separate from
     /// `remaining_ok`, because a window of `n = 1` legitimately reaches zero
     /// after its single allowed success and must not be re-armed.
@@ -415,6 +424,7 @@ impl<V> FaultyTier<V> {
             plan: std::sync::Mutex::new(FaultPlan::new()),
             ledger: Arc::new(FaultLedger::new()),
             remaining_ok: AtomicU64::new(0),
+            withholds_atomicity: AtomicBool::new(true),
             window_armed: AtomicBool::new(false),
             corrupt_next: AtomicBool::new(false),
             corruptor: None,
@@ -427,6 +437,7 @@ impl<V> FaultyTier<V> {
             plan: std::sync::Mutex::new(plan),
             ledger: Arc::new(FaultLedger::new()),
             remaining_ok: AtomicU64::new(0),
+            withholds_atomicity: AtomicBool::new(true),
             window_armed: AtomicBool::new(false),
             corrupt_next: AtomicBool::new(false),
             corruptor: None,
@@ -448,6 +459,7 @@ impl<V> FaultyTier<V> {
             plan: std::sync::Mutex::new(plan),
             ledger: Arc::new(FaultLedger::new()),
             remaining_ok: AtomicU64::new(0),
+            withholds_atomicity: AtomicBool::new(true),
             window_armed: AtomicBool::new(false),
             corrupt_next: AtomicBool::new(false),
             corruptor: Some(Arc::new(corruptor)),
@@ -549,6 +561,7 @@ fn error_for(fault: FaultClass) -> CacheError {
         FaultClass::Corruption => CacheError::Corrupted,
         FaultClass::Cancellation => CacheError::Cancelled,
         FaultClass::Hang | FaultClass::FailureAfterN => CacheError::TierUnavailable,
+        FaultClass::PartialWrite => CacheError::WriteIndeterminate,
     }
 }
 
@@ -559,6 +572,25 @@ impl<V: Clone + Send + Sync + 'static + thesix::IntegrityCheck> CacheTier<V> for
     }
     fn backend(&self) -> BackendKind {
         BackendKind::Test
+    }
+    fn capability(&self) -> thesix::capability::TierCapability {
+        // Withhold `ATOMIC_WRITE_OR_ERROR` whenever a plan is armed.
+        //
+        // Delegating to the inner tier here would be a trap: the stub underneath
+        // genuinely does guarantee that a failed write stores nothing, so the
+        // manager would skip residue cleanup, and a `PartialWrite` test would then
+        // pass while residue accumulated — the fault would be injected and the
+        // ledger would record it, yet nothing would be tested.
+        //
+        // Arming a plan is a statement that this backend is no longer well
+        // behaved, so the guarantee goes with it.
+        let mut cap = self.inner.capability();
+        if self.plan.lock().expect("plan mutex").is_empty() {
+            cap.flags = cap
+                .flags
+                .without(thesix::capability::CapabilityFlags::ATOMIC_WRITE_OR_ERROR);
+        }
+        cap
     }
 
     async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
@@ -588,6 +620,13 @@ impl<V: Clone + Send + Sync + 'static + thesix::IntegrityCheck> CacheTier<V> for
                 FaultClass::Latency => {
                     tokio::time::sleep(Duration::from_millis(amount.max(1))).await;
                     self.inner.set(key, value, ttl).await
+                }
+                // Write first, fail second. The inner tier really stores the value
+                // and this returns an error anyway, which is the whole point: every
+                // other class fails before doing the work.
+                FaultClass::PartialWrite => {
+                    self.inner.set(key, value, ttl).await?;
+                    Err(error_for(fault))
                 }
                 _ => Err(error_for(fault)),
             }

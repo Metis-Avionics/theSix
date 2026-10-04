@@ -23,7 +23,7 @@ use proptest::prelude::*;
 use testkit::{FaultyTier, framed_key, manager_from_parts, test_ctx};
 use thesix::{
     CacheError, CacheTier, ContinuityState, EntryState, FaultClass, FaultPlan, Generation, KeyRef,
-    L0Stub, OpKind, OperationalState, Placement, TierId,
+    L0Stub, OpKind, OperationalState, Placement, RecoveryReport, TierId,
 };
 
 /// One operation in a generated sequence.
@@ -504,14 +504,14 @@ proptest! {
         }
         prop_assert!(expected > 0, "no intents were created");
 
-        let (recovered, failed) = m.recover_older_than(Duration::from_secs(0));
+        let RecoveryReport { recovered, failed, .. } = m.recover_older_than(Duration::from_secs(0));
         prop_assert!(failed == 0, "the first sweep reported failures");
         prop_assert!(recovered == expected, "the first sweep missed intents");
 
         for r in 0..rounds {
             prop_assert_eq!(
                 m.recover_older_than(Duration::from_secs(0)),
-                (0, 0),
+                RecoveryReport::default(),
                 "sweep {} after convergence was not a no-op", r
             );
         }

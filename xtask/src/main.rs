@@ -114,6 +114,7 @@ fn main() -> ExitCode {
     let toolchain = Toolchain::probe();
     let opts = RunOptions {
         root: root.clone(),
+        expected: Some(contract.expected_findings),
         toolchain: toolchain.clone(),
         dry_run: cli.dry_run,
         verbose: cli.verbose,

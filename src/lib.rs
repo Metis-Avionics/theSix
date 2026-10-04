@@ -193,7 +193,9 @@ pub mod telemetry;
 pub mod tier;
 
 pub use capability::{CapabilityFlags, DurabilityClass, OperationalState, TierCapability};
-pub use continuity::{ContinuityReport, ContinuityState, RecoveryDirection, RecoveryOutcome};
+pub use continuity::{
+    ContinuityReport, ContinuityState, RecoveryDirection, RecoveryOutcome, RecoveryReport,
+};
 pub use control::cachelito::Cachelito;
 pub use entry::{CacheEntry, EntryState, Generation};
 pub use entry::{CommitIntent, CommitToken, IntentKind};

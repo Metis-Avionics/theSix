@@ -3,8 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::capability::TierCapability;
+use crate::continuity::RecoveryReport;
 use crate::control::cachelito::{Cachelito, ControlSnapshot};
-use crate::entry::{EntryState, Generation, IntentKind};
+use crate::entry::{CommitToken, EntryState, Generation, IntentKind};
 use crate::error::CacheError;
 use crate::identity::CacheContext;
 use crate::key::Key;
@@ -68,6 +69,78 @@ impl Drop for PopulationGuard<'_> {
         let _ = self
             .cachelito
             .fail_with_error(&self.key, CacheError::Cancelled);
+    }
+}
+
+/// Releases a commit intent if the write path stops before resolving it.
+///
+/// `prepare` puts the entry into `Prepared`, claims population ownership and
+/// records an intent. Only `commit` or `abort` clears that. Without this guard a
+/// cancelled `set` — dropped at any `.await` between `prepare` and the phase-3
+/// `commit` — left the entry `Prepared` with `population_owner = true` and nobody
+/// to satisfy it. Every later operation on that key then waited out the full
+/// bound and failed, so one cancellation made a key unusable.
+///
+/// The same shape as [`PopulationGuard`], and for the same reason: `Drop` is the
+/// only construct that runs on every exit path, including a dropped future.
+///
+/// Deliberately *not* a rollback of the data write. If `tier.set` completed and
+/// the future died before `commit`, the value is on the rung and the intent is
+/// gone; recovery cannot distinguish that from an abort. The tier read path
+/// consults the control plane first, so an uncommitted value is unreachable —
+/// which is what `partial_commit_visible = false` claims — but the residue is
+/// reclaimed by the next successful write to that key, not by this guard.
+struct IntentGuard<'a> {
+    cachelito: &'a Cachelito,
+    token: CommitToken,
+    armed: bool,
+}
+
+impl<'a> IntentGuard<'a> {
+    fn new(cachelito: &'a Cachelito, token: CommitToken) -> Self {
+        Self {
+            cachelito,
+            token,
+            armed: true,
+        }
+    }
+
+    fn token(&self) -> &CommitToken {
+        &self.token
+    }
+
+    /// Abort the intent deliberately and disarm the guard.
+    ///
+    /// One call rather than `disarm()` followed by `abort(token())`: an earlier
+    /// version removed the token from an `Option` on disarm, so that ordering
+    /// panicked — and the test asserting cancellation safety is what caught it.
+    /// Keeping the token and tracking liveness separately makes the mistake
+    /// unrepresentable, and matches `PopulationGuard`'s shape.
+    fn abort(&mut self, error: CacheError) {
+        if !self.armed {
+            return;
+        }
+        let _ = self.cachelito.abort(&self.token, error);
+        self.armed = false;
+    }
+
+    /// The intent reached a terminal state deliberately; the guard has nothing
+    /// left to do. Used only on the commit-succeeded path.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for IntentGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // `abort` is idempotent, declines when a commit already won, and restores
+        // the state the intent interrupted rather than forcing `Failed`. All three
+        // matter here: a stale abort must not undo a successful commit, and a
+        // cancellation must not destroy the previously committed value.
+        let _ = self.cachelito.abort(&self.token, CacheError::Cancelled);
     }
 }
 
@@ -370,19 +443,18 @@ where
 
     /// Resolve every commit intent older than `INTENT_RECOVERY_AGE`.
     ///
-    /// Idempotent by construction: a `Write` intent aborts, a `Move` intent
-    /// completes forward, and both directions are safe to repeat. `recoverable`
-    /// counts what was resolved and `failed` what could not be, so
-    /// `recovery_failure_must_be_observable` is satisfied by construction rather
-    /// than by a log line nobody reads.
-    pub fn recover(&self) -> (usize, usize) {
+    /// Idempotent by construction: a `Write` intent aborts, which is safe to
+    /// repeat, and a `Move` intent is left for an external reconciler, which is
+    /// also safe to repeat because it changes nothing. The two are reported
+    /// separately, so `recovery_failure_must_be_observable` is satisfied by
+    /// construction rather than by a log line nobody reads.
+    pub fn recover(&self) -> RecoveryReport {
         self.recover_older_than(crate::continuity::INTENT_RECOVERY_AGE)
     }
 
     /// As [`Self::recover`], with an explicit age threshold.
-    pub fn recover_older_than(&self, age: Duration) -> (usize, usize) {
-        let mut recovered = 0_usize;
-        let mut failed = 0_usize;
+    pub fn recover_older_than(&self, age: Duration) -> RecoveryReport {
+        let mut report = RecoveryReport::default();
         for (key_hash, intent) in self.cachelito.stale_intents(age.as_nanos() as u64) {
             match intent.kind {
                 // A write's value is reproducible, so aborting is both safe and
@@ -396,22 +468,30 @@ where
                         .cachelito
                         .abort_intent_by_hash(key_hash, CacheError::UncommittedIntent)
                     {
-                        Ok(true) => recovered += 1,
+                        Ok(true) => report.recovered += 1,
                         Ok(false) => {}
-                        Err(_) => failed += 1,
+                        Err(_) => report.failed += 1,
                     }
                 }
-                // A move cannot be resolved without the key bytes: completing it
-                // forward means reading the source rung and writing the
-                // destination, and the control plane stores only a hash. Reported
-                // as failed rather than silently skipped, because
-                // `recovery_failure_must_be_observable` is a contract clause and a
-                // sweep that quietly dropped moves would look identical to one
-                // that had nothing to do.
-                IntentKind::Move => failed += 1,
+                // A move cannot be resolved by this process, and must not be
+                // guessed at.
+                //
+                // Completing it forward means reading the source rung and writing
+                // the destination, which needs the key bytes; the control plane
+                // keeps only a hash. Aborting is not a safe substitute either: the
+                // move removes the source before it commits, so a crash in that
+                // window leaves the value only at the destination, and aborting
+                // would point the control plane at a source that is now empty.
+                //
+                // So the intent is counted as needing reconciliation and left
+                // exactly as it is. Reported separately from `failed` because it is
+                // not a sweep that tried and lost — it is a job this sweep does not
+                // have the information to do, and folding the two together would
+                // make a permanently stuck key look like ordinary contention.
+                IntentKind::Move => report.needs_reconciliation += 1,
             }
         }
-        (recovered, failed)
+        report
     }
 
     pub fn cachelito(&self) -> &Cachelito {
@@ -792,6 +872,12 @@ where
                     .cachelito
                     .prepare(key_ref.0, None, rung, IntentKind::Write)?;
 
+                // From here the intent is owned by the guard, not by control
+                // flow. Every exit below either disarms it explicitly or lets
+                // `Drop` abort it, so a cancelled `set` cannot leave the key
+                // `Prepared` with an owner nobody will satisfy.
+                let mut intent = IntentGuard::new(&self.cachelito, token);
+
                 // Phase 2: the data write, outside every guard.
                 let set_result = self
                     .observed_write(
@@ -803,17 +889,53 @@ where
                     .await;
                 self.record_outcome(rung, set_result);
 
+                // A failed write is ambiguous unless the tier says otherwise.
+                //
+                // The commit-failure path below already removes what it created; the
+                // error path did not, so a backend that stored the bytes and then
+                // reported failure left the control plane saying "aborted" and the
+                // rung holding a value nobody authorised. Because `abort` restores
+                // the previous state, that residue was not merely an orphan: on a
+                // previously-populated key the rung had silently become the *new*
+                // value while the control plane still described the old one, which
+                // is `partial_commit_visible = true` reached by accident.
+                //
+                // Compensating unconditionally would be worse, and an earlier version
+                // of this did exactly that, gated on a per-tier capability flag — which
+                // broke `write_failure_fails_a_write_and_leaves_the_old_value`. A tier
+                // that rejects a write provably stored nothing, so the rung still holds
+                // the *previous* value, and removing that destroys a good value in the
+                // name of clearing residue that does not exist.
+                //
+                // The discriminator is `WriteIndeterminate`, and it has to be: only the
+                // tier knows whether its bytes landed. A capability flag is a
+                // per-tier blanket claim and cannot distinguish a rejected write from
+                // an accepted one, so it over-removes. `ATOMIC_WRITE_OR_ERROR` remains
+                // as reported capability — it is true and a consumer may want it — but
+                // it does not govern this decision.
+                if let Err(CacheError::WriteIndeterminate) = set_result {
+                    let _ = self.bounded(tier.remove(&key_ref)).await;
+                }
+
                 match set_result {
                     Ok(()) => {
                         // Phase 3: commit. `commit` re-checks the generation, so an
                         // invalidation that landed during the await wins and this
                         // write is rejected rather than silently undoing it.
-                        return match self.cachelito.commit(&token, ctx.ttl()) {
-                            Ok(()) => Ok(()),
+                        return match self.cachelito.commit(intent.token(), ctx.ttl()) {
+                            Ok(()) => {
+                                intent.disarm();
+                                Ok(())
+                            }
+                            // A lost race is not an error: this token is dead and
+                            // the guard aborts it as the loop re-prepares, so the
+                            // retry starts from the restored state.
                             Err(CacheError::StaleGeneration) => continue,
                             Err(e) => {
+                                // Uncommitted: the rung holds residue this write
+                                // created, so remove it before releasing the intent.
                                 let _ = tier.remove(&key_ref).await;
-                                let _ = self.cachelito.abort(&token, e);
+                                intent.abort(e);
                                 Err(e)
                             }
                         };
@@ -838,9 +960,10 @@ where
                         | CacheError::TierUnavailable
                         | CacheError::Timeout
                         | CacheError::Corrupted
-                        | CacheError::SerializationFailed),
+                        | CacheError::SerializationFailed
+                        | CacheError::WriteIndeterminate),
                     ) => {
-                        let _ = self.cachelito.abort(&token, e);
+                        intent.abort(e);
                         last_error = e;
                         rung = previous_rung(rung);
                         continue 'outer;
@@ -848,7 +971,7 @@ where
                     Err(e) => {
                         // Undo phase 1 so the entry is claimable again, and report
                         // the data-plane error rather than the bookkeeping one.
-                        let _ = self.cachelito.abort(&token, e);
+                        intent.abort(e);
                         return Err(e);
                     }
                 }
@@ -1062,6 +1185,12 @@ where
             .cachelito
             .prepare(key_ref.0, None, new_tier_id, IntentKind::Move)?;
 
+        // As in `set`: the guard owns the intent from here, so every early return
+        // below resolves it. Two of those returns were previously leaks rather
+        // than merely cancellation-unsafe — the unbound-tier check and the key
+        // re-encode both returned while the entry was still `Prepared`.
+        let mut intent = IntentGuard::new(&self.cachelito, token);
+
         let (Some(from_tier), Some(to_tier)) = (
             self.bound_tier(&snapshot.tier),
             self.bound_tier(&new_tier_id),
@@ -1074,17 +1203,23 @@ where
         let value = match self.bounded(from_tier.get(key_ref)).await {
             Ok(Some(v)) => v,
             Ok(None) => {
-                let _ = self.cachelito.abort(&token, CacheError::Miss);
+                intent.abort(CacheError::Miss);
                 return Err(CacheError::Miss);
             }
             Err(e) => {
-                let _ = self.cachelito.abort(&token, e);
+                intent.abort(e);
                 return Err(e);
             }
         };
 
         let mut buf2 = [0u8; MAX_KEY_SIZE];
-        let key_ref2 = Self::encode_key(key, ctx, &mut buf2)?;
+        let key_ref2 = match Self::encode_key(key, ctx, &mut buf2) {
+            Ok(k) => k,
+            Err(e) => {
+                intent.abort(e);
+                return Err(e);
+            }
+        };
         let set_result = self
             .observed_write(
                 Operation::Promote,
@@ -1095,7 +1230,7 @@ where
             .await;
         self.record_outcome(new_tier_id, set_result);
         if let Err(e) = set_result {
-            let _ = self.cachelito.abort(&token, e);
+            intent.abort(e);
             return Err(e);
         }
 
@@ -1106,13 +1241,16 @@ where
         let remove_result = from_tier.remove(key_ref).await;
         self.record_outcome(snapshot.tier, remove_result);
 
-        match self.cachelito.commit(&token, ctx.ttl()) {
-            Ok(()) => Ok(()),
+        match self.cachelito.commit(intent.token(), ctx.ttl()) {
+            Ok(()) => {
+                intent.disarm();
+                Ok(())
+            }
             Err(e) => {
                 // Uncommitted: the destination copy is residue. Remove it so the
                 // entry is only on the rung the control plane names.
                 let _ = to_tier.remove(&key_ref2).await;
-                let _ = self.cachelito.abort(&token, e);
+                intent.abort(e);
                 Err(e)
             }
         }

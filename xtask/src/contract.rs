@@ -27,6 +27,9 @@ pub enum GateKind {
     Slow,
     /// Requires a nightly toolchain, excluded from the default pass.
     Nightly,
+    /// Executed by the runner itself rather than a subprocess. Reads a repository
+    /// artefact and decides pass/fail from its contents.
+    Tracker,
 }
 
 impl GateKind {
@@ -45,6 +48,7 @@ impl GateKind {
             Self::Doctest => "doctest",
             Self::Slow => "slow",
             Self::Nightly => "nightly",
+            Self::Tracker => "tracker",
         }
     }
 }
@@ -67,6 +71,20 @@ pub struct Gate {
     pub description: String,
 }
 
+/// The merge-readiness contract: how many findings `bugs.toml` is expected to
+/// hold. Kept in the contract rather than in the tracker, because a tracker that
+/// declares its own expected contents can be defused by editing itself — the
+/// counts have to live somewhere the tracker does not control.
+#[derive(Debug, Default, Deserialize)]
+struct MergeReadiness {
+    #[serde(default)]
+    tracker: Option<String>,
+    #[serde(default)]
+    expected_blocking: Option<usize>,
+    #[serde(default)]
+    expected_should_fix: Option<usize>,
+}
+
 #[derive(Debug, Deserialize)]
 struct GateOrder {
     order: Vec<String>,
@@ -76,6 +94,8 @@ struct GateOrder {
 struct Verification {
     #[serde(rename = "gate")]
     gates: Vec<Gate>,
+    #[serde(default)]
+    merge_readiness: MergeReadiness,
     gate_order: GateOrder,
     verification_required: bool,
     anti_vacuity_required: bool,
@@ -197,6 +217,9 @@ pub struct Contract {
     pub telemetry_fields: Vec<String>,
     /// Every feature flag the runner will pass, unioned across gates.
     pub required_booleans: Vec<(String, bool)>,
+    /// Expected merge-readiness finding counts, declared by the contract so the
+    /// tracker cannot be defused by editing itself.
+    pub expected_findings: crate::gates::ExpectedFindings,
 }
 
 impl Contract {
@@ -405,6 +428,10 @@ impl Contract {
             security_requirements: parsed.testing.security.requirements,
             telemetry_fields: parsed.observability.operation.fields,
             required_booleans,
+            expected_findings: crate::gates::ExpectedFindings {
+                blocking: parsed.verification.merge_readiness.expected_blocking,
+                should_fix: parsed.verification.merge_readiness.expected_should_fix,
+            },
         })
     }
 

@@ -11,6 +11,22 @@ pub enum CacheError {
     #[error("tier unavailable")]
     TierUnavailable,
 
+    /// A write whose outcome is unknown: the backend may have stored the bytes
+    /// and may not have, and it cannot say which.
+    ///
+    /// This is a distinct condition from every other error here, because it is the
+    /// only one where the caller's next action depends on the *data plane* rather
+    /// than on the control plane. A definite failure — a full tier, a rejected
+    /// write — provably stored nothing, so there is nothing to clean up and
+    /// deleting the key would destroy the value already there. An indeterminate
+    /// failure may have overwritten a good value with one nobody authorised, so
+    /// the key has to go before the intent is released.
+    ///
+    /// Conflating the two is what made a failed write either leak a value or
+    /// destroy a good one, depending on which mistake was made.
+    #[error("write outcome indeterminate")]
+    WriteIndeterminate,
+
     #[error("policy denied")]
     PolicyDenied,
 

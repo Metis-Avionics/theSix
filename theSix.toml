@@ -61,7 +61,24 @@ commit_protocol = "two-phase-intent"
 prepare_state = "prepared"
 read_of_uncommitted_entry = "miss"
 recovery_direction_prepare_write = "abort"
-recovery_direction_prepare_move = "complete-forward"
+
+# A move is NOT completed forward by recovery. This used to say
+# "complete-forward", which described the correct direction for a move and a
+# direction this crate cannot execute: finishing one means reading the source rung
+# and writing the destination, and the control plane persists only a hash of the
+# key. Aborting is not the safe fallback either -- the move removes the source
+# before it commits, so a crash in that window leaves the value only at the
+# destination, and aborting would point the control plane at an empty source.
+#
+# So the sweep reports the intent as needing an external reconciler and leaves it
+# exactly as it is. `RecoveryReport` counts those separately from `failed`,
+# because "the sweep could not do this" and "the sweep lacks the information to
+# do this" need different responses from a caller.
+#
+# Closing this properly means persisting enough identity to reconstruct the move,
+# or adding a reconciliation pass that can reach the authority rung. Neither is in
+# the tree; see bugs.toml B3.
+recovery_direction_prepare_move = "external-reconciliation"
 
 [acid.consistency]
 required = true
@@ -397,6 +414,7 @@ faults = [
     "capacity_exhaustion",
     "failure_after_n_operations",
     "cancellation",
+    "partial_write",
 ]
 
 # ---------------------------------------------------------------------------
@@ -493,6 +511,15 @@ fields = [
 verification_required = true
 anti_vacuity_required = true
 
+# Merge readiness. The expected counts live here, not in bugs.toml, so that a
+# finding cannot be removed — or its severity quietly downgraded — without editing
+# the contract. `cargo xtask run merge_readiness` fails while any blocking finding
+# is open.
+[verification.merge_readiness]
+tracker = "bugs.toml"
+expected_blocking = 3
+expected_should_fix = 2
+
 [verification.required]
 fmt = true
 check_all_targets = true
@@ -546,6 +573,7 @@ fallback_path_must_be_verified = true
 order = [
     "fmt",
     "contract",
+    "xtask_unit",
     "check",
     "clippy",
     "doc",
@@ -567,6 +595,7 @@ order = [
     "performance",
     "soak",
     "fuzz",
+    "merge_readiness",
 ]
 
 [[verification.gate]]
@@ -581,6 +610,12 @@ kind = "test"
 targets = ["contract"]
 features = ["--all-features"]
 description = "Parses this file and asserts every clause is bound to a real test target."
+
+[[verification.gate]]
+name = "xtask_unit"
+kind = "cargo"
+args = ["test", "-p", "xtask", "--all-features"]
+description = "Unit tests for the gate runner itself. The runner decides what passes, so its own logic — tool probing, argv construction, and the merge-readiness check — is under test rather than trusted."
 
 [[verification.gate]]
 name = "check"
@@ -740,3 +775,8 @@ requirements_drive_ontology = true
 ontology_drives_pipeline = true
 implementation_follows_contract = true
 tier_topology_is_replaceable = true
+
+[[verification.gate]]
+name = "merge_readiness"
+kind = "tracker"
+description = "Fails while any `blocks_merge` finding in bugs.toml is open. A finding clears only by being resolved or explicitly accepted as risk with a named owner and a written rationale. Deliberately capable of failing: a readiness check that always passes would be the defect this revision exists to remove. Runs last, because it is a statement about everything above it."

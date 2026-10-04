@@ -147,7 +147,8 @@ impl<V: ByteValue> CacheTier<V> for L4SledBackend<V> {
         crate::capability::TierCapability::new(
             BackendKind::Sled,
             crate::capability::CapabilityFlags::PERSISTENT
-                | crate::capability::CapabilityFlags::BLOCKING_IO,
+                | crate::capability::CapabilityFlags::BLOCKING_IO
+                | crate::capability::CapabilityFlags::ATOMIC_WRITE_OR_ERROR,
             crate::capability::OperationalState::Healthy,
             crate::capability::DurabilityClass::Delegated,
         )

@@ -560,3 +560,63 @@ fn every_declared_negative_case_has_a_test() {
         "registry self-check failed: {missing:?}"
     );
 }
+
+/// The declared recovery directions must be the ones the runtime can take.
+///
+/// This exists because `recovery_direction_prepare_move` claimed
+/// `"complete-forward"` for months of review while the production sweep could not
+/// execute it: `Cachelito` persists a hash, so completing a move needs key bytes
+/// the sweep does not have. Nothing caught the disagreement, because the contract
+/// gate only ever compared the contract to the runner and the test inventory —
+/// never to runtime behaviour.
+///
+/// So this asserts the declared value against `RecoveryDirection::for_kind`. A
+/// future clause that over-promises has to be caught by a test that can fail, and
+/// this is that test.
+#[test]
+fn declared_recovery_directions_match_what_the_runtime_can_execute() {
+    use thesix::{IntentKind, RecoveryDirection};
+
+    let contract = std::fs::read_to_string("theSix.toml").expect("contract is readable");
+    let value = |key: &str| -> String {
+        contract
+            .lines()
+            .find(|l| l.starts_with(key))
+            .and_then(|l| l.split_once('='))
+            .map(|(_, v)| v.trim().trim_matches('"').to_string())
+            .unwrap_or_else(|| panic!("theSix.toml declares no {key}"))
+    };
+
+    // A write is abortable from a hash alone, so the contract may say so.
+    assert_eq!(
+        value("recovery_direction_prepare_write"),
+        "abort",
+        "the contract no longer names the write direction"
+    );
+    assert_eq!(
+        RecoveryDirection::for_kind(IntentKind::Write),
+        RecoveryDirection::Abort
+    );
+
+    // A move is not. Whatever the contract declares, the direction the runtime
+    // hands a sweep must not claim to be executable without the key — that is the
+    // property the old clause violated.
+    let declared_move = value("recovery_direction_prepare_move");
+    assert_eq!(
+        declared_move, "external-reconciliation",
+        "the contract claims a move recovery the runtime does not implement"
+    );
+    let runtime_move = RecoveryDirection::for_kind(IntentKind::Move);
+    assert_eq!(runtime_move, RecoveryDirection::ExternalReconciliation);
+    assert!(
+        !runtime_move.is_executable_here(),
+        "the runtime claims it can execute a move recovery without the key"
+    );
+
+    // And aborting must never be presented as the move fallback: it is the one
+    // direction that would destroy a committed value.
+    assert!(
+        !RecoveryDirection::Abort.is_success_without_the_key(),
+        "abort is not a safe move fallback, so nothing may present it as one"
+    );
+}

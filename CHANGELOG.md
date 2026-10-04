@@ -49,11 +49,26 @@ outright. Use `bound_tier`, `nearest_bound_rung`, or `capabilities()`.
   an injectable `TelemetrySink`. No payload, and no key: a key is identified by a
   non-reversible digest plus a length.
 - **Continuity states and recovery.** `ContinuityState`, `RecoveryDirection`,
-  `RecoveryOutcome`, `CacheManager::continuity()` and `recover()`.
+  `RecoveryOutcome`, `RecoveryReport`, `CacheManager::continuity()` and `recover()`.
+  A recovery report separates `recovered`, `failed` and `needs_reconciliation`,
+  because "the sweep could not resolve this" and "the sweep lacks the information
+  to" need different responses from a caller and were sharing a counter.
+- **Move recovery is `external-reconciliation`, not `complete-forward`.** The
+  contract previously promised a direction the runtime could not execute:
+  finishing a move means reading the source rung and writing the destination, and
+  the control plane persists only a key *hash*. Aborting is not a safe substitute
+  either, since a move removes the source before it commits. The sweep now reports
+  these intents and leaves them intact for an external reconciler.
 - **New test layers**: `contract`, `negative`, `property`, `fault_injection`,
   `recovery`, `durability`, `security`, `performance`, `soak`, `loom`.
 - **`cargo xtask`**, a clap-driven gate runner that reads the contract, plus a
-  `justfile`. nextest, sccache, and `clang` + `mold` when available.
+  `justfile`.
+- **A `merge_readiness` gate** driven by `bugs.toml`: it fails while any finding
+  marked `blocks_merge` is open, and CI runs it as a blocking job. The expected
+  finding counts are declared in `theSix.toml` rather than in the tracker, so a
+  finding cannot be removed or downgraded to make the gate pass. A finding clears
+  only by being `resolved` with a `rationale`, or `accepted-risk` with both
+  `accepted_by` and `rationale`. nextest, sccache, and `clang` + `mold` when available.
 - **Fuzzing.** Nine targets in an excluded `fuzz/` crate covering the contract's
   trust boundaries. Advisory in CI, since it needs nightly. The gate builds every
   target; a separate CI step smoke-runs each one and reports which target crashed
@@ -66,6 +81,13 @@ outright. Use `bound_tier`, `nearest_bound_rung`, or `capabilities()`.
 
 Each of these was a latent violation of a property the contract now states.
 
+- **A cancelled `set` wedged the key's population path.** `set` ran
+  prepare → await → commit with no RAII guard, so a future dropped at any await in
+  between left the entry `Prepared` with `population_owner = true` and nobody to
+  release it. `IntentGuard` now holds the intent across the write, in both `set`
+  and the move path, and aborts it on drop. Fixing the move path also closed two
+  leaks that had nothing to do with cancellation: the unbound-tier check and the
+  key re-encode both returned while the entry was still `Prepared`.
 - `StaleGeneration` returned from a population **without releasing ownership**. The
   entry stayed `InFlight` with an owner nobody would satisfy, so every later operation
   on that key waited out the full timeout and failed. A key could stay unusable until
@@ -133,7 +155,10 @@ Each of these was a latent violation of a property the contract now states.
 ### Verification
 
 Twenty mandatory gates execute in ~50s on a warm cache, plus deferred `loom`,
-`performance` and `soak` gates. Seven tests that could not fail have been rewritten,
+`performance` and `soak` gates. `xtask` itself had no tests, so the logic deciding
+which gates run — tool probing, argv construction, and the verdict on an exit code
+— was unverified; it is now under test by the `xtask_unit` gate. Seven tests that
+could not fail have been rewritten,
 among them `test_tier_recovery` (which called `set_healthy(true)` — already the
 default, so no failure was ever injected) and `test_strict_policy_denies_anonymous_writes`
 (which never issued an anonymous write).

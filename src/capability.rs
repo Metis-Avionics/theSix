@@ -50,15 +50,38 @@ impl CapabilityFlags {
     /// Operations block the calling thread. A consumer that cares about reactor
     /// threads needs to know this before it awaits one.
     pub const BLOCKING_IO: CapabilityFlags = CapabilityFlags(1 << 5);
+    /// A `set` that returns an error left nothing behind.
+    ///
+    /// This is a stronger claim than "writes are atomic" and it is the one the
+    /// write path actually needs. Without it, a failed write is ambiguous in the
+    /// dangerous direction: the value may be on the rung *and* the call reports
+    /// failure, so the control plane aborts while the data plane keeps a value
+    /// nobody authorised. That is `partial_commit_visible = true` by accident.
+    ///
+    /// Reported, not consulted when deciding cleanup. That distinction is the
+    /// whole point and it was learned the hard way: gating the compensating
+    /// remove on this flag over-cleans, because a blanket per-tier claim cannot
+    /// distinguish a rejected write from an accepted one. `WriteFailure` returns
+    /// before storing anything, yet shares a tier with `PartialWrite`, which stores
+    /// first — so the flag would remove the key in both cases and destroy a good
+    /// value in one of them.
+    ///
+    /// The decision is made on `CacheError::WriteIndeterminate` instead, which
+    /// only the tier can raise and which is per-operation. This flag stays as
+    /// reported capability: it is true of every in-tree backend, and a consumer
+    /// choosing a rung has a legitimate reason to ask whether a rung can leave a
+    /// value behind when it reports failure.
+    pub const ATOMIC_WRITE_OR_ERROR: CapabilityFlags = CapabilityFlags(1 << 6);
 
     /// Every flag, for iteration and round-tripping.
-    pub const ALL: [CapabilityFlags; 6] = [
+    pub const ALL: [CapabilityFlags; 7] = [
         Self::IN_MEMORY,
         Self::VOLATILE,
         Self::PERSISTENT,
         Self::SHARED,
         Self::AUTHORITATIVE,
         Self::BLOCKING_IO,
+        Self::ATOMIC_WRITE_OR_ERROR,
     ];
 
     #[must_use]
@@ -112,6 +135,7 @@ impl CapabilityFlags {
             Self::SHARED => "shared",
             Self::AUTHORITATIVE => "authoritative",
             Self::BLOCKING_IO => "blocking_io",
+            Self::ATOMIC_WRITE_OR_ERROR => "atomic_write_or_error",
             _ => "unknown",
         }
     }

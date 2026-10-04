@@ -40,12 +40,24 @@ fn armed(plan: FaultPlan) -> Armed {
     (m, ledger, handle)
 }
 
+/// A one-rung manager over a tier the test supplies.
+fn single_rung<V: Clone + Send + Sync + 'static + thesix::IntegrityCheck>(
+    tier: Arc<dyn CacheTier<V>>,
+) -> Arc<thesix::CacheManager<String, V, thesix::DefaultPolicy>> {
+    testkit::manager_from_parts(
+        thesix::DefaultPolicy,
+        thesix::Cachelito::new(),
+        vec![tier],
+        Duration::from_millis(500),
+    )
+}
+
 /// Every class must be constructible and its spelling stable, because the
 /// contract and the runner both key off these names.
 #[test]
 fn every_fault_class_has_a_stable_name() {
     let names: Vec<&str> = FaultClass::ALL.iter().map(|c| c.as_str()).collect();
-    assert_eq!(names.len(), 11);
+    assert_eq!(names.len(), 12);
     for expected in [
         "latency",
         "timeout",
@@ -58,6 +70,7 @@ fn every_fault_class_has_a_stable_name() {
         "capacity_exhaustion",
         "failure_after_n_operations",
         "cancellation",
+        "partial_write",
     ] {
         assert!(names.contains(&expected), "{expected} has no class");
     }
@@ -336,7 +349,9 @@ fn the_harness_can_fire_every_class() {
             | FaultClass::CapacityExhaustion
             | FaultClass::Latency
             | FaultClass::Disconnect => OpKind::Set,
-            FaultClass::Cancellation | FaultClass::FailureAfterN => OpKind::Set,
+            FaultClass::Cancellation | FaultClass::FailureAfterN | FaultClass::PartialWrite => {
+                OpKind::Set
+            }
         };
         assert!(
             class.applies_to(op),
@@ -444,5 +459,144 @@ async fn one_failing_rung_does_not_take_the_others_down() {
         m.get(&key, &test_ctx()).await.expect("get"),
         Some("v".to_string()),
         "the value written through the healthy rung was not readable"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Partial writes
+// ---------------------------------------------------------------------------
+
+/// Establishes the fixture: `PartialWrite` really does leave bytes behind.
+///
+/// Called against the tier directly rather than through a manager. That is
+/// deliberate and load-bearing — the manager's job is to *remove* this residue,
+/// so a fixture proof routed through the manager would assert the absence of the
+/// very thing it exists to demonstrate, and would pass if the fault stopped
+/// producing residue at all.
+#[tokio::test]
+async fn the_partial_write_fault_really_stores_bytes_before_failing() {
+    let stub = Arc::new(L0Stub::<String>::new());
+    let (tier, ledger) = testkit::faulty(
+        Arc::clone(&stub) as Arc<dyn CacheTier<String>>,
+        FaultPlan::new().push(OpKind::Set, FaultClass::PartialWrite),
+    );
+
+    let framed = testkit::framed_key(&test_ctx(), "residue");
+    let result = tier
+        .set(
+            &KeyRef(framed.as_slice()),
+            "written-then-failed".to_string(),
+            None,
+        )
+        .await;
+
+    assert!(
+        matches!(result, Err(CacheError::WriteIndeterminate)),
+        "the fault must report an indeterminate outcome, got {result:?}"
+    );
+    assert_eq!(
+        ledger.fired(FaultClass::PartialWrite),
+        1,
+        "the fault never fired"
+    );
+    assert_eq!(
+        stub.get(&KeyRef(framed.as_slice()))
+            .await
+            .expect("direct stub read")
+            .as_deref(),
+        Some("written-then-failed"),
+        "the fault did not store anything, so no residue exists to clean up"
+    );
+}
+
+/// The severe case: a failed write must not silently become the value the key
+/// reads back as.
+///
+/// Before the compensating remove, `abort` restored the previous committed state
+/// while the rung held the *new* bytes — so the control plane described the old
+/// value and the rung served the new one. That is
+/// `partial_commit_visible = true` reached by accident, and it is worse than an
+/// orphan: an orphan is invisible, whereas this is a plausible-looking wrong
+/// answer.
+#[tokio::test]
+async fn a_failed_write_does_not_silently_replace_a_committed_value() {
+    let tier = testkit::FaultyTier::<String>::wrap(
+        Arc::new(L0Stub::<String>::new()) as Arc<dyn CacheTier<String>>
+    );
+    let manager = single_rung(Arc::clone(&tier) as Arc<dyn CacheTier<String>>);
+    let ctx = test_ctx();
+    let key = "replaced".to_string();
+
+    // A good, committed value first.
+    manager
+        .set(&key, "original".to_string(), &ctx)
+        .await
+        .expect("seed a committed value");
+    assert_eq!(
+        manager.get(&key, &ctx).await.expect("read seeded"),
+        Some("original".to_string())
+    );
+
+    // Now a write that lands and then fails.
+    tier.arm(FaultPlan::new().push(OpKind::Set, FaultClass::PartialWrite));
+    assert!(
+        manager
+            .set(&key, "impostor".to_string(), &ctx)
+            .await
+            .is_err()
+    );
+
+    let got = manager.get(&key, &ctx).await;
+    assert!(
+        !matches!(got, Ok(Some(ref v)) if v == "impostor"),
+        "the uncommitted value was served as the key's value: {got:?}"
+    );
+}
+
+/// A *definite* write failure must leave the committed value alone.
+///
+/// The counterpart to the residue tests, and the one that keeps the compensating
+/// remove honest. `WriteIndeterminate` says the backend may have stored the
+/// bytes, so the key has to go; every other write error says it provably stored
+/// nothing, so removing the key would delete a good value for nothing.
+///
+/// An earlier fix gated the cleanup on a per-tier capability flag instead of on
+/// the error, and this is the test that caught it: `WriteFailure` was over-cleaned
+/// and the previously committed value came back as a miss.
+#[tokio::test]
+async fn a_definite_write_failure_leaves_the_committed_value_alone() {
+    let tier = testkit::FaultyTier::<String>::wrap(
+        Arc::new(L0Stub::<String>::new()) as Arc<dyn CacheTier<String>>
+    );
+    let ledger = tier.ledger();
+    let manager = single_rung(Arc::clone(&tier) as Arc<dyn CacheTier<String>>);
+    let ctx = test_ctx();
+    let key = "kept".to_string();
+
+    manager
+        .set(&key, "original".to_string(), &ctx)
+        .await
+        .expect("seed a committed value");
+
+    tier.arm(FaultPlan::new().push(OpKind::Set, FaultClass::WriteFailure));
+    assert!(
+        manager
+            .set(&key, "replacement".to_string(), &ctx)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        ledger.fired(FaultClass::WriteFailure),
+        1,
+        "the armed fault never fired"
+    );
+
+    assert_eq!(
+        manager
+            .get(&key, &ctx)
+            .await
+            .expect("read after failed write"),
+        Some("original".to_string()),
+        "a definite write failure destroyed the committed value"
     );
 }

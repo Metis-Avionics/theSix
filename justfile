@@ -32,6 +32,12 @@ deferred:
 layers:
     @cargo xtask layers
 
+# Is this branch mergeable? Fails while any `blocks_merge` finding in bugs.toml is
+# open. Kept out of `default` on purpose: it is a statement about the whole branch,
+# not about whether the current change is sound.
+ready:
+    @cargo xtask run merge_readiness
+
 # Everything, including the nightly and long-running gates.
 all:
     @cargo xtask run all

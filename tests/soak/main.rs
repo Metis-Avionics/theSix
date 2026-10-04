@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use testkit::{framed_key, manager_from_parts, test_ctx};
-use thesix::{CacheError, CacheTier, IntentKind, KeyRef, L0Stub, L1Stub, TierId};
+use thesix::{CacheError, CacheTier, IntentKind, KeyRef, L0Stub, L1Stub, RecoveryReport, TierId};
 
 fn ladder() -> Arc<thesix::CacheManager<String, String, thesix::DefaultPolicy>> {
     manager_from_parts(
@@ -331,7 +331,7 @@ fn recovery_scales_linearly() {
                     .expect("prepare");
             }
             let started = Instant::now();
-            let (recovered, failed) = m.recover_older_than(Duration::from_secs(0));
+            let RecoveryReport { recovered, failed, .. } = m.recover_older_than(Duration::from_secs(0));
             (started.elapsed(), recovered, failed)
         };
 

@@ -1,0 +1,475 @@
+# bugs.toml — review findings against PR3 (`feat/hpa-continuity-contract`)
+#
+# This file is a record, not a gate. Nothing in `cargo xtask` reads it yet, and
+# `cargo xtask contract` does not check it. That is stated here explicitly so the
+# file cannot be mistaken for a passing state: the clauses in `theSix.toml` that
+# findings B1, B2 and B3 contradict are asserted by `tests/contract` today, and
+# those assertions are true *about the contract text*, not about the runtime.
+#
+# Each finding below was re-derived from the source at the recorded commit before
+# being written down. The review's own claims were not taken on trust; where the
+# review was right, the confirming line is cited. Where the review overstated
+# something, that is recorded too.
+
+[meta]
+branch = "feat/hpa-continuity-contract"
+commit = "38887d2"
+reviewed_commit = "38887d2"
+reviewer = "ChatGPT, external code review"
+review_date = "2026-10-04"
+verdict_architecture = 9.0
+verdict_verification_strategy = 9.5
+verdict_implementation_correctness = 7.5
+merge_ready = false
+findings_blocking = 3
+findings_should_fix = 2
+findings_praised = 4
+independently_verified = true
+
+# The reviewer's summary judgement, kept verbatim in substance because it is the
+# most useful single sentence in the review:
+#
+#   "PR3's architecture is ahead of its recovery semantics."
+#
+# i.e. the contract describes a system more correct than the one implemented, and
+# the verification machinery is now good enough to expose the gap. The remedy the
+# review recommends is to close the named failure windows, not to redesign.
+
+[verdict]
+architecture = """
+Strong, and not in a generic sense. The contract-driven gate model, the
+control/data-plane split, the capability axes, and the explicit L6 authority
+boundary are all real improvements rather than restatements of intent.
+"""
+implementation = """
+Three genuine semantic holes, two integrity inconsistencies. All five were
+confirmed against the source; none were stylistic.
+"""
+merge_criterion = """
+Do not merge yet. Do not redesign. Close B1, B2 and B3 with the specific tests
+named below, then re-review. A 95%-correct implementation is not "pretty good"
+for a crate making ACID, continuity and cancellation-safety claims, because the
+remaining 5% lives in exactly the failure windows the system exists to handle.
+"""
+
+# ---------------------------------------------------------------------------
+# BLOCKING
+# ---------------------------------------------------------------------------
+
+[[bug]]
+id = "B1"
+title = "set() has no RAII guard on its commit intent, so cancellation wedges the key"
+severity = "blocking"
+status = "resolved"
+resolved_at = "2026-10-04"
+accepted_by = "leo"
+rationale = """
+Fixed by `IntentGuard`, an RAII guard held across the write await in both `set`
+and the move path. Its Drop aborts the token; `abort` is idempotent, declines when
+a commit already won, and restores the state the intent interrupted. Two regression
+tests in tests/recovery, both confirmed to fail against the pre-fix code.
+
+The symptom was narrower than first reported. `set` was never wedged, because
+`prepare` has no claimability precondition and a second write simply re-prepares
+over the abandoned intent. `get` was never wedged either; it reports Miss on a
+Prepared entry. Only `get_or_fetch` wedged: it must claim the entry to populate it,
+`acquire` declines while `population_owner` is set, and the caller burned the full
+timeout as a waiter against an owner that would never arrive.
+
+Fixing the move path also closed two leaks that were not cancellation-related and
+were not in the original report: the unbound-tier check and the key re-encode both
+returned while the entry was still Prepared.
+"""
+verified = true
+blocks_merge = true
+locations = ["src/manager.rs:94", "src/manager.rs:853", "src/manager.rs:1140", "src/control/cachelito.rs:892"]
+violates = ["cancel_safe = true", "theSix.toml:249"]
+summary = """
+`set()` ran prepare -> await tier.set() -> commit/abort with no guard object
+anywhere in the sequence. `PopulationGuard` solves exactly this problem for
+`get_or_fetch` and was constructed only in that path — the write path never
+instantiated it.
+"""
+mechanism = """
+prepare()                        entry.state = Prepared
+                                 population_owner = true
+                                 intent_present = true
+  await tier.set(...)            caller is cancelled here
+future dropped                   no Drop impl runs
+  -> nothing aborts the intent
+
+The entry stays Prepared with an owner no one will ever satisfy. It is not
+readable (correct) but it is not claimable either, so every subsequent operation
+on that key waits out the full bound and fails. The intent survives only until a
+recovery sweep older than INTENT_RECOVERY_AGE clears it.
+"""
+why_this_is_not_a_test_gap = """
+The mechanism required to fix it is already written and already proven in this
+crate — `PopulationGuard`'s Drop releases the claim. The implementation simply
+does not apply it to the write path. This is an omission, not a design gap.
+"""
+resolution = """
+`IntentGuard` in src/manager.rs. Shape mirrors `PopulationGuard` — it holds the
+token and an `armed` flag — with one addition: `abort(&mut self, error)` is a
+single method rather than `disarm()` followed by `abort(token())`. An earlier
+version removed the token from an `Option` on disarm, so that ordering panicked;
+the cancellation test is what caught it. Keeping the token and tracking liveness
+separately makes the mistake unrepresentable.
+
+Held across the await in both `set()` and `move_entry()`.
+"""
+tests_added = [
+  "tests/recovery: a_cancelled_set_releases_its_commit_intent",
+  "tests/recovery: a_cancelled_write_does_not_wedge_the_population_path",
+]
+anti_vacuity_note = """
+Both tests assert the stall actually fired before asserting the abort — the first
+via `HangingTier::reached() > 0`, the second via `ledger.fired(FaultClass::Latency)`.
+The second uses a one-shot latency fault rather than a permanently hanging tier,
+because with a permanently hanging rung the follow-up call times out on the data
+plane either way and a duration assertion would prove nothing about the claim.
+Both were confirmed to fail against the pre-fix code with the guard's Drop neutered.
+"""
+
+[[bug]]
+id = "B2"
+title = "A failed tier.set can leave data-plane residue the abort does not remove"
+severity = "blocking"
+status = "resolved"
+resolved_at = "2026-10-04"
+accepted_by = "leo"
+rationale = """
+Fixed by compensating removal on `CacheError::WriteIndeterminate`, plus the error
+variant that makes the condition expressible. Also added `FaultClass::PartialWrite`,
+the only fault that stores bytes and then fails, so the property finally has a test
+that can fail.
+"""
+verified = true
+blocks_merge = true
+locations = ["src/manager.rs:815", "src/manager.rs:843", "src/manager.rs:851"]
+violates = ["partial_commit_visible = false", "theSix.toml:54"]
+note_on_second_clause = """
+`cancelled_operation_may_commit_partially` is no longer listed as violated. B1's
+`IntentGuard` made cancellation resolve the intent, and residue from a cancelled
+write is indistinguishable from residue from a failed one — both are handled by the
+same indeterminate-write path. The clause is better read as a property of the
+recovery mechanism than of the error class, and it is now covered by the recovery
+layer rather than contradicted here.
+"""
+summary = """
+The commit-failure path correctly removes the residue it created; the
+tier.set-error path does not. The asymmetry is the bug.
+"""
+mechanism = """
+tier.set() succeeds, commit() fails  -> tier.remove() THEN abort()   (clean)
+tier.set() returns Err after writing   -> abort() only              (residue)
+
+Concretely, at src/manager.rs:815 the commit-failure arm calls
+`tier.remove(&key_ref)` before aborting, with the comment "Uncommitted: the
+destination copy is residue." The tier.set-error arms at :843 and :851 call
+`abort` and nothing else. So a backend that writes bytes and then reports an
+error leaves the control plane saying "aborted" and the tier holding a value the
+control plane has no record of.
+"""
+why_this_is_not_a_test_gap = """
+It is a test gap AND an implementation gap, and they compound. The existing
+`partial_write` test exercises the control-plane intent only; it never has a
+backend write bytes and then fail. So the property the contract states is not
+merely unimplemented, it is untested.
+"""
+resolution = """
+Added `CacheError::WriteIndeterminate` and removed the key from the rung when a
+write reports it. The discriminator is the error, not a tier capability flag — the
+first attempt used `CapabilityFlags::ATOMIC_WRITE_OR_ERROR` and was wrong, which
+the pre-existing `write_failure_fails_a_write_and_leaves_the_old_value` test caught
+immediately. A blanket per-tier claim cannot distinguish a rejected write from an
+accepted one: `WriteFailure` and `PartialWrite` share a tier and produce opposite
+requirements, so the flag over-removed and destroyed committed values. Only the
+tier knows what happened, so the tier has to say so, per operation.
+
+`ATOMIC_WRITE_OR_ERROR` is retained as reported capability — true of every in-tree
+backend, and useful to a consumer choosing a rung — but it does not govern cleanup,
+and its doc comment says so.
+
+Where the harm actually occurs is narrower than first assumed, and the tests record
+it: on a *fresh* key the residue is invisible either way, because reads consult the
+control plane first and an aborted entry reads as `Absent`. The damage requires a
+previously-committed value, where the rung silently becomes the new bytes while the
+control plane still describes the old one.
+"""
+tests_added = [
+  "tests/fault_injection: the_partial_write_fault_really_stores_bytes_before_failing",
+  "tests/fault_injection: a_failed_write_does_not_silently_replace_a_committed_value",
+  "tests/fault_injection: a_definite_write_failure_leaves_the_committed_value_alone",
+]
+verification_note = """
+Only `a_failed_write_does_not_silently_replace_a_committed_value` fails against the
+pre-fix code — it is the regression test. The first proves the fault is real and is
+routed through the tier directly, because the manager's job is to delete the residue
+and a manager-level fixture assertion would assert its absence. The third guards
+against over-correction and passes either way by design.
+"""
+review_addendum = """
+The review's framing is correct and slightly stronger than stated: this is not
+only a residue problem. Because `abort` restores the previously committed state,
+a residue left behind can also be *served* to a later reader if the entry is
+re-populated at the same rung — the abort makes the slot claimable again while
+the stale bytes are still on the rung.
+"""
+
+[[bug]]
+id = "B3"
+title = "Move recovery is declared complete-forward but cannot be completed after a crash"
+severity = "blocking"
+status = "resolved"
+resolved_at = "2026-10-04"
+accepted_by = "leo"
+rationale = """
+Resolved by redefining the contract, not by implementing the recovery.
+`recovery_direction_prepare_move` is now `external-reconciliation`, which is what
+the runtime can actually do. Accepted as a deliberate, documented limitation rather
+than a defect: the alternative was persisting enough identity to reconstruct a
+move, which is a feature and not a fix.
+
+Also made the limitation structural rather than prose: `RecoveryDirection::
+for_kind(Move)` now returns `ExternalReconciliation`, `Cachelito::resolve_intent`
+declines it, and `RecoveryReport` counts these separately from `failed` so a caller
+can tell "the sweep could not do this" from "the sweep lacks the information".
+"""
+verified = true
+blocks_merge = true
+locations = ["src/manager.rs:386", "src/manager.rs:411", "src/control/cachelito.rs:106"]
+violates = ["recovery_direction_prepare_move", "theSix.toml:64"]
+summary = """
+`RecoveryDirection::for_kind(IntentKind::Move)` correctly returns
+CompleteForward, and `Cachelito::resolve_intent` can complete a move when handed
+a key. The production path can never hand it one.
+"""
+mechanism = """
+Cachelito persists only `key_hash: u64` (src/control/cachelito.rs:106). Completing
+a move needs the actual key bytes plus source and destination rungs: read source,
+write destination, remove source, commit. After a crash the key bytes are gone,
+so recover_older_than counts the intent as failed at src/manager.rs:411
+(`IntentKind::Move => failed += 1`) and moves on.
+"""
+the_trap = """
+A recovery algorithm that works in isolation, with no recovery path capable of
+invoking it after the failure it was designed for. `partial_promotion` passes
+because it drives resolve_intent directly with a key in hand, which is exactly
+why the suite is green and the behaviour is still absent.
+"""
+status_of_the_knowing = """
+Partially disclosed. `living.toml`'s pending_work and AGENTS.md both state that
+move recovery reports failed and needs an external reconciliation source. The
+defect is that `theSix.toml` still promises complete-forward, so the machine-
+checked contract and the runtime disagree. The disclosure in prose does not
+satisfy a machine-checked clause.
+"""
+resolution = """
+Option (b) was chosen. `theSix.toml` now declares
+`recovery_direction_prepare_move = "external-reconciliation"`, with a comment
+recording why neither complete-forward nor abort is available.
+
+Three structural changes so the limitation cannot drift back into a promise:
+
+* `RecoveryDirection::for_kind(Move)` returns `ExternalReconciliation`, not
+  `CompleteForward`. A sweep holding only a hash has no direction it can execute,
+  and the type now says so.
+* `Cachelito::resolve_intent` declines `ExternalReconciliation` with an error.
+  Committing the control-plane half of a move whose data half never happened would
+  publish a move that did not occur.
+* `recover()` returns `RecoveryReport { recovered, failed, needs_reconciliation }`
+  instead of a two-tuple, because "the sweep tried and lost" and "the sweep has no
+  information" need different responses and were sharing a counter.
+"""
+tests_added = [
+  "tests/continuity (unit): only_abort_is_executable_without_the_key",
+  "tests/recovery: an_unresolvable_move_is_reported_separately_from_a_failure",
+  "tests/contract: declared_recovery_directions_match_what_the_runtime_can_execute",
+]
+anti_vacuity_note = """
+The contract test asserts the declared string against `RecoveryDirection::for_kind`
+and was confirmed to fail when the clause was set back to `complete-forward`. That
+is the only test in the suite that compares a declared invariant to runtime
+behaviour rather than to the runner and the test inventory, and its absence is
+precisely why this defect survived review.
+"""
+deliberately_not_done = """
+Option (a) — persisting the key bytes, or a durable handle to them, in
+`CommitIntent` — would let recovery actually finish a move. Not attempted: it
+changes the control plane's payload-free guarantee, which is a contract invariant
+in its own right. `CommitIntent` holding key bytes is exactly the kind of thing
+`commit_protocol` exists to forbid.
+
+A related limitation, also left in place: a move removes the source rung *before*
+it commits, so a crash in that window leaves the value only at the destination. Any
+future reconciliation pass must account for that window rather than assuming the
+source is still authoritative.
+"""
+
+# ---------------------------------------------------------------------------
+# SHOULD FIX
+# ---------------------------------------------------------------------------
+
+[[bug]]
+id = "B4"
+title = "The blanket IntegrityCheck digest is not 128-bit; its own comment claims it is"
+severity = "should-fix"
+status = "open"
+verified = true
+blocks_merge = false
+locations = ["src/integrity.rs:98", "src/integrity.rs:104", "src/integrity.rs:56", "src/integrity.rs:131"]
+violates = []
+summary = """
+`impl<T: Hash> IntegrityCheck for T` constructs two `DefaultHasher`s, hashes the
+same value into each, and mixes the results. Both hashers see identical input
+with identical construction, so `a == b` always, and the 128-bit result is a
+deterministic transformation of one 64-bit hash rather than 128 bits of entropy.
+The comment on line 93 says "Two independent hashers" and that is false.
+"""
+three_semantics_in_one_module = """
+  ContentDigest::of_bytes   two FNV seeds          genuinely 128-bit   (:56)
+  KeyFingerprint::of        two FNV seeds          genuinely 128-bit   (:131)
+  IntegrityCheck blanket    two DefaultHashers     effectively 64-bit  (:98)
+"""
+impact = """
+Not a vulnerability: the digest never leaves the process, so this is corruption
+detection and not tamper resistance, which the module already documents. But the
+collision model differs by a factor of 2^64 depending on which constructor a
+caller happened to use, and the code claims a uniformity it does not have.
+"""
+required_fix = """
+Either seed the two hashers differently so they are genuinely independent, or
+reduce the blanket impl to an honestly-named 64-bit digest and document the
+weaker collision bound. The second option is defensible for in-process use.
+"""
+required_test = """
+A digest test that asserts two distinct values produce distinct digests is not
+sufficient — it passes today. Assert the *stated* entropy instead, or drop the
+128-bit claim from the doc comment so nothing depends on it.
+"""
+
+[[bug]]
+id = "B5"
+title = "Cachelito identifies control-plane entries by a bare 64-bit hash"
+severity = "should-fix"
+status = "open"
+verified = true
+blocks_merge = false
+locations = ["src/control/cachelito.rs:106", "src/control/cachelito.rs:419", "src/control/cachelito.rs:504"]
+violates = ["no_cross_key_corruption = true", "theSix.toml:341"]
+summary = """
+`ControlEntry` stores `key_hash: u64` and `find_slot` treats
+`entry.key_hash() == key_hash` as identity (line 419). Two distinct keys with the
+same 64-bit hash resolve to one control entry, so one key's generation, owner,
+intent and tier would be applied to the other's key.
+"""
+the_inconsistency = """
+This is the finding the reviewer puts best. `src/integrity.rs` goes out of its way
+to separate placement identity from logical identity, and explains in a comment
+that conflating them is why the previous stub aliased two keys onto one slot. The
+data plane took that lesson — `KeyFingerprint` plus injectable `Placement`. The
+control plane did not: it still collapses placement and identity into one 64-bit
+value. The branch is philosophically inconsistent with itself.
+"""
+why_it_is_not_merely_theoretical = """
+The data-plane stub has adversarial collision tests because `Placement` is
+injectable and a collision can be produced on demand. Cachelito has no injection
+point and no equivalent test, so `no_cross_key_corruption` is asserted for the
+control plane but never demonstrated — the property is untestable there, not
+merely untested.
+"""
+required_fix = """
+Store a `KeyFingerprint` (128-bit) alongside the placement hash in
+`ControlEntry`, and compare fingerprints for identity while using the hash only
+to pick a start slot — mirroring the data plane's split. If a 64-bit placement
+hash is to remain, make the placement strategy injectable so a collision can be
+forced and the identity check demonstrated, as `Placement::AllToZero` already
+does for the stub.
+"""
+required_test = """
+Force two distinct keys onto one placement hash in Cachelito and assert they hold
+independent state — separate generations, separate owners, separate intents.
+"""
+
+# ---------------------------------------------------------------------------
+# ACKNOWLEDGED STRENGTHS
+# ---------------------------------------------------------------------------
+#
+# Recorded so a later reader does not "fix" these by accident, and so the review's
+# positive findings are part of the record rather than lost in a chat log.
+
+[[strength]]
+id = "S1"
+area = "test architecture"
+assessment = "excellent"
+detail = """
+The anti-vacuity discipline is the strongest part of the branch: asking whether
+the fault fired, whether the stall stalled, whether the corruption corrupted,
+rather than asserting `is_err()`. Coverage registries compared for equality
+against the contract mean a required case cannot be silently dropped.
+"""
+
+[[strength]]
+id = "S2"
+area = "control/data-plane boundary"
+assessment = "strong"
+detail = """
+Control plane -> owned snapshot -> release mutex -> await data plane, rather than
+holding a shard guard across an await. The `Notified::enable()` ordering is real
+race investigation: register before deciding to wait, then re-read.
+"""
+
+[[strength]]
+id = "S3"
+area = "L6 authority isolation"
+assessment = "strong"
+detail = """
+`last_cache_tier = L5` with authority as a configured role, and a fail-open scan
+bounded to the ladder. This forecloses the failure mode where an unavailable L5
+causes the authority rung to be queried and authority data surfaced as cache
+data — a violation that survives ordinary functional testing.
+"""
+
+[[strength]]
+id = "S4"
+area = "capability model and explicit contract"
+assessment = "strong"
+detail = """
+Three orthogonal axes rather than one enum, and `theSix.toml` machine-checked
+against the crate by `tests/contract` instead of asserted in prose.
+"""
+
+# ---------------------------------------------------------------------------
+# HONEST CAVEAT
+# ---------------------------------------------------------------------------
+#
+# Three of the blocking findings are contradictions between `theSix.toml` and the
+# runtime. `cargo xtask contract` passes today because it checks the contract
+# against the *runner and test inventory*, not against runtime behaviour. So the
+# gate is green while B1, B2 and B3 are open. That is a real limitation of the
+# current gate design, not a claim that the findings are minor.
+
+[gate_coverage_gap]
+summary = """
+`cargo xtask contract` verifies that the declared architecture matches the runner
+and the test inventory. It does not verify that the runtime honours the declared
+invariants. `cancel_safe`, `partial_commit_visible`,
+`cancelled_operation_may_commit_partially` and `recovery_direction_prepare_move`
+are all declared `true`/complete-forward and are all currently false in the
+implementation.
+"""
+implication = """
+A green gate run is not evidence against B1, B2 or B3. It is evidence that the
+contract is internally consistent and fully covered by declared targets.
+"""
+possible_followups = [
+  "Have `tests/contract` assert that every clause in `theSix.toml` marked as a runtime guarantee has a corresponding test registered in the coverage registries, so a clause with no proving test is a contract failure rather than a documentation gap.",
+  "Register B1-B3 in `theSix.toml` as known deviations with an explicit `known_deviation` marker, so the contract states them rather than the prose docs doing it.",
+  "Gate on this file: assert no `blocks_merge = true` entry is `status = \"open\"` before release, so the tracker cannot drift from the gates.",
+]
+not_done = """
+None of the above are implemented. They are recorded as options because
+`bugs.toml` is currently a note, and a note that silently grew enforcement
+semantics would misrepresent what the gates actually check.
+"""

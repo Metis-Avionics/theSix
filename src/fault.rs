@@ -25,6 +25,9 @@ pub enum OpKind {
 }
 
 impl OpKind {
+    /// Every operation, for iteration.
+    pub const ALL: [OpKind; 4] = [Self::Get, Self::Set, Self::Remove, Self::Contains];
+
     /// Parse the spelling used in contract and test names.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
@@ -71,11 +74,21 @@ pub enum FaultClass {
     FailureAfterN,
     /// Abort the operation at an await point.
     Cancellation,
+    /// The bytes land, and *then* the backend reports failure.
+    ///
+    /// Every other class either fails before doing the work or never completes it.
+    /// This one is the only way to produce the state a two-phase write protocol
+    /// exists to prevent: the control plane says "aborted" while the rung holds a
+    /// value nobody authorised. Without it, `partial_commit_visible = false` had no
+    /// test that could fail — the old `partial_write` case exercised the
+    /// control-plane intent only, never an actual partial data write, and so
+    /// passed against code that had exactly this bug.
+    PartialWrite,
 }
 
 impl FaultClass {
     /// All classes, in contract order.
-    pub const ALL: [FaultClass; 11] = [
+    pub const ALL: [FaultClass; 12] = [
         Self::Latency,
         Self::Timeout,
         Self::Hang,
@@ -87,6 +100,7 @@ impl FaultClass {
         Self::CapacityExhaustion,
         Self::FailureAfterN,
         Self::Cancellation,
+        Self::PartialWrite,
     ];
 
     /// The contract spelling, used in test names and in the ledger's `Debug`.
@@ -104,6 +118,7 @@ impl FaultClass {
             Self::CapacityExhaustion => "capacity_exhaustion",
             Self::FailureAfterN => "failure_after_n_operations",
             Self::Cancellation => "cancellation",
+            Self::PartialWrite => "partial_write",
         }
     }
 
@@ -143,7 +158,7 @@ impl FaultClass {
             Self::Timeout | Self::ReadFailure | Self::Corruption => {
                 matches!(op, OpKind::Get | OpKind::Contains)
             }
-            Self::WriteFailure | Self::CapacityExhaustion => {
+            Self::WriteFailure | Self::CapacityExhaustion | Self::PartialWrite => {
                 matches!(op, OpKind::Set | OpKind::Remove)
             }
             // Metadata failure is not payload-path-specific: it is the tier's
@@ -247,18 +262,17 @@ impl FaultPlan {
         let mut queue = Vec::with_capacity(len);
         for _ in 0..len {
             let class = FaultClass::ALL[rng.below(FaultClass::ALL.len())];
-            // Pick an operation the class can actually apply to, so a
-            // generated plan cannot contain a no-op fault.
-            let candidates: &[OpKind] = match class {
-                FaultClass::MetadataFailure => &[OpKind::Get, OpKind::Set],
-                FaultClass::ReadFailure | FaultClass::Corruption | FaultClass::Timeout => {
-                    &[OpKind::Get, OpKind::Contains]
-                }
-                FaultClass::WriteFailure | FaultClass::CapacityExhaustion => {
-                    &[OpKind::Set, OpKind::Remove]
-                }
-                _ => &[OpKind::Get, OpKind::Set, OpKind::Remove, OpKind::Contains],
-            };
+            // Pick an operation the class can actually apply to, so a generated
+            // plan cannot contain a no-op fault.
+            //
+            // Derived from `applies_to` rather than from a second copy of the
+            // table: the copy went stale the moment a class was added, and the
+            // property test caught it as an ill-formed plan for seed 6. One source
+            // of truth is the only version that stays right.
+            let candidates: Vec<OpKind> = OpKind::ALL
+                .into_iter()
+                .filter(|op| class.applies_to(*op))
+                .collect();
             let op = candidates[rng.below(candidates.len())];
             queue.push(ArmedFault {
                 op,
@@ -355,7 +369,7 @@ impl FaultPlan {
 /// fault test asserts a counter from here.
 #[derive(Debug, Default)]
 pub struct FaultLedger {
-    counts: [std::sync::atomic::AtomicU64; 11],
+    counts: [std::sync::atomic::AtomicU64; 12],
     ops: std::sync::atomic::AtomicU64,
 }
 
@@ -410,6 +424,7 @@ impl FaultLedger {
             FaultClass::CapacityExhaustion => 8,
             FaultClass::FailureAfterN => 9,
             FaultClass::Cancellation => 10,
+            FaultClass::PartialWrite => 11,
         }
     }
 }

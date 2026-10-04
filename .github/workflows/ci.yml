@@ -234,6 +234,22 @@ jobs:
   # is kept only so a future `unsafe` block cannot land unnoticed, and it
   # deliberately asserts that the crate still has no unsafe code rather than
   # pretending to run a check.
+  merge-readiness:
+    name: Merge readiness
+    runs-on: ubuntu-latest
+    # Not advisory, and not continue-on-error. This job is red on purpose while
+    # any `blocks_merge` finding in bugs.toml is open — the review that produced
+    # those findings said the branch is not merge-ready, and a gate that merely
+    # reported that would be the decorative-green-pixels failure this repo exists
+    # to avoid. Fixing B1-B3 is what turns it green.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - name: No blocking findings may be open
+        run: cargo xtask run merge_readiness
+
   unsafe-guard:
     name: No unsafe code
     runs-on: ubuntu-latest

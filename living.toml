@@ -74,6 +74,13 @@ pending_work = """
 - read_repair / reconciliation. ContinuityState::Reconciling is representable and
   reported, but nothing drives it: there is no pass that compares a rung against the
   authority and repairs drift.
+- Move recovery. `theSix.toml` declares `external-reconciliation` and the runtime
+  implements exactly that: a swept move intent is reported and left for an external
+  reconciler. Doing better means persisting the key bytes (or a durable handle) in
+  `CommitIntent`, which collides with the payload-free intent invariant — so it is
+  a contract change, not a patch. Related: a move removes the source rung before it
+  commits, so a crash in that window leaves the value only at the destination, and
+  any reconciliation pass must handle that window.
 - Atomic multi-key operations. The commit protocol is per-entry. A caller wanting
   "these twenty keys or none" still needs to coordinate outside the crate.
 - Streaming / non-ByteValue payloads. Integrity framing covers the fixed tier stub

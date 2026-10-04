@@ -95,7 +95,8 @@ impl<V: ByteValue> CacheTier<V> for L3RedisBackend<V> {
         crate::capability::TierCapability::new(
             BackendKind::Redis,
             crate::capability::CapabilityFlags::SHARED
-                | crate::capability::CapabilityFlags::BLOCKING_IO,
+                | crate::capability::CapabilityFlags::BLOCKING_IO
+                | crate::capability::CapabilityFlags::ATOMIC_WRITE_OR_ERROR,
             crate::capability::OperationalState::Healthy,
             crate::capability::DurabilityClass::Delegated,
         )

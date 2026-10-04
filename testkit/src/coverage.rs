@@ -52,6 +52,7 @@ pub const FAULT_CLASSES: &[&str] = &[
     "capacity_exhaustion",
     "failure_after_n_operations",
     "cancellation",
+    "partial_write",
 ];
 
 /// The property invariants the contract requires.

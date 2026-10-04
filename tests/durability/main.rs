@@ -12,7 +12,7 @@ use std::time::Duration;
 use testkit::{make_manager_with_timeout, test_ctx};
 use thesix::{
     CacheError, CacheTier, CapabilityFlags, DurabilityClass, KeyRef, L0Stub, OperationalState,
-    TierCapability, TierId,
+    RecoveryReport, TierCapability, TierId,
 };
 
 /// Nothing may claim `Verified` without a restart test in this file.
@@ -219,7 +219,9 @@ async fn an_incomplete_operation_is_resolvable() {
         .prepare(&framed, None, TierId::L1, thesix::IntentKind::Write)
         .expect("prepare");
 
-    let (recovered, failed) = m.recover_older_than(Duration::from_secs(0));
+    let RecoveryReport {
+        recovered, failed, ..
+    } = m.recover_older_than(Duration::from_secs(0));
     assert_eq!((recovered, failed), (1, 0));
 
     // Post-state: no intent, no partial visibility.

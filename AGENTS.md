@@ -26,6 +26,7 @@ just plan           # print every gate's argv without running it
 just perf           # percentile / boundedness gates
 just soak           # endurance gates
 just loom           # exhaustive control-plane interleavings
+just ready          # is this branch mergeable? (open blockers in bugs.toml)
 just <gate>         # any single gate by name
 ```
 
@@ -53,8 +54,15 @@ cargo xtask toolchain       # which accelerations are active
 cargo bench --all-features  # criterion benchmarks
 ```
 
-Order matters: fmt → contract → check → clippy → doc → tests → doctest →
-deny → machete → package. `loom`, `performance`, `soak` and `fuzz` are deferred.
+`merge_readiness` is the one gate that judges the branch rather than the change.
+It reads `bugs.toml` and fails while any `blocks_merge` finding is open. The
+expected finding counts live in `theSix.toml`, not in the tracker, so a finding
+cannot be deleted — or downgraded to dodge the check — without editing the
+contract. A finding clears only by being `resolved` with a `rationale`, or
+`accepted-risk` with both `accepted_by` and `rationale`.
+
+Order matters: fmt → contract → xtask_unit → check → clippy → doc → tests →
+doctest → deny → machete → package → merge_readiness. `loom`, `performance`, `soak` and `fuzz` are deferred.
 
 ## Architecture
 
@@ -83,6 +91,12 @@ because real backends are I/O. Implementations store and retrieve; they decide
 nothing.
 
 * Every value carries a `ContentDigest`; a mismatch is `CacheError::Corrupted`.
+* `CacheError::WriteIndeterminate` is the only error that implies the rung may hold
+  an uncommitted value, and it is the only one the manager compensates for by
+  removing the key. A definite failure provably stored nothing, so compensating for
+  it would delete the value already there. A tier capability flag cannot make this
+  distinction — `WriteFailure` and `PartialWrite` share a tier and need opposite
+  handling — so the tier reports it per operation instead.
 * Slots are identified by a 128-bit `KeyFingerprint` over the full key, so a
   placement collision cannot alias two keys. `Placement` is injectable so a test
   can force the collision and demonstrate the property.
@@ -123,8 +137,12 @@ fail-open fallback, promotion and demotion are all bounded by
 * Authority is a **configured role** (`CacheManager::authority_tier`), stamped
   onto the capability report rather than inferred from a tier number.
 * `src/continuity.rs` — `ContinuityState`, `RecoveryDirection`,
-  `RecoveryOutcome`. A `Write` intent aborts on recovery; a `Move` completes
-  forward.
+  `RecoveryOutcome`, `RecoveryReport`. A `Write` intent aborts on recovery. A
+  `Move` does **not** complete forward: that needs the key bytes and the control
+  plane keeps only a hash, so `for_kind(Move)` returns `ExternalReconciliation`
+  and the sweep reports it in its own counter and leaves the intent intact.
+  `tests/contract` asserts the declared clause against `for_kind`, because a
+  clause nothing checks is a promise the runtime does not have to keep.
 * `src/integrity.rs` — digests and fingerprints. The digest is explicitly
   **non-cryptographic**: it detects accidental corruption, not tampering.
 * `src/telemetry.rs` — `OperationRecord` with the eleven contract fields. No
@@ -157,6 +175,9 @@ release notes.
 | performance | `performance` | Percentiles, shard independence, boundedness |
 | soak | `soak` | Endurance, capacity, isolation at volume |
 | backends | `backends` `oxigraph_backend` | Real backends |
+
+`xtask` is under test rather than trusted: `xtask_unit` covers tool probing, argv
+construction and the merge-readiness check, because the runner decides what passes.
 
 `testkit` is a dev-only crate holding the harness: `FaultyTier` with its
 `FaultLedger`, `RecordingTier`, `HangingTier`, `framed_key`, and the coverage

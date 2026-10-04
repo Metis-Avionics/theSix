@@ -24,7 +24,7 @@ use testkit::{
 };
 use thesix::{
     CacheContext, CacheError, CacheManager, CacheTier, Cachelito, DefaultPolicy, FaultClass,
-    FaultPlan, KeyRef, L0Stub, MemoryPool, OpKind, TierId, TierRegistry,
+    FaultPlan, KeyRef, L0Stub, MemoryPool, OpKind, RecoveryReport, TierId, TierRegistry,
 };
 
 /// The manager every case uses unless it needs a specific topology.
@@ -608,15 +608,18 @@ testkit::declare_cases! {
             .map(|(_, i)| i)
             .expect("the move intent was not discoverable");
 
-        let direction = thesix::RecoveryDirection::for_kind(stale.kind);
+        // A sweep would be told `ExternalReconciliation`; this test holds the key,
+        // so complete-forward is executable here. Asserting `for_kind` equals
+        // `CompleteForward` is what let the contract claim a direction the
+        // production sweep had no way to take.
         assert_eq!(
-            direction,
-            thesix::RecoveryDirection::CompleteForward,
-            "a move must be completed forward; aborting it loses committed data"
+            thesix::RecoveryDirection::for_kind(stale.kind),
+            thesix::RecoveryDirection::ExternalReconciliation,
+            "a sweep holding only a hash must not claim it can complete a move"
         );
 
         let outcome = cachelito
-            .resolve_intent(b"moved", stale, direction)
+            .resolve_intent(b"moved", stale, thesix::RecoveryDirection::CompleteForward)
             .expect("resolve");
         assert!(outcome.is_success());
         assert!(
@@ -698,7 +701,7 @@ testkit::declare_cases! {
     async fn recovery_failure() {
         let m = mgr();
         // Nothing outstanding: recovery succeeds trivially and says so.
-        let (recovered, failed) = m.recover_older_than(Duration::from_secs(0));
+        let RecoveryReport { recovered, failed, .. } = m.recover_older_than(Duration::from_secs(0));
         assert_eq!(failed, 0, "recovery reported a failure with nothing to do");
         assert_eq!(recovered, 0);
 
@@ -711,11 +714,11 @@ testkit::declare_cases! {
                 thesix::IntentKind::Write,
             )
             .expect("prepare");
-        let (recovered, failed) = m.recover_older_than(Duration::from_secs(0));
+        let RecoveryReport { recovered, failed, .. } = m.recover_older_than(Duration::from_secs(0));
         assert_eq!(recovered, 1, "recovery did not report the outstanding intent");
         assert_eq!(failed, 0);
         // Idempotent: running it again finds nothing and reports nothing.
-        let (recovered, failed) = m.recover_older_than(Duration::from_secs(0));
+        let RecoveryReport { recovered, failed, .. } = m.recover_older_than(Duration::from_secs(0));
         assert_eq!((recovered, failed), (0, 0), "recovery is not idempotent");
     }
 

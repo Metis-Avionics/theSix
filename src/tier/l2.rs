@@ -30,7 +30,8 @@ impl<V: Clone + Send + Sync + 'static + IntegrityCheck> CacheTier<V> for L2Stub<
         crate::capability::TierCapability::new(
             BackendKind::InMemory,
             crate::capability::CapabilityFlags::IN_MEMORY
-                | crate::capability::CapabilityFlags::VOLATILE,
+                | crate::capability::CapabilityFlags::VOLATILE
+                | crate::capability::CapabilityFlags::ATOMIC_WRITE_OR_ERROR,
             crate::capability::OperationalState::Healthy,
             crate::capability::DurabilityClass::Volatile,
         )

@@ -111,6 +111,7 @@ just quick           # fmt + contract + check + the fast layers
 just list            # what runs, and why
 just perf            # percentile and boundedness gates
 just soak            # endurance gates
+just ready           # is this branch mergeable?
 just loom            # exhaustive control-plane interleavings
 just plan            # print every gate's argv without running it
 ```
