@@ -68,6 +68,124 @@ pub const PROPERTY_INVARIANTS: &[&str] = &[
     "recovery_is_idempotent",
 ];
 
+/// `[testing.property].invariants` paired with the test that proves it.
+///
+/// This registry exists because `PROPERTY_INVARIANTS` was a name list and nothing
+/// more. `tests/contract` compared it against the contract for *set equality*,
+/// which proves the two lists agree and not that any test exists. All nine
+/// invariants were in fact covered — but the binding lived in two comments:
+///
+/// ```text
+/// // no_deadlock / no_lock_across_await
+/// // no_capability_misreporting / no_false_durability
+/// ```
+///
+/// Two `proptest!` blocks each claimed two invariants. Deleting either block left
+/// every gate green while the contract still asserted `no_deadlock`. A comment is
+/// not a registry; it is a claim that outlives the thing it claims.
+///
+/// The mapping is one-to-many here, which is why `declare_cases!` cannot express
+/// it: that macro emits `#[tokio::test]`, and these cases are `proptest!` blocks
+/// whose generators cannot move into a macro arm. So the link is a table, and
+/// `tests/contract` checks every cited function exists.
+pub const PROPERTY_CASE_PROOFS: &[(&str, &str)] = &[
+    (
+        "no_silent_data_loss",
+        "tests/property/main.rs::no_silent_data_loss",
+    ),
+    (
+        "no_cross_key_corruption",
+        "tests/property/main.rs::no_cross_key_corruption",
+    ),
+    (
+        "no_authority_inversion",
+        "tests/property/main.rs::no_authority_inversion",
+    ),
+    (
+        "no_invalid_state_promotion",
+        "tests/property/main.rs::no_invalid_state_promotion",
+    ),
+    (
+        "no_deadlock",
+        "tests/property/main.rs::control_plane_survives_a_wedged_data_plane",
+    ),
+    (
+        "no_lock_across_await",
+        "tests/property/main.rs::control_plane_survives_a_wedged_data_plane",
+    ),
+    (
+        "no_capability_misreporting",
+        "tests/property/main.rs::no_capability_misreporting",
+    ),
+    (
+        "no_false_durability",
+        "tests/property/main.rs::no_capability_misreporting",
+    ),
+    (
+        "recovery_is_idempotent",
+        "tests/property/main.rs::recovery_is_idempotent",
+    ),
+];
+
+/// `[testing.fault_injection].faults` paired with the test that injects it.
+///
+/// The same gap as `PROPERTY_CASE_PROOFS`, one layer over. `FAULT_CLASSES` holds
+/// the `FaultClass` names and was checked against the contract for set equality,
+/// which again proves the lists agree rather than that a fault is ever fired.
+/// Every one of the twelve did have a test, under a descriptive name that did not
+/// match the contract's — which is exactly why nothing could check the
+/// correspondence automatically.
+pub const FAULT_CASE_PROOFS: &[(&str, &str)] = &[
+    (
+        "latency",
+        "tests/fault_injection/main.rs::latency_stalls_without_failing",
+    ),
+    (
+        "timeout",
+        "tests/fault_injection/main.rs::timeout_fails_the_operation",
+    ),
+    (
+        "hang",
+        "tests/fault_injection/main.rs::hang_parks_the_operation_and_leaves_the_control_plane_free",
+    ),
+    (
+        "read_failure",
+        "tests/fault_injection/main.rs::read_failure_fails_a_read_only",
+    ),
+    (
+        "write_failure",
+        "tests/fault_injection/main.rs::write_failure_never_serves_the_replacement_and_leaves_no_intent",
+    ),
+    (
+        "metadata_failure",
+        "tests/fault_injection/main.rs::metadata_failure_fails_the_operation_but_not_the_entry",
+    ),
+    (
+        "corruption",
+        "tests/fault_injection/main.rs::corruption_is_detected_rather_than_served",
+    ),
+    (
+        "disconnect",
+        "tests/fault_injection/main.rs::disconnect_looks_like_an_unavailable_rung",
+    ),
+    (
+        "capacity_exhaustion",
+        "tests/fault_injection/main.rs::capacity_exhaustion_is_reported_as_such",
+    ),
+    (
+        "failure_after_n_operations",
+        "tests/fault_injection/main.rs::failure_after_n_operations_succeeds_first_then_fails",
+    ),
+    (
+        "cancellation",
+        "tests/fault_injection/main.rs::cancellation_releases_the_claim",
+    ),
+    (
+        "partial_write",
+        "tests/fault_injection/main.rs::the_partial_write_fault_really_stores_bytes_before_failing",
+    ),
+];
+
 /// Every declared invariant paired with the test that proves it.
 ///
 /// The contract names 95 leaves across its seven semantic sections. Before this
@@ -538,6 +656,101 @@ pub fn diff(expected: &[&'static str], actual: &[&'static str]) -> String {
     }
     if out.is_empty() {
         out.push_str("\n  (lists match, but lengths differ: duplicate entries?)");
+    }
+    out
+}
+
+/// The repository root, for registries that cite files by relative path.
+///
+/// Shared so the anchor cannot differ between two callers: a `repo_root()` that
+/// resolved to the *crate* directory in one place and the repository root in
+/// another would make the same locator valid in one check and missing in the
+/// other.
+///
+/// The `join("..")` is not incidental. `CARGO_MANIFEST_DIR` here is `testkit/`,
+/// while every locator in these registries is spelled relative to the workspace
+/// root (`tests/property/main.rs`). Dropping the `..` makes all three locators
+/// resolve to `testkit/tests/...`, which is not a directory — and the failure
+/// looks like "the contract cites phantom tests" rather than "this anchor is
+/// wrong", which is the more expensive mistake of the two to diagnose.
+#[must_use]
+pub fn repo_root() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
+}
+
+/// Resolve `path::fn` locators and report the ones that name nothing.
+///
+/// Shared by every registry that cites a test by location, so the existence rule
+/// is written once. `tests/contract/invariant.rs` grew its own copy of this walk
+/// first; a second and third copy is how the copies drift, and the drift would be
+/// invisible because each would still be *checking* something.
+///
+/// The limit is worth stating plainly: this proves a function of that name is
+/// defined in that file — not that it is a test, and not that it exercises what
+/// the registry claims. Naming a real but irrelevant function satisfies it. That
+/// is the same limit `INVARIANT_PROOFS` documents, and the reason the fault
+/// layer's ledger assertions are the instrument that actually closes it.
+#[must_use]
+pub fn missing_locators(root: &std::path::Path, registry: &[(&str, &str)]) -> Vec<String> {
+    let mut missing = Vec::new();
+    for (name, locator) in registry {
+        let Some((path, fn_name)) = locator.split_once("::") else {
+            missing.push(format!(
+                "{name}: malformed locator {locator:?}, want path::fn"
+            ));
+            continue;
+        };
+        let full = root.join(path);
+        if !full.is_file() {
+            missing.push(format!("{name}: {path} does not exist"));
+            continue;
+        }
+        let source = match std::fs::read_to_string(&full) {
+            Ok(s) => s,
+            Err(e) => {
+                missing.push(format!("{name}: {path} is unreadable: {e}"));
+                continue;
+            }
+        };
+        let needle = format!("fn {fn_name}");
+        if !source
+            .lines()
+            .any(|l| l.trim_start().starts_with(&needle) || l.contains(&needle))
+        {
+            missing.push(format!("{name}: {locator} names no function"));
+        }
+    }
+    missing
+}
+
+/// Declared case names that no proof registry claims.
+///
+/// The failure this exists to catch: a name present in both the contract and a
+/// name-list registry, with nothing anywhere binding it to a test. Set equality
+/// between the two lists cannot see that, because both lists are satisfied.
+#[must_use]
+pub fn unclaimed<'a>(declared: &[&'a str], registry: &[(&'a str, &'a str)]) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    for name in declared {
+        if !registry.iter().any(|entry| entry.0 == *name) {
+            out.push(*name);
+        }
+    }
+    out
+}
+
+/// Registry keys the contract no longer declares.
+///
+/// The other direction from `unclaimed`: a proof for something that stopped being
+/// required is stale bookkeeping, and stale bookkeeping is how a registry grows
+/// entries nobody maintains.
+#[must_use]
+pub fn overclaimed<'a>(declared: &[&'a str], registry: &[(&'a str, &'a str)]) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    for entry in registry {
+        if !declared.contains(&entry.0) {
+            out.push(entry.0);
+        }
     }
     out
 }

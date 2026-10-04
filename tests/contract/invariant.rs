@@ -27,9 +27,8 @@
 //! something in this repository being made responsible for it.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
-use testkit::coverage::INVARIANT_PROOFS;
+use testkit::coverage::{INVARIANT_PROOFS, missing_locators, repo_root};
 
 const CONTRACT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/theSix.toml"));
 
@@ -48,10 +47,6 @@ const SEMANTIC_SECTIONS: &[&str] = &[
     "capabilities",
     "concurrency",
 ];
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
 
 /// Every invariant leaf the contract declares, as dotted paths.
 ///
@@ -197,37 +192,17 @@ fn no_proof_or_waiver_names_an_invariant_that_does_not_exist() {
 
 #[test]
 fn every_named_proving_test_exists() {
-    let mut missing_files = Vec::new();
-    let mut missing_fns = Vec::new();
-
-    for (invariant, locator) in INVARIANT_PROOFS {
-        let (path, fn_name) = locator
-            .split_once("::")
-            .unwrap_or_else(|| panic!("`{invariant}` has a malformed locator {locator:?}"));
-
-        let full = repo_root().join(path);
-        if !full.is_file() {
-            missing_files.push((locator, format!("{path} does not exist")));
-            continue;
-        }
-        let source = std::fs::read_to_string(&full)
-            .unwrap_or_else(|e| panic!("{path} must be readable: {e}"));
-        // Word-boundary match so `fn a_read` cannot satisfy `a_reader`.
-        let needle = format!("fn {fn_name}");
-        if !source
-            .lines()
-            .any(|l| l.trim_start().starts_with(&needle) || l.contains(&needle))
-        {
-            missing_fns.push(locator);
-        }
-    }
+    // The walk itself lives in `testkit::coverage::missing_locators` because two
+    // other registries now cite tests the same way. A private copy here would
+    // have been the third spelling of one rule.
+    let missing = missing_locators(&repo_root(), INVARIANT_PROOFS);
 
     assert!(
-        missing_files.is_empty() && missing_fns.is_empty(),
-        "INVARIANT_PROOFS cites tests that do not exist.\n  \
-         missing files: {missing_files:#?}\n  missing functions: {missing_fns:?}\n\
+        missing.is_empty(),
+        "INVARIANT_PROOFS cites tests that do not exist.\n  {}\n\
          A registry that names a phantom test is worse than no registry: it reads \
-         as coverage while proving nothing."
+         as coverage while proving nothing.",
+        missing.join("\n  ")
     );
 }
 

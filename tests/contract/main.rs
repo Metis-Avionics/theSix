@@ -20,7 +20,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use testkit::coverage::{
-    FAULT_CLASSES, NEGATIVE_CASES, PROPERTY_INVARIANTS, missing_from_contract,
+    FAULT_CASE_PROOFS, FAULT_CLASSES, NEGATIVE_CASES, PROPERTY_CASE_PROOFS, PROPERTY_INVARIANTS,
+    missing_from_contract, missing_locators, overclaimed, repo_root, unclaimed,
 };
 
 /// The contract, embedded at compile time.
@@ -397,6 +398,123 @@ fn fault_taxonomy_matches_the_crate_and_the_registry() {
     assert!(
         d2.is_empty(),
         "the contract's fault list and the suite registry disagree.{d2}"
+    );
+}
+
+/// Every declared fault has a named test, and that test exists.
+///
+/// The test above this one only compares two *name lists*. That is satisfied by
+/// two lists agreeing, and says nothing about whether a fault is ever injected —
+/// so the mapping is bound here instead, in a registry that cites a real
+/// function and is checked against the source tree.
+#[test]
+fn every_declared_fault_is_bound_to_a_test_that_exists() {
+    let c = contract();
+    let declared: Vec<&str> = c
+        .testing
+        .fault_injection
+        .faults
+        .iter()
+        .map(String::as_str)
+        .collect();
+
+    let unclaimed = unclaimed(&declared, FAULT_CASE_PROOFS);
+    assert!(
+        unclaimed.is_empty(),
+        "the contract requires faults that no test claims: {unclaimed:?}. Add a \
+         `FAULT_CASE_PROOFS` row pointing at the test that injects it, or write \
+         the test. A declared fault with no injector is a promise about a \
+         failure mode nobody has ever produced."
+    );
+
+    let stale = overclaimed(&declared, FAULT_CASE_PROOFS);
+    assert!(
+        stale.is_empty(),
+        "FAULT_CASE_PROOFS claims faults the contract no longer declares: {stale:?}. \
+         Stale rows keep a removed fault looking covered."
+    );
+
+    let missing = missing_locators(&repo_root(), FAULT_CASE_PROOFS);
+    assert!(
+        missing.is_empty(),
+        "FAULT_CASE_PROOFS cites tests that do not exist:\n  {}\n\
+         A row naming a phantom test is worse than no row: the registry reads as \
+         coverage of all twelve faults while proving less than the name lists did.",
+        missing.join("\n  ")
+    );
+}
+
+/// Every declared property invariant has a named test, and that test exists.
+///
+/// This is the check that was missing, and its absence was invisible: all nine
+/// invariants were covered, but the binding lived in two comments in
+/// `tests/property/main.rs`, so deleting either `proptest!` block would have left
+/// every gate green while `theSix.toml` still asserted `no_deadlock`.
+#[test]
+fn every_declared_property_invariant_is_bound_to_a_test_that_exists() {
+    let c = contract();
+    let mut declared: Vec<&str> = c
+        .testing
+        .property
+        .invariants
+        .keys()
+        .map(String::as_str)
+        .collect();
+    declared.sort_unstable();
+
+    let unclaimed = unclaimed(&declared, PROPERTY_CASE_PROOFS);
+    assert!(
+        unclaimed.is_empty(),
+        "the contract requires property invariants that no test claims: \
+         {unclaimed:?}. Two of these were previously 'covered' by a comment."
+    );
+
+    let stale = overclaimed(&declared, PROPERTY_CASE_PROOFS);
+    assert!(
+        stale.is_empty(),
+        "PROPERTY_CASE_PROOFS claims invariants the contract no longer declares: \
+         {stale:?}"
+    );
+
+    let missing = missing_locators(&repo_root(), PROPERTY_CASE_PROOFS);
+    assert!(
+        missing.is_empty(),
+        "PROPERTY_CASE_PROOFS cites tests that do not exist:\n  {}\n\
+         A row naming a phantom test is worse than no row.",
+        missing.join("\n  ")
+    );
+}
+
+/// Every fault must be exercised, not merely declared.
+///
+/// Belt and braces over the row above: this asserts the *names* are a bijection
+/// with the contract, so a row cannot quietly point two declared faults at one
+/// test and leave the count looking complete.
+#[test]
+fn fault_proofs_cover_each_fault_exactly_once() {
+    let c = contract();
+    let declared: Vec<&str> = c
+        .testing
+        .fault_injection
+        .faults
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let keys: Vec<&str> = FAULT_CASE_PROOFS.iter().map(|e| e.0).collect();
+    assert_eq!(
+        keys.len(),
+        declared.len(),
+        "FAULT_CASE_PROOFS has {} rows for {} declared faults: {keys:?}",
+        keys.len(),
+        declared.len()
+    );
+    let mut sorted = keys.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+    assert_eq!(
+        sorted.len(),
+        keys.len(),
+        "FAULT_CASE_PROOFS binds one fault to more than one row: {keys:?}"
     );
 }
 
