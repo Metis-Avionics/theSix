@@ -141,6 +141,16 @@ policy, and coordinates through `Cachelito`.
   substitution: an unbound rung returns `None`, never another rung's tier.
 * `nearest_bound_rung(wanted)` resolves a *policy choice* to the best bound rung
   at or below it. That is routing, not substitution.
+* `refresh_detailed` reports whether a served value is a fallback
+  (`Freshness::Stale`); `refresh` is the lossy wrapper over it. `refresh` fails
+  closed on the fetch and applies its own stale-while-revalidate fallback, because
+  the policy's fail-open mode would otherwise return another rung's value as a
+  *successful* population.
+* `recover_older_than` releases the population claim on a `Move` it cannot resolve
+  (`Cachelito::release_population_claim`) while **keeping** the intent, so the key
+  is usable again and the evidence survives. `Failed`, never the restored
+  pre-intent state: restoring would point at a source rung the move already
+  emptied, and a read would serve that emptiness as a value.
 * `set` walks down the ladder on any rung-level failure (full, unavailable,
   timed out, corrupt) and retries a lost commit race. It returns an error only
   when every rung below refuses.
@@ -191,8 +201,8 @@ release notes.
 |---|---|---|
 | contract | `tests/contract` | The TOML is load-bearing |
 | unit | `integration` `hierarchy` `policy` `stampede` | Core behaviour |
-| negative | `negative` | 19 failure modes, each by resulting state |
-| fault_injection | `fault_injection` | 11 faults, each proven to fire |
+| negative | `negative` | 21 failure modes, each by resulting state |
+| fault_injection | `fault_injection` | 12 faults, each proven to fire |
 | property | `property` | 9 invariants, randomised with shrinking |
 | concurrency | `concurrency` `await_safety` `sharding` `loom` | Adversarial races |
 | capability | `capability` `l6_authority` | No false claims |
@@ -220,6 +230,12 @@ registries. Use it rather than duplicating a manager builder.
   `Prepared` and never routes to a rung, so injected read faults will not fire.
 * `testkit::coverage` registries are compared for **equality** against the
   contract, so dropping a required case fails `cargo xtask contract`.
+* A cited proving test must **declare** the clause it is cited for, via
+  `testkit::proves!(...)` in its own body. A locator that resolves but declares
+  nothing fails the contract gate, so pointing a row at a real but unrelated test
+  no longer satisfies it. The label is a claim by the test about itself, so a test
+  that asserts the wrong thing while declaring the right clause is still possible
+  -- mutation evidence in `bugs.toml` bounds that, not truth.
 
 ## Repository config
 

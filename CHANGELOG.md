@@ -1,5 +1,68 @@
 # CHANGELOG
 
+## 0.4.0 — backlog pass (B15–B21)
+
+Seven findings closed since the verification-architecture work, one of which was a
+live defect rather than a missing test. Every entry below is mutation-checked: the
+behaviour the test names was removed, the test was required to fail, and the
+behaviour was restored.
+
+### Fixed
+
+- **A swept `Move` intent wedged its key's population path permanently** (B15). The
+  recovery sweep counted the move in `needs_reconciliation` and left the entry
+  `Prepared` with a population owner. Both `acquire` and the write path decline such
+  an entry, so nothing could ever write or populate that key again — only an
+  external reconciler holding the key bytes could clear it, and one that never
+  arrived left the key unusable for the life of the process.
+  `Cachelito::release_population_claim` now marks the entry `Failed`, advances the
+  generation and drops the owner **while keeping the intent**. `Failed` rather than
+  the restored pre-intent state, because restoring would point the control plane at
+  a source rung the interrupted move had already emptied, and a read would serve
+  that emptiness as though it were the value — trading a visible wedge for silent
+  wrong data. The intent is kept because clearing it destroys the only record that a
+  move was in flight, and the control plane keeps only a key hash.
+- **Stale-while-revalidate was silently stale** (B16). `refresh` returned
+  `Option<V>`, so a value served because revalidation failed was byte-identical to
+  one the fetch had just produced, and `cia.integrity.silent_stale_data_acceptance
+  = false` was false rather than merely unproven. `refresh_detailed` returns
+  `Lookup<V>` with a `Freshness`; `refresh` is the lossy wrapper.
+  `refresh` also fails closed on the fetch now, applying its own documented
+  fallback. Previously the policy's fail-open mode let `become_population_owner`
+  scan other rungs and return their value as a *successful* population — the
+  invariant failing at the only place it could, by serving stale bytes with a
+  success status claiming they were current.
+- **Four declared invariants had no proving test** (B16). `Recovering` is now
+  reported as itself rather than folded into `Unavailable` or `Available`; retry
+  counts are asserted per loop rather than assumed from `LAST_CACHE_TIER`; nested
+  `block_on` is absent *and* the test proves the harness would notice. A tier that
+  can report an arbitrary `OperationalState` (`testkit::StatedTier`) was needed
+  because every in-tree stub reported one state — the waiver said "no test exists"
+  when the truth was "no test could exist".
+
+### Changed
+
+- **A proving test must now declare the clause it is cited for** (B20).
+  `testkit::proves!(...)` inside the test body is checked against the registry row.
+  A locator that resolves but does not declare the clause fails the gate, so citing
+  a real but irrelevant test can no longer pass quietly. 75 functions annotated.
+- `SECURITY.md` replaces GitHub's placeholder, which claimed support for 5.1.x,
+  5.0.x and 4.0.x — versions of this crate that have never existed.
+
+### Still open
+
+- **B21 — `main` has no required status check.** `required_status_checks` was
+  switched off to land this series, and with `enforce_admins: true` there was no
+  bypass. Every gate result in this release is therefore advisory. This is not
+  hypothetical: a commit pushed straight to a feature branch during this pass was
+  merged unchecked, which is how the incorrect `SECURITY.md` above reached `main`.
+  Restoring the rule needs a token with effective Administration write.
+- `cia.integrity` aside, `concurrency.blocking_runtime_thread` remains waived, and
+  the waiver now records why: there is no offload mechanism to test
+  (`spawn_blocking` appears nowhere in `src/`, and the contract has no clause
+  requiring one), so the clause asserts a property of configured backends that the
+  crate neither enforces nor can observe.
+
 ## Unreleased — verification architecture
 
 The second review closed seven findings and could not confirm CI had executed the
@@ -35,8 +98,9 @@ three more things underneath it that had never run either.
 - A `bash -n` lint over every `run:` block, with a regression test that feeds B7's
   exact stray `done` through the same path and requires it to be caught.
 - `testkit::coverage::INVARIANT_PROOFS` and `[[verification.invariant_waiver]]`:
-  all 95 declared invariants bound to a proving test (89) or waived with a stated
-  reason (6), checked for exact set equality.
+  all 95 declared invariants bound to a proving test (94) or waived with a stated
+  reason (1), checked for exact set equality. See the 0.4.0 section above for what
+  changed the split.
 - A `Verification (all gates)` aggregator job, which is the single check branch
   protection requires. Matrix job names would silently stop matching.
 - An `authorship` gate: no commit in this repository's history carries a
@@ -49,8 +113,10 @@ three more things underneath it that had never run either.
 
 ### Changed
 
-- `main` is branch-protected: the aggregated gate is required, admins included,
-  force-push and deletion disallowed.
+- `main` was configured branch-protected: the aggregated gate required, admins
+  included, force-push and deletion disallowed. **The required-check rule was later
+  disabled to land the 0.4.0 series and is still off** — tracked as B21, and
+  restated here because the original claim is no longer true.
 - An abort of a write with an unknown outcome costs one repopulation — cheaper than
   serving a value nobody authorised.
 - Co-authorship trailers were removed from seven commits on this branch, which
@@ -63,6 +129,11 @@ clause. Naming a test that ignores an invariant satisfies the gate. What it does
 enforce is that an invariant cannot be declared into existence without something in
 the repository being made responsible for it, and the six that have no honest proof
 are listed with reasons rather than papered over.
+
+This limit held when the section above was written. It no longer does: as of the
+0.4.0 backlog pass a cited test must also *declare* the clause (B20), so a
+mis-citation fails. The irreducible remainder is a test that asserts the wrong
+thing while declaring the right clause.
 
 ## Unreleased — second review remediation
 

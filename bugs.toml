@@ -27,19 +27,30 @@
 # something, that is recorded too.
 
 [meta]
-branch = "feat/hpa-continuity-contract"
-commit = "38887d2"
-reviewed_commit = "38887d2"
-reviewer = "ChatGPT, external code review"
+# Tracker's own record of the review this file came out of. `cargo xtask
+# merge_readiness` deliberately does not read any of it -- including these counts --
+# because a tracker that grades its own homework is not a check. The counts that
+# *do* gate live in `theSix.toml` under `[verification.merge_readiness]`, so a
+# finding cannot be deleted or downgraded without editing the contract.
+branch = "main"
+commit = "99b4a5f"
+reviewed_commit = "99b4a5f"
+reviewer = "ChatGPT, external code review; then a 0.4.0 backlog pass over B15-B21"
 review_date = "2026-10-04"
 verdict_architecture = 9.0
 verdict_verification_strategy = 9.5
 verdict_implementation_correctness = 7.5
-merge_ready = true
-findings_blocking = 5
-findings_should_fix = 2
+merge_ready = false
+findings_blocking = 11
+findings_should_fix = 11
 findings_praised = 4
 independently_verified = true
+
+# Why `merge_ready` is false while every finding but one is resolved: B21 is
+# open, and it is the rule that would make any of this enforced. `main` currently
+# has no required status check, so the aggregated gate is advisory until it is
+# restored with a token holding effective Administration write.
+blocking_reason = "B21: main's required_status_checks rule is disabled"
 
 # The reviewer's summary judgement, kept verbatim in substance because it is the
 # most useful single sentence in the review:
