@@ -1233,7 +1233,7 @@ mod authorship_tests {
     }
 
     fn git(dir: &Path, args: &[&str]) {
-        let status = Command::new("git")
+        let output = Command::new("git")
             // Before the subcommand: `git init --quiet -c k=v` is a usage error,
             // because `-c` is a git option and not one every subcommand takes.
             .args([
@@ -1243,13 +1243,22 @@ mod authorship_tests {
                 "tag.gpgsign=false",
                 "-c",
                 "init.defaultBranch=main",
+                // Committer identity, set here rather than inherited. These
+                // fixtures assert a property of git, so they must not depend on
+                // the host's global config: `--author` sets the *author*, and git
+                // still needs a committer, which it will otherwise take from
+                // whatever `user.name`/`user.email` the machine happens to carry.
+                "-c",
+                "user.name=Test Committer",
+                "-c",
+                "user.email=committer@example.invalid",
             ])
             .args(args)
             .current_dir(dir)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .status()
+            .output()
             .unwrap_or_else(|e| {
                 panic!(
                     "git {args:?} could not be spawned ({e}); these tests \
@@ -1257,9 +1266,14 @@ mod authorship_tests {
                 )
             });
         assert!(
-            status.success(),
-            "git {args:?} failed in fixture {}",
-            dir.display()
+            output.status.success(),
+            // stderr is included because a bare "git commit failed" says nothing
+            // about why, and these fixtures run in an environment the author does
+            // not control. The first version discarded it, which turned a
+            // runner-only failure into an unexplained one.
+            "git {args:?} failed in fixture {}\nstderr: {}",
+            dir.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
         );
     }
 
