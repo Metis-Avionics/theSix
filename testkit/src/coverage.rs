@@ -24,6 +24,7 @@ pub const NEGATIVE_CASES: &[&str] = &[
     "corrupt_payload",
     "invalid_metadata",
     "capacity_exhaustion",
+    "eviction_reclaims_a_saturated_ladder",
     "cancelled_operation",
     "duplicate_operation",
     "stale_generation",
@@ -209,6 +210,10 @@ pub const FAULT_CASE_PROOFS: &[(&str, &str)] = &[
 /// what make it checkable. What the gate does enforce is that an invariant cannot
 /// be added, renamed or deleted without this file changing with it.
 pub const INVARIANT_PROOFS: &[(&str, &str)] = &[
+    (
+        "concurrency.testing.promotion_eviction_races",
+        "tests/concurrency.rs::eviction_invalidates_an_in_flight_commit",
+    ),
     (
         "acid.atomicity.cancelled_operation_may_commit_partially",
         "tests/recovery/main.rs::an_aborted_prepared_write_is_not_left_readable",

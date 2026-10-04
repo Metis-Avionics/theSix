@@ -166,3 +166,50 @@ impl<V> ShardedTierStub<V> {
 fn poisoned<T>(_: T) -> CacheError {
     CacheError::ConfigurationError
 }
+
+impl<V> ShardedTierStub<V> {
+    /// Nominate one eviction candidate across every shard, round-robin by shard.
+    ///
+    /// Scans shards from a rotating start so eviction spreads across the tier
+    /// rather than always draining the first shard that happens to be full.
+    /// Shards are visited under their own scoped guards, one at a time, so no
+    /// guard is ever held across an `.await` -- the same discipline every other
+    /// method here follows.
+    pub fn eviction_candidate(&self) -> Option<crate::integrity::KeyAddress> {
+        let n = self.shards.len();
+        if n == 0 {
+            return None;
+        }
+        let start = self.next_shard() % n;
+        for offset in 0..n {
+            let idx = (start + offset) % n;
+            if let Ok(mut shard) = self.shards[idx].lock()
+                && let Some(candidate) = shard.eviction_candidate()
+            {
+                return Some(candidate);
+            }
+        }
+        None
+    }
+
+    /// Remove the slot holding `address` from whichever shard has it.
+    pub fn remove_if_address(
+        &self,
+        address: crate::integrity::KeyAddress,
+    ) -> Result<bool, CacheError> {
+        for shard in &self.shards {
+            if let Ok(mut s) = shard.lock()
+                && s.remove_if_address(address)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn next_shard(&self) -> usize {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CURSOR: AtomicUsize = AtomicUsize::new(0);
+        CURSOR.fetch_add(1, Ordering::Relaxed)
+    }
+}

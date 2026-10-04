@@ -513,7 +513,7 @@ impl Cachelito {
     }
 
     /// Identity and placement for `key`, under the configured strategy.
-    fn address_of(&self, key: &[u8]) -> KeyAddress {
+    pub fn address_of(&self, key: &[u8]) -> KeyAddress {
         KeyAddress::of(key, self.placement)
     }
 
@@ -858,6 +858,58 @@ impl Cachelito {
         let next = entry.increment_generation();
         entry.notify();
         Ok(next)
+    }
+
+    /// Reserve `address` for eviction, or refuse.
+    ///
+    /// The authoritative half of eviction (B17). The tier nominates a victim;
+    /// this decides whether that victim is *admissible*, and it decides it
+    /// under the shard lock so the check and the invalidation are indivisible.
+    ///
+    /// Admissible means: the entry exists, is `Ready`, is not held by a
+    /// population, and has no outstanding commit intent. On success the
+    /// generation is advanced **before** returning, which is what makes the
+    /// eviction safe: any in-flight `commit` holding a token for the old
+    /// generation finds `token.expired_by(entry.generation())` true and is
+    /// refused, so it cannot land a write into a slot that is about to be
+    /// reused. The entry is moved to `Stale` so a concurrent `get` reports a
+    /// miss rather than the value being removed.
+    ///
+    /// Synchronous, and it takes and releases the guard before returning. That
+    /// is not incidental: holding a shard guard across the manager's subsequent
+    /// `remove_if_address().await` is precisely the "no guard across `.await`"
+    /// rule this control plane is built to make structural.
+    ///
+    /// Refusing is a normal outcome, not an error: an entry that has become
+    /// `InFlight` since nomination is simply not evictable yet, and the caller
+    /// moves on to another candidate.
+    pub fn reserve_eviction(
+        &self,
+        address: crate::integrity::KeyAddress,
+    ) -> Result<bool, CacheError> {
+        let shard_idx = self.shard_for_address(address);
+        let shard = &self.shards[shard_idx];
+        let guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
+        let Some(entry) = guard.find_entry(address) else {
+            return Ok(false);
+        };
+
+        // Admissibility. All four are read under the same guard that performs
+        // the invalidation below, so none can change in between.
+        if entry.state() != EntryState::Ready || entry.is_population_owner() {
+            return Ok(false);
+        }
+        // An outstanding intent means a writer is between `prepare` and
+        // `commit`. Evicting now would either strand its write or lose it
+        // silently; neither is this method's decision to make.
+        if entry.intent().is_some() {
+            return Ok(false);
+        }
+
+        entry.increment_generation();
+        entry.set_state(EntryState::Stale);
+        entry.notify();
+        Ok(true)
     }
 
     /// Record a commit intent and move the entry to `Prepared`.
