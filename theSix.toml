@@ -520,6 +520,22 @@ tracker = "bugs.toml"
 expected_blocking = 9
 expected_should_fix = 5
 
+# Commit authorship. `cargo xtask run authorship` reads every commit message in
+# the repository's history and fails on a banned trailer.
+#
+# The banned entries are git trailer *keys*, not attributions. Nothing here names
+# a person, a product or an addressee, and that is deliberate: a gate that
+# grepped for one specific attribution would have to contain that attribution, so
+# the rule would reproduce in the source the thing it exists to keep out. The
+# policy is the key, the offending value is reported only as a commit id.
+#
+# Matching is on the normalised key — lowercased, with `-`, `_` and spaces
+# removed — so `Co-Authored-By`, `co-authored-by` and `CoAuthoredBy` are one rule
+# rather than three spellings to keep in sync. Adding a human co-author is not a
+# matter of editing this list; it is not possible, by design.
+[verification.attribution]
+forbidden_trailers = ["Co-Authored-By", "Co-Author-by"]
+
 [verification.required]
 fmt = true
 check_all_targets = true
@@ -567,12 +583,15 @@ fallback_path_must_be_verified = true
 #   doctest -- cargo test --doc
 #   slow    -- #[ignore]d tests, excluded from the default pass
 #   nightly -- requires a nightly toolchain, excluded from the default pass
+#   tracker -- run by the runner itself; reads bugs.toml and decides from it
+#   authorship -- run by the runner itself; reads commit history
 # ---------------------------------------------------------------------------
 
 [verification.gate_order]
 order = [
     "fmt",
     "contract",
+    "authorship",
     "xtask_unit",
     "check",
     "clippy",
@@ -610,6 +629,14 @@ kind = "test"
 targets = ["contract"]
 features = ["--all-features"]
 description = "Parses this file and asserts every clause is bound to a real test target."
+
+# Runs third, ahead of every compile and test gate. It costs one `git log`, and
+# it judges the change under review rather than the branch, so a violation should
+# surface in the first second rather than after the test matrix.
+[[verification.gate]]
+name = "authorship"
+kind = "authorship"
+description = "No commit in this repository's history carries a co-authorship trailer. The banned keys are declared in [verification.attribution]; the rule is on the key, so no attribution is written into this file to check for one. Reports `Unavailable`, never `Passed`, when the history cannot be read — a shallow clone would otherwise make this gate a pass over one commit."
 
 [[verification.gate]]
 name = "xtask_unit"
@@ -784,7 +811,7 @@ description = "Fails while any `blocks_merge` finding in bugs.toml is open. A fi
 # ---------------------------------------------------------------------------
 # CI coverage.
 #
-# The 25 gates above are the mandatory set. This section declares how GitHub
+# The 26 gates above are the mandatory set. This section declares how GitHub
 # Actions executes them, because a gate that no CI job runs is a gate that only
 # the maintainer's machine verifies — and the previous revision of this workflow
 # had five of them (`fmt`, `xtask_unit`, `deny`, `machete`, `fuzz`) executing
@@ -806,6 +833,11 @@ description = "Fails while any `blocks_merge` finding in bugs.toml is open. A fi
 job = "contract"
 check_name = "Contract self-check"
 covers = ["contract"]
+
+[[verification.ci_job]]
+job = "authorship"
+check_name = "Commit authorship"
+covers = ["authorship"]
 
 [[verification.ci_job]]
 job = "fmt"

@@ -116,6 +116,7 @@ fn main() -> ExitCode {
         root: root.clone(),
         expected: Some(contract.expected_findings),
         tracker: contract.tracker.clone(),
+        forbidden_trailers: contract.forbidden_trailers.clone(),
         toolchain: toolchain.clone(),
         dry_run: cli.dry_run,
         verbose: cli.verbose,

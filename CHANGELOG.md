@@ -39,6 +39,13 @@ three more things underneath it that had never run either.
   reason (6), checked for exact set equality.
 - A `Verification (all gates)` aggregator job, which is the single check branch
   protection requires. Matrix job names would silently stop matching.
+- An `authorship` gate: no commit in this repository's history carries a
+  co-authorship trailer. The rule is on the trailer *key*, and the banned keys live
+  in `[verification.attribution]`, so the gate never has to contain an attribution in
+  order to forbid one — a gate that grepped for the literal string would have put it
+  in its own source. It scans every ref rather than `HEAD`, so a rewritten commit that
+  a sibling branch still reaches does not read as clean. Fifteen unit tests, including
+  one that feeds the gate a co-authorship trailer and requires it to fail.
 
 ### Changed
 
@@ -46,6 +53,8 @@ three more things underneath it that had never run either.
   force-push and deletion disallowed.
 - An abort of a write with an unknown outcome costs one repopulation — cheaper than
   serving a value nobody authorised.
+- Co-authorship trailers were removed from seven commits on this branch, which
+  rewrote their ids and was force-pushed.
 
 ### The limit worth stating
 

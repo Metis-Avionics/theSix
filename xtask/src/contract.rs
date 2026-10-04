@@ -30,6 +30,9 @@ pub enum GateKind {
     /// Executed by the runner itself rather than a subprocess. Reads a repository
     /// artefact and decides pass/fail from its contents.
     Tracker,
+    /// Executed by the runner itself rather than a subprocess. Reads commit
+    /// metadata and decides pass/fail from it.
+    Authorship,
 }
 
 impl GateKind {
@@ -49,6 +52,7 @@ impl GateKind {
             Self::Slow => "slow",
             Self::Nightly => "nightly",
             Self::Tracker => "tracker",
+            Self::Authorship => "authorship",
         }
     }
 }
@@ -95,6 +99,18 @@ fn default_tracker() -> String {
     "bugs.toml".to_string()
 }
 
+/// The trailer keys the `authorship` gate rejects.
+///
+/// Declared as *keys*, never as attributions. A gate that named the specific
+/// string it forbids would put that string in its own source, so the rule has to
+/// be expressible without it — and a key is enough, because the thing worth
+/// banning is the act of adding a co-author trailer, not one particular value.
+#[derive(Debug, Default, Deserialize)]
+struct Attribution {
+    #[serde(default)]
+    forbidden_trailers: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct GateOrder {
     order: Vec<String>,
@@ -106,6 +122,8 @@ struct Verification {
     gates: Vec<Gate>,
     #[serde(default)]
     merge_readiness: MergeReadiness,
+    #[serde(default)]
+    attribution: Attribution,
     gate_order: GateOrder,
     verification_required: bool,
     anti_vacuity_required: bool,
@@ -232,6 +250,9 @@ pub struct Contract {
     pub expected_findings: crate::gates::ExpectedFindings,
     /// Tracker path as declared by `[verification.merge_readiness].tracker`.
     pub tracker: String,
+    /// Trailer keys the `authorship` gate rejects, from
+    /// `[verification.attribution].forbidden_trailers`.
+    pub forbidden_trailers: Vec<String>,
 }
 
 impl Contract {
@@ -303,6 +324,44 @@ impl Contract {
                     ));
                 }
                 _ => {}
+            }
+        }
+
+        // The authorship gate and its policy are only meaningful together, and
+        // both directions of the mismatch are defects.
+        let declares_gate = parsed
+            .verification
+            .gates
+            .iter()
+            .any(|g| g.kind == GateKind::Authorship);
+        let trailers = &parsed.verification.attribution.forbidden_trailers;
+        if declares_gate && trailers.is_empty() {
+            problems.push(
+                "an `authorship` gate is declared but \
+                 [verification.attribution].forbidden_trailers is empty. A gate with \
+                 nothing to forbid cannot fail, so it reports success for a policy \
+                 it is not enforcing."
+                    .to_string(),
+            );
+        }
+        if !declares_gate && !trailers.is_empty() {
+            problems.push(
+                "[verification.attribution] declares trailers to forbid but no \
+                 `authorship` gate exists to enforce them. A policy nothing checks is \
+                 a promise the runtime does not have to keep."
+                    .to_string(),
+            );
+        }
+        // Each key is compared against the text before a message line's first
+        // colon, so a key containing whitespace or a colon could never match.
+        // That is dead configuration that reads as coverage.
+        for key in trailers {
+            if key.is_empty() || key.contains(':') || key.chars().any(char::is_whitespace) {
+                problems.push(format!(
+                    "[verification.attribution].forbidden_trailers entry {key:?} is not a \
+                     usable git trailer key. Use the bare key as git writes it — no colon, \
+                     no surrounding whitespace."
+                ));
             }
         }
 
@@ -445,6 +504,7 @@ impl Contract {
                 should_fix: parsed.verification.merge_readiness.expected_should_fix,
             },
             tracker: parsed.verification.merge_readiness.tracker.clone(),
+            forbidden_trailers: parsed.verification.attribution.forbidden_trailers.clone(),
         })
     }
 

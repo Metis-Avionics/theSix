@@ -240,7 +240,7 @@ pub fn argv_for(gate: &Gate, _toolchain: &Toolchain) -> Vec<String> {
             }
             cmd = inner;
         }
-        GateKind::Tracker => {
+        GateKind::Tracker | GateKind::Authorship => {
             // Not a subprocess. `--dry-run` still prints something meaningful so
             // the gate is reviewable in the matrix listing like every other one.
             cmd.push("xtask".to_string());
@@ -267,6 +267,9 @@ pub struct RunOptions {
     /// Tracker path as declared by `[verification.merge_readiness].tracker`, so
     /// the gate follows the contract instead of a hardcoded filename.
     pub tracker: String,
+    /// Trailer keys the `authorship` gate rejects, as declared by
+    /// `[verification.attribution].forbidden_trailers`.
+    pub forbidden_trailers: Vec<String>,
     pub toolchain: Toolchain,
     pub dry_run: bool,
     pub verbose: bool,
@@ -295,6 +298,10 @@ pub fn run(gate: &Gate, opts: &RunOptions) -> GateResult {
             opts.expected.as_ref(),
             &opts.tracker,
         );
+    }
+
+    if gate.kind == GateKind::Authorship {
+        return authorship(&gate.name, &opts.root, started, &opts.forbidden_trailers);
     }
 
     let (program, args) = argv.split_first().expect("argv_for never returns empty");
@@ -473,6 +480,242 @@ pub fn resolve<'a>(
 pub fn test_target_exists(root: &Path, target: &str) -> bool {
     let dir = root.join("tests").join(target);
     dir.join("main.rs").is_file() || root.join("tests").join(format!("{target}.rs")).is_file()
+}
+
+// ---------------------------------------------------------------------------
+// Commit authorship
+// ---------------------------------------------------------------------------
+
+/// Separators for parsing `git log` output: `%x1f` unit, `%x1e` record. These are
+/// the two git itself uses for `--format`, and they are what `git
+/// interpret-trailers` round-trips, so they are the least surprising choice
+/// available.
+///
+/// A commit message is free text, so any delimiter is theoretically forgeable.
+/// `splitn(3, ..)` is what makes that harmless: a message containing a separator
+/// keeps it in the message field instead of shifting the commit boundary and
+/// hiding the very line being scanned.
+const FIELD_SEP: char = '\u{1f}';
+const RECORD_SEP: char = '\u{1e}';
+
+/// Reduce a trailer key to a canonical form: lowercase, with `-`, `_` and
+/// whitespace removed.
+///
+/// `Co-Authored-By`, `co-authored-by`, `CoAuthoredBy` and `Co_Authored_By` all
+/// collapse to the same key. Without this the contract would have to list every
+/// spelling, and a list of spellings is only as good as the author's imagination
+/// — a ban that misses the variant someone actually typed is not a ban.
+fn normalise_key(key: &str) -> String {
+    key.chars()
+        .filter(|c| *c != '-' && *c != '_' && !c.is_whitespace())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Replace every banned-trailer line in `text` with a placeholder.
+///
+/// The offending commit is reported by id *and* subject, because naming the
+/// subject is what makes a 50-commit history cheap to clean. But a commit whose
+/// whole message is the banned line — which is what a tool that appends the
+/// trailer as its own message produces — would otherwise have the gate reprint the
+/// attribution in its own output, undoing the thing it exists to prevent. So the
+/// subject is redacted whenever it is itself the violation.
+///
+/// Redacting is not a loss of information: `git log -1 <id>` shows the message in
+/// full to whoever has the repository, and the gate's job is to fail and point at
+/// the commit, not to become a second copy of the history.
+fn redact_banned(text: &str, wanted: &[(String, &str)]) -> String {
+    text.lines()
+        .map(|line| match line.split_once(':') {
+            Some((key, _)) if wanted.iter().any(|(w, _)| *w == normalise_key(key)) => {
+                "<withheld: banned trailer>"
+            }
+            _ => line,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Fail while any commit in this repository's history carries a banned trailer.
+///
+/// The rule is on the trailer *key*, and the banned keys live in the contract, so
+/// no attribution appears in this file in order to check for one. The offending
+/// value is deliberately not echoed: the commit id is reported instead, which is
+/// all that is needed to fix it (`git log -1 <id>`) and keeps the gate's output
+/// free of the string it exists to keep out of the history.
+///
+/// Every way of *not* being able to check is reported `Unavailable` rather than
+/// `Passed`, which is what makes `xtask` exit 3:
+///
+/// * no `git` on PATH;
+/// * `root` is not inside a work tree — a published crate's `.crate` tarball, or
+///   a source export, has no history to scan;
+/// * a shallow clone, where the visible history is a truncation of the real one
+///   and a scan would report a pass over one commit;
+/// * the contract declares no forbidden trailers, so there is nothing to enforce;
+/// * git reports zero commits, which means the query was wrong rather than that
+///   the history is clean.
+///
+/// The scan covers every ref, not just `HEAD`. A banned trailer is still in this
+/// repository's history as long as any ref reaches it, and restricting the scan
+/// to the current branch would let a rewritten commit survive on a sibling branch
+/// and read as clean.
+fn authorship(name: &str, root: &Path, started: Instant, forbidden: &[String]) -> GateResult {
+    let done = |outcome: Outcome, detail: String| GateResult {
+        name: name.to_string(),
+        outcome,
+        duration: started.elapsed(),
+        detail: Some(detail),
+    };
+
+    if forbidden.is_empty() {
+        return done(
+            Outcome::Unavailable,
+            "[verification.attribution].forbidden_trailers is empty, so this gate has \
+             nothing to forbid and cannot fail. Refusing to report a pass it did not \
+             earn."
+                .to_string(),
+        );
+    }
+
+    let Some(git) = which_bin("git") else {
+        return done(
+            Outcome::Unavailable,
+            "`git` is not installed, so commit history cannot be read".to_string(),
+        );
+    };
+
+    // Run git with the runner's own environment scrubbed: `CARGO_*` describes
+    // xtask's package, not the repository, and a stray one could redirect git at
+    // a different object store.
+    let git_out = |args: &[&str]| -> Result<String, String> {
+        let mut cmd = Command::new(&git);
+        cmd.args(args)
+            .current_dir(root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        scrub_cargo_env(&mut cmd);
+        let out = cmd
+            .output()
+            .map_err(|e| format!("failed to run git {args:?}: {e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+
+    match git_out(&["rev-parse", "--is-inside-work-tree"]) {
+        Ok(answer) if answer.trim() == "true" => {}
+        Ok(answer) => {
+            return done(
+                Outcome::Unavailable,
+                format!(
+                    "{} is not inside a git work tree (git says {answer:?}), so there is \
+                     no history to scan",
+                    root.display()
+                ),
+            );
+        }
+        Err(e) => return done(Outcome::Unavailable, e),
+    }
+
+    match git_out(&["rev-parse", "--is-shallow-repository"]) {
+        Ok(answer) if answer.trim() == "true" => {
+            return done(
+                Outcome::Unavailable,
+                "this is a shallow clone, so the visible history is a truncation of the \
+                 real one. Scanning it would report a pass over however many commits \
+                 happen to be present. Clone with full history (`fetch-depth: 0` in CI)."
+                    .to_string(),
+            );
+        }
+        // Older git has no such flag. Not a reason to refuse: `git log` still
+        // returns everything the clone actually has.
+        Ok(_) | Err(_) => {}
+    }
+
+    // Record-separated, unit-separated. `--all` so every ref is covered; see the
+    // note on why not just HEAD. The flag is attached to the value rather than
+    // passed separately: a bare `--format` argument is read as a revision and git
+    // rejects the whole query, which would have made this gate permanently
+    // `Unavailable` while looking like a working one.
+    let format = "--format=%x1e%H%x1f%B".to_string();
+    let raw = match git_out(&["log", "--all", "--no-color", &format]) {
+        Ok(out) => out,
+        Err(e) => return done(Outcome::Unavailable, e),
+    };
+
+    // Normalised banned keys, paired with the spelling to name in a failure.
+    let wanted: Vec<(String, &str)> = forbidden
+        .iter()
+        .map(|k| (normalise_key(k), k.as_str()))
+        .collect();
+
+    let mut scanned = 0usize;
+    let mut offenders: Vec<String> = Vec::new();
+
+    for record in raw.split(RECORD_SEP) {
+        let record = record.trim_start_matches('\n');
+        if record.trim().is_empty() {
+            continue;
+        }
+        let mut fields = record.splitn(3, FIELD_SEP);
+        let (Some(sha), Some(message)) = (fields.next(), fields.next()) else {
+            continue;
+        };
+        scanned += 1;
+        let subject = redact_banned(message.lines().next().unwrap_or("").trim(), &wanted);
+
+        for line in message.lines() {
+            // A trailer is `Key: value`. Splitting on the *first* colon keeps the
+            // value — which may itself contain colons, as an address does — out of
+            // the comparison.
+            let Some((key, _)) = line.split_once(':') else {
+                continue;
+            };
+            let normalised = normalise_key(key);
+            if let Some((_, declared)) = wanted.iter().find(|(w, _)| *w == normalised) {
+                offenders.push(format!(
+                    "  {}  {declared} trailer in {subject:?}",
+                    &sha[..sha.len().min(8)]
+                ));
+            }
+        }
+    }
+
+    if scanned == 0 {
+        return done(
+            Outcome::Unavailable,
+            "git reported no commits, so the scan covered nothing. That is a broken \
+             query, not a clean history."
+                .to_string(),
+        );
+    }
+
+    if offenders.is_empty() {
+        return done(
+            Outcome::Passed,
+            format!(
+                "{scanned} commit(s) scanned across all refs; no banned trailer in any \
+                 message"
+            ),
+        );
+    }
+
+    done(
+        Outcome::Failed,
+        format!(
+            "{} commit(s) carry a banned trailer:\n{}\n  Inspect one with \
+             `git log -1 <id>` and amend the message; the value is not reproduced \
+             here on purpose.",
+            offenders.len(),
+            offenders.join("\n")
+        ),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -947,6 +1190,387 @@ mod tests {
         assert_eq!(
             contract.tracker, "elsewhere.toml",
             "the loaded contract ignored the declared tracker path"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The authorship gate
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod authorship_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// The keys `theSix.toml` declares. Read from the real contract rather than
+    /// restated, so these tests break if the policy is edited instead of drifting
+    /// silently against it.
+    fn contract_keys() -> Vec<String> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("theSix.toml");
+        let contract = crate::contract::Contract::load(&path).expect("the contract must load");
+        contract.forbidden_trailers
+    }
+
+    /// The co-authorship trailer key, hand-written rather than read from the
+    /// contract. Reading it from the contract would make the fixture and the
+    /// matcher agree by construction, so a wrong key in `theSix.toml` would pass
+    /// these tests while the gate matched nothing real.
+    const BANNED_KEY: &str = "Co-Authored-By";
+
+    /// A trailer built on that key, with a value that names nobody.
+    ///
+    /// The value is deliberately synthetic. The gate's claim is about the *key* —
+    /// it stops at the first colon and never reads what follows — so reproducing a
+    /// real attribution here would prove nothing extra while putting the very
+    /// string the gate exists to keep out of this repository into its source. What
+    /// has to be tested is "any value under this key is rejected", and
+    /// `any_value_under_the_banned_key_is_rejected` tests exactly that.
+    fn offending(value: &str) -> String {
+        format!("{BANNED_KEY}: {value}")
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            // Before the subcommand: `git init --quiet -c k=v` is a usage error,
+            // because `-c` is a git option and not one every subcommand takes.
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "tag.gpgsign=false",
+                "-c",
+                "init.defaultBranch=main",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .status()
+            .unwrap_or_else(|e| {
+                panic!(
+                    "git {args:?} could not be spawned ({e}); these tests \
+                 assert a property of git and cannot be skipped when git is absent"
+                )
+            });
+        assert!(
+            status.success(),
+            "git {args:?} failed in fixture {}",
+            dir.display()
+        );
+    }
+
+    /// A fresh repository containing one commit with the given message.
+    fn repo(message: &str) -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "thesix-auth-{}-{}-{n}",
+            std::process::id(),
+            message.len()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("fixture dir");
+        git(&dir, &["init", "--quiet"]);
+        git(
+            &dir,
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                message,
+                "--author",
+                "Test Author <author@example.invalid>",
+            ],
+        );
+        dir
+    }
+
+    fn check(dir: &Path) -> GateResult {
+        authorship("authorship", dir, Instant::now(), &contract_keys())
+    }
+
+    fn check_repo(message: &str) -> Outcome {
+        let dir = repo(message);
+        let r = check(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        r.outcome
+    }
+
+    /// The gate exists to fail. Every other test in this module is meaningless if
+    /// this one does not hold, because a gate that cannot reject the trailer it
+    /// was written for protects nothing.
+    #[test]
+    fn a_co_authorship_trailer_fails_the_gate() {
+        assert_eq!(
+            check_repo(&offending("Some Assistant <assistant@example.invalid>")),
+            Outcome::Failed
+        );
+    }
+
+    /// The key is the rule and the value is not, so this holds for every value —
+    /// which is why the fixtures above need not name a real one. A gate that
+    /// matched on the value would pass this suite while the real attribution came
+    /// back tomorrow under a new model name.
+    #[test]
+    fn any_value_under_the_banned_key_is_rejected() {
+        for value in [
+            "A Person <person@example.invalid>",
+            "Some Assistant <assistant@example.invalid>",
+            "Some Assistant (2026-01-01) <noreply@example.invalid>",
+            "<>",
+            "",
+        ] {
+            assert_eq!(
+                check_repo(&offending(value)),
+                Outcome::Failed,
+                "missed the value {value:?}"
+            );
+        }
+    }
+
+    /// And the failure must be locatable: reporting "something is wrong" without
+    /// naming the commit would make a 50-commit history expensive to clean.
+    #[test]
+    fn the_failure_names_the_offending_commit() {
+        let dir = repo(&format!(
+            "fix: a real subject\n\nBody.\n\n{}\n",
+            offending("Some Assistant <assistant@example.invalid>")
+        ));
+        let r = check(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(r.outcome, Outcome::Failed);
+        let detail = r.detail.expect("a failing gate must explain itself");
+        assert!(
+            detail.contains("fix: a real subject"),
+            "the failure must name the commit by subject: {detail}"
+        );
+        assert!(
+            !detail.contains("assistant@example.invalid"),
+            "the failure must not reproduce the attribution it is reporting: {detail}"
+        );
+    }
+
+    /// The subject is printed so the commit is identifiable, which means a commit whose
+    /// *entire message* is the banned line would have the gate reprint it. That is the
+    /// shape a tool produces when it appends the trailer as its own commit, so it is
+    /// not hypothetical — and it would undo the gate by reintroducing the string into
+    /// the one artefact that gets pasted into issues and logs.
+    #[test]
+    fn a_message_that_is_only_the_trailer_does_not_reprint_it() {
+        let dir = repo(&offending("Some Assistant <assistant@example.invalid>"));
+        let r = check(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(r.outcome, Outcome::Failed);
+        let detail = r.detail.expect("a failing gate must explain itself");
+        for leak in ["Some Assistant", "assistant@example.invalid"] {
+            assert!(
+                !detail.contains(leak),
+                "the gate reprinted {leak:?} from the commit it was reporting: {detail}"
+            );
+        }
+        assert!(
+            detail.contains("withheld"),
+            "a redacted subject should say so rather than look like a truncated subject: \
+         {detail}"
+        );
+    }
+
+    #[test]
+    fn a_plain_commit_passes() {
+        assert_eq!(check_repo("fix: an ordinary message"), Outcome::Passed);
+    }
+
+    /// A message with a body and an unrelated trailer is still a pass. Without
+    /// this, a gate that flagged any trailer at all would be indistinguishable
+    /// from one that enforces the policy.
+    #[test]
+    fn an_unrelated_trailer_is_not_a_violation() {
+        assert_eq!(
+            check_repo(
+                "fix: signed off\n\nBody line.\n\nReviewed-by: A Person\nSigned-off-by: Another Person"
+            ),
+            Outcome::Passed
+        );
+    }
+
+    /// The gate is not scoped to the trailer block.
+    ///
+    /// Git's own trailer rules only recognise the final paragraph of a message,
+    /// so a co-author line separated from the subject by a blank line is not a
+    /// trailer by git's definition — while being exactly as much of an
+    /// attribution. A gate that trusted `git interpret-trailers` semantics here
+    /// would be defeated by inserting one blank line.
+    #[test]
+    fn a_disowned_trailer_still_fails() {
+        assert_eq!(
+            check_repo(&format!(
+                "fix: subject\n\nBody first.\n\n{}\n",
+                offending("Some Assistant <assistant@example.invalid>")
+            )),
+            Outcome::Failed
+        );
+    }
+
+    /// Spelling variants are one rule, not four.
+    #[test]
+    fn case_and_separator_variants_are_all_caught() {
+        for variant in [
+            "co-authored-by: Someone <s@example.invalid>",
+            "Co-authored-by: Someone <s@example.invalid>",
+            "CoAuthoredBy: Someone <s@example.invalid>",
+            "Co_Authored_By: Someone <s@example.invalid>",
+            "Co-Author-by: Someone <s@example.invalid>",
+        ] {
+            assert_eq!(
+                check_repo(variant),
+                Outcome::Failed,
+                "missed the variant {variant:?}"
+            );
+        }
+    }
+
+    /// A colon in the value must not shift the comparison. Addresses contain
+    /// colons and would otherwise turn into a key that matches nothing.
+    #[test]
+    fn a_value_containing_a_colon_is_still_caught() {
+        assert_eq!(
+            check_repo("Co-Authored-By: a:b:c <s@example.invalid:9000>"),
+            Outcome::Failed
+        );
+    }
+
+    /// An empty policy is a gate that cannot fail. `Unavailable`, not `Passed`.
+    #[test]
+    fn an_empty_policy_is_unavailable_not_passed() {
+        let dir = repo("fix: clean");
+        let r = authorship("authorship", &dir, Instant::now(), &[]);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(r.outcome, Outcome::Unavailable);
+    }
+
+    /// A directory that is not a repository has no history to scan, which is not
+    /// the same as having a clean one.
+    #[test]
+    fn a_non_repository_is_unavailable_not_passed() {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("thesix-norepo-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let r = check(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(r.outcome, Outcome::Unavailable);
+    }
+
+    /// A shallow clone is the failure mode this gate would otherwise have shipped
+    /// with. GitHub's default checkout is depth 1, so without this check CI would
+    /// have reported a pass over the single tip commit while the banned trailer
+    /// sat in every commit beneath it.
+    #[test]
+    fn a_shallow_clone_is_unavailable_not_passed() {
+        let source = repo("fix: clean");
+        let dir = std::env::temp_dir().join(format!(
+            "thesix-shallow-{}-{}",
+            std::process::id(),
+            source.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        git(
+            std::path::Path::new("/"),
+            &[
+                "clone",
+                "--quiet",
+                "--depth",
+                "1",
+                "--no-local",
+                source.to_str().expect("utf-8 temp path"),
+                dir.to_str().expect("utf-8 temp path"),
+            ],
+        );
+        let r = check(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&source);
+        assert_eq!(r.outcome, Outcome::Unavailable);
+    }
+
+    /// The scan covers every ref, not just `HEAD`. A rewritten commit that is still
+    /// reachable from a sibling branch is still in this repository's history.
+    #[test]
+    fn a_trailer_reachable_only_from_another_branch_still_fails() {
+        let dir = repo("fix: clean");
+        git(&dir, &["branch", "sibling"]);
+        let message = offending("Some Assistant <assistant@example.invalid>");
+        git(
+            &dir,
+            &[
+                "commit",
+                "--quiet",
+                "--allow-empty",
+                "-m",
+                &message,
+                "--author",
+                "Test Author <author@example.invalid>",
+            ],
+        );
+        // Move HEAD back to the clean commit, so only `sibling` reaches the
+        // offending one. A HEAD-only scan would now report a clean history.
+        let head = String::from_utf8_lossy(
+            &Command::new("git")
+                .args(["rev-parse", "main"])
+                .current_dir(&dir)
+                .output()
+                .expect("rev-parse")
+                .stdout,
+        )
+        .trim()
+        .to_string();
+        git(&dir, &["checkout", "--quiet", "--detach", &head]);
+        let r = check(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            r.outcome,
+            Outcome::Failed,
+            "the offending commit is only reachable from `sibling`; a HEAD-only scan \
+             would have passed this"
+        );
+    }
+
+    /// The policy is read from the contract, not hardcoded in the gate.
+    #[test]
+    fn the_policy_comes_from_the_contract() {
+        let keys = contract_keys();
+        assert!(
+            !keys.is_empty(),
+            "[verification.attribution].forbidden_trailers is empty, so the gate has \
+             nothing to forbid"
+        );
+        let normalised: Vec<String> = keys.iter().map(|k| super::normalise_key(k)).collect();
+        assert!(
+            normalised.iter().any(|k| k == "coauthoredby"),
+            "the contract must forbid the co-authorship trailer. Keys declared: {keys:?}"
+        );
+    }
+
+    /// The contract declares the trailer *key*, and this gate is why that matters:
+    /// if the key it compares against were assembled from the same source as the
+    /// fixture, both would move together and a wrong matcher would still pass.
+    /// So the matcher is checked directly against hand-written spellings.
+    #[test]
+    fn normalisation_collapses_separators_and_case() {
+        assert_eq!(super::normalise_key("Co-Authored-By"), "coauthoredby");
+        assert_eq!(super::normalise_key("co-authored-by"), "coauthoredby");
+        assert_eq!(super::normalise_key("CoAuthoredBy"), "coauthoredby");
+        assert_eq!(super::normalise_key("  Co_Authored_By  "), "coauthoredby");
+        assert_ne!(
+            super::normalise_key("Co-Author-by"),
+            super::normalise_key("Co-Authored-By"),
+            "a different spelling is a different key; conflating them would widen the \
+             rule beyond what the contract declares"
         );
     }
 }

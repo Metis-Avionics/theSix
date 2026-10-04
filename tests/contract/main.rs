@@ -125,6 +125,30 @@ struct Verification {
     verification_required: bool,
     anti_vacuity_required: bool,
     required: BTreeMap<String, bool>,
+    #[serde(default)]
+    gate: Vec<ContractGate>,
+    #[serde(default)]
+    gate_order: GateOrder,
+    #[serde(default)]
+    attribution: Attribution,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct GateOrder {
+    #[serde(default)]
+    order: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ContractGate {
+    name: String,
+    kind: String,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+struct Attribution {
+    #[serde(default)]
+    forbidden_trailers: Vec<String>,
 }
 
 /// Compare a contract list (owned `String`s) against a suite registry.
@@ -619,6 +643,91 @@ fn declared_recovery_directions_match_what_the_runtime_can_execute() {
         !RecoveryDirection::Abort.is_success_without_the_key(),
         "abort is not a safe move fallback, so nothing may present it as one"
     );
+}
+
+// ---------------------------------------------------------------------------
+// 7. Authorship policy
+// ---------------------------------------------------------------------------
+
+/// The banned-trailer policy has to exist, be usable, and be enforced.
+///
+/// `cargo xtask` validates all three when it loads the contract, but this is the
+/// gate that runs in CI *before* the runner has been built, and it runs against
+/// the real file rather than a parsed struct the runner also parses. Two parsers
+/// agreeing is not the same as the policy being there.
+#[test]
+fn the_banned_trailer_policy_is_declared_and_enforced() {
+    let c = contract();
+    let keys = &c.verification.attribution.forbidden_trailers;
+
+    assert!(
+        !keys.is_empty(),
+        "[verification.attribution].forbidden_trailers is empty. An empty list makes the \
+         `authorship` gate a gate that cannot fail, which is the only kind of gate \
+         this repository treats as a defect."
+    );
+
+    for key in keys {
+        assert!(
+            !key.contains(':') && !key.chars().any(char::is_whitespace),
+            "{key:?} is not a usable git trailer key: the gate compares it against the \
+             text before a message line's first colon, so a key carrying a colon or \
+             whitespace could never match anything. It reads as coverage and checks \
+             nothing."
+        );
+    }
+
+    let authorship = c
+        .verification
+        .gate
+        .iter()
+        .find(|g| g.name == "authorship")
+        .expect(
+            "theSix.toml declares no `authorship` gate. A policy that no gate enforces \
+             is a promise the runtime does not have to keep.",
+        );
+    assert_eq!(
+        authorship.kind, "authorship",
+        "the `authorship` gate must be run by the runner itself; declared as {:?}",
+        authorship.kind
+    );
+
+    // The gate must be in the mandatory pass, not the deferred one, or it is a
+    // gate nobody runs by default.
+    assert!(
+        c.verification
+            .gate_order
+            .order
+            .iter()
+            .any(|g| g == "authorship"),
+        "`authorship` is missing from [verification.gate_order], so the runner would \
+         never execute it"
+    );
+}
+
+/// The policy must be stated as trailer *keys*, not as attributions.
+///
+/// A banned list holding a full attribution line would put that attribution into
+/// this repository's source in order to prevent it appearing in the history —
+/// the gate would cause the exact thing it exists to prevent. This is the one
+/// property of the policy that cannot be checked by running the gate, because the
+/// gate reads the same file this assertion reads.
+#[test]
+fn the_policy_names_keys_not_attributions() {
+    let c = contract();
+    for key in &c.verification.attribution.forbidden_trailers {
+        assert!(
+            !key.contains('@'),
+            "{key:?} looks like an attribution rather than a trailer key. The policy \
+             must forbid the *act* of adding a co-author trailer, not one value of it; \
+             writing the value into the contract to forbid it would reintroduce it."
+        );
+        assert!(
+            key.chars().count() <= 40,
+            "{key:?} is too long to be a git trailer key. If this is an attribution, see \
+             the previous assertion."
+        );
+    }
 }
 
 mod workflow;

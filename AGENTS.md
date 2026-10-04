@@ -61,8 +61,23 @@ cannot be deleted — or downgraded to dodge the check — without editing the
 contract. A finding clears only by being `resolved` with a `rationale`, or
 `accepted-risk` with both `accepted_by` and `rationale`.
 
-Order matters: fmt → contract → xtask_unit → check → clippy → doc → tests →
-doctest → deny → machete → package → merge_readiness. `loom`, `performance`, `soak` and `fuzz` are deferred.
+Order matters: fmt → contract → authorship → xtask_unit → check → clippy → doc →
+tests → doctest → deny → machete → package → merge_readiness. `loom`,
+`performance`, `soak` and `fuzz` are deferred.
+
+`authorship` is the second-cheapest gate and runs early because it judges the
+change under review, not the branch. It reads every commit message in the
+repository — across all refs, not just `HEAD` — and fails on a trailer key listed
+in `[verification.attribution].forbidden_trailers`. Two properties are load-bearing:
+
+* the rule is on the trailer **key**, and the keys live in the contract, so the
+  gate never has to contain an attribution in order to forbid one;
+* every way of *not* being able to check — no `git`, not a work tree, a shallow
+  clone, an empty key list — reports `Unavailable` and exits `3`. GitHub's default
+  checkout is depth 1, which would otherwise make this a pass over the tip commit.
+
+The CI job for it sets `fetch-depth: 0`. The gate detects a shallow clone, but
+detecting the wrong clone is not a substitute for asking for the right one.
 
 ## Architecture
 

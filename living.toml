@@ -151,6 +151,12 @@ that did not exist and reported success having done nothing - sccache, cargo-fuz
 a guessed sccache-action@v0.8. Only executing CI found them, and no local gate can,
 because a ref that cannot be resolved is indistinguishable from one that can until
 something tries to run it.
+The authorship gate reads history through `git log --all`, so it sees only the refs the
+clone carries. A commit that is unreachable from every fetched ref - deleted, or left
+only in a reflog on another machine - is not scanned. That is the same blind spot the
+gate has as any other history check, and it is why the seven rewritten commits needed
+a force-push rather than only a local rebase: until the remote ref moved, the gate
+correctly kept reporting them.
 """
 
 pending_work = """
