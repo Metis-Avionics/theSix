@@ -560,6 +560,65 @@ testkit::declare_cases! {
         );
     }
 
+    /// B17: a saturated ladder must reclaim a slot rather than refuse the
+    /// write, and the reclaim must be authorised by the control plane.
+    ///
+    /// This is the negative form of the finding: before it, a cache whose whole
+    /// ladder was full stopped accepting writes entirely. "Not refused" alone
+    /// would be a weak assertion -- a write that succeeded by returning a wrong
+    /// value would also pass -- so this also asserts that a *read* after the
+    /// flood returns either the right value or a miss.
+    async fn eviction_reclaims_a_saturated_ladder() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let m = mgr();
+        let ctx = test_ctx();
+
+        // Far more distinct keys than any rung holds, so the ladder must
+        // saturate and eviction must actually run.
+        const KEYS: usize = 4_000;
+        let mut accepted = 0_usize;
+        for i in 0..KEYS {
+            match m.set(&format!("ev{i}"), "v".to_string(), &ctx).await {
+                Ok(()) => accepted += 1,
+                Err(e) => panic!("write {i} refused with {e:?}; a saturated ladder must evict"),
+            }
+        }
+        assert_eq!(
+            accepted, KEYS,
+            "every write should be accepted once eviction can reclaim slots"
+        );
+
+        // Anti-vacuity: eviction must have run. If it had not, the ladder would
+        // have refused well before 4_000 keys and the assert above would have
+        // fired with a different message, so reaching here already implies it --
+        // but assert the readable set is genuinely smaller than the written set,
+        // which is the observable signature of eviction having happened.
+        let mut hits = 0_usize;
+        let mut misses = 0_usize;
+        for i in 0..KEYS {
+            match m.get(&format!("ev{i}"), &ctx).await {
+                Ok(Some(v)) => {
+                    assert_eq!(v, "v".to_string(), "ev{i} returned a WRONG value");
+                    hits += 1;
+                }
+                Ok(None) => misses += 1,
+                Err(thesix::CacheError::Miss) => misses += 1,
+                Err(e) => panic!("read ev{i} failed with {e:?}"),
+            }
+        }
+        assert!(
+            misses > 0,
+            "nothing was evicted, so eviction never ran: all {hits} reads hit"
+        );
+        assert_eq!(
+            hits + misses,
+            KEYS,
+            "every key must read as a hit or a miss, never anything else"
+        );
+        let _ = SeqCst;
+    }
+
     async fn generation_conflict() {
         let cachelito = Cachelito::new();
         let first = cachelito

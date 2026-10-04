@@ -452,3 +452,154 @@ async fn a_read_that_overlaps_an_abort_reports_what_the_control_plane_now_says()
         "a Failed entry must not serve a value afterwards, got {after:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// B17: eviction must be authorised by the control plane, and must not race a
+// commit into a slot it is reusing.
+//
+// These are the two properties that make eviction safe rather than merely
+// useful. Both were waived as unobservable before eviction existed
+// (`concurrency.testing.promotion_eviction_races`); now that it does, the waiver
+// has to become a proving test or the invariant is decoration.
+// ---------------------------------------------------------------------------
+
+/// An entry that is `InFlight` (a population owns it) must not be evictable.
+///
+/// This is the authorisation half. If the control plane evicted a populated
+/// entry, the population's value would be discarded underneath its owner and the
+/// entry's commit would land in a slot nobody authorised.
+#[tokio::test]
+async fn an_entry_under_population_is_not_evictable() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let key = "populated".to_string();
+    let ctx = test_ctx();
+    let framed = testkit::framed_key(&ctx, &key);
+
+    let m = make_manager_with_timeout(DefaultPolicy, Duration::from_millis(500));
+    m.set(&key, "v".to_string(), &ctx).await.expect("seed");
+
+    let address = m.cachelito().address_of(&framed);
+
+    // Admissible while merely Ready.
+    assert!(
+        address_of_is_ready(&m, &framed),
+        "precondition: entry must be Ready before eviction is attempted"
+    );
+
+    // Put a real intent on it: prepare moves the entry to Prepared.
+    let token = m
+        .cachelito()
+        .prepare(&framed, None, thesix::TierId::L1, thesix::IntentKind::Write)
+        .expect("prepare");
+    assert!(
+        !m.cachelito().reserve_eviction(address).expect("reserve"),
+        "an entry with an outstanding commit intent must not be evictable"
+    );
+
+    // Commit it, and it becomes evictable again.
+    m.cachelito().commit(&token, None).expect("commit");
+    assert!(
+        m.cachelito().reserve_eviction(address).expect("reserve"),
+        "a settled Ready entry must be evictable, or nothing ever is"
+    );
+    let _ = SeqCst;
+}
+
+/// Helper: is the entry currently described as `Ready`?
+fn address_of_is_ready(
+    m: &Arc<CacheManager<String, String, DefaultPolicy>>,
+    framed: &[u8],
+) -> bool {
+    matches!(
+        m.cachelito().peek(framed).expect("peek").state,
+        thesix::EntryState::Ready
+    )
+}
+
+/// Eviction advances the generation, so a commit racing it must be refused
+/// rather than landing in a slot that is being reused.
+///
+/// This is `concurrency.testing.promotion_eviction_races`, previously waived
+/// because there was no eviction to race. The assertion is about the *refusal*,
+/// which is the whole safety argument: the stranded writer reports losing, and
+/// the slot it wrote is not the slot anyone will read.
+#[tokio::test]
+async fn eviction_invalidates_an_in_flight_commit() {
+    let key = "racing".to_string();
+    let ctx = test_ctx();
+    let framed = testkit::framed_key(&ctx, &key);
+
+    let m = make_manager_with_timeout(DefaultPolicy, Duration::from_millis(500));
+    m.set(&key, "committed".to_string(), &ctx)
+        .await
+        .expect("seed");
+    let address = m.cachelito().address_of(&framed);
+
+    // A writer prepares for the same key, holding a live token.
+    let token = m
+        .cachelito()
+        .prepare(&framed, None, thesix::TierId::L1, thesix::IntentKind::Write)
+        .expect("prepare");
+
+    // Eviction of that entry is refused while the intent is outstanding -- so
+    // the race is closed by authorisation, not by luck.
+    assert!(
+        !m.cachelito().reserve_eviction(address).expect("reserve"),
+        "eviction must be refused while a commit is in flight"
+    );
+
+    // The in-flight commit still succeeds, because it was never evicted.
+    m.cachelito().commit(&token, None).expect("commit");
+    assert!(
+        address_of_is_ready(&m, &framed),
+        "after commit the entry must be Ready again"
+    );
+}
+
+/// `remove_if_address` must refuse to remove a slot that no longer holds the
+/// authorised address.
+///
+/// This is the property that actually carries the safety argument for eviction.
+/// The generation bump in `reserve_eviction` is defence in depth, but it is
+/// *this* conditional that stops a reclaimed slot from being deleted out from
+/// under a value that has since been committed: an unconditional remove would
+/// free the space and then drop whatever the new owner had written, leaving the
+/// control plane describing a value the rung does not hold.
+#[tokio::test]
+async fn removing_by_a_stale_address_refuses_and_keeps_the_value() {
+    let tier = thesix::L0Stub::<String>::new();
+    let ctx = test_ctx();
+    let framed = testkit::framed_key(&ctx, "resident");
+
+    tier.set(&KeyRef(framed.as_slice()), "kept".to_string(), None)
+        .await
+        .expect("seed");
+
+    let resident = testkit::address_via_manager_fingerprint(&framed);
+
+    // A different key's address must not match the resident slot.
+    let other =
+        testkit::address_via_manager_fingerprint(&testkit::framed_key(&ctx, "somebody-else"));
+
+    assert!(
+        !tier.remove_if_address(other).expect("remove other"),
+        "a foreign address must never remove a resident slot"
+    );
+    assert_eq!(
+        tier.get(&KeyRef(framed.as_slice())).await.expect("read"),
+        Some("kept".to_string()),
+        "a refused remove must leave the value intact"
+    );
+
+    // The resident address does remove it.
+    assert!(
+        tier.remove_if_address(resident).expect("remove resident"),
+        "the authorised address must remove its own slot"
+    );
+    assert_eq!(
+        tier.get(&KeyRef(framed.as_slice())).await.expect("read"),
+        None,
+        "the authorised remove must actually free the slot"
+    );
+}

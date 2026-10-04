@@ -1,5 +1,5 @@
 use crate::error::CacheError;
-use crate::integrity::{ContentDigest, IntegrityCheck, KeyFingerprint, Placement};
+use crate::integrity::{ContentDigest, IntegrityCheck, KeyAddress, KeyFingerprint, Placement};
 use crate::key::KeyRef;
 use crate::pool::MemoryPool;
 
@@ -28,6 +28,15 @@ pub struct FixedTierStub<V> {
     /// Counts reads rejected by the content digest. Observable so a test can
     /// prove the integrity check actually fired rather than assuming it.
     corruptions_detected: std::sync::atomic::AtomicU64,
+    /// Where the next eviction scan starts (B17).
+    ///
+    /// Without this, `eviction_candidate` would always nominate the lowest
+    /// occupied slot index; that slot is freed, immediately refilled by the
+    /// write that triggered the eviction, and chosen again next time. The tier
+    /// would thrash a single entry while the rest of the table stayed full.
+    /// Rotating the start point makes eviction round-robin over the table,
+    /// which is deterministic (no clock, no RNG) and testable.
+    eviction_cursor: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,6 +51,12 @@ struct Slot {
     pool_idx: usize,
     /// When the entry was written and its TTL. `None` TTL = never expires.
     expiry: Option<(std::time::Instant, std::time::Duration)>,
+    /// Control-plane address of the key in this slot (B17).
+    ///
+    /// Held so a slot can be identified for eviction without retaining the
+    /// key: the confidentiality invariant forbids keeping key material, so
+    /// eviction addresses slots, never keys.
+    address: KeyAddress,
 }
 
 impl Slot {
@@ -84,6 +99,7 @@ impl<V> FixedTierStub<V> {
             slots,
             placement: Placement::Default,
             corruptions_detected: std::sync::atomic::AtomicU64::new(0),
+            eviction_cursor: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -247,6 +263,7 @@ impl<V> FixedTierStub<V> {
                 digest,
                 pool_idx,
                 expiry: ttl.map(|t| (std::time::Instant::now(), t)),
+                address: KeyAddress::of(key.0, self.placement),
             });
             Ok(())
         } else {
@@ -306,5 +323,68 @@ impl<V> FixedTierStub<V> {
             *v = replacement;
         }
         Ok(true)
+    }
+}
+
+impl<V> FixedTierStub<V> {
+    /// Nominate the next slot for eviction, scanning round-robin from a
+    /// rotating cursor.
+    ///
+    /// Deterministic by construction: no clock and no RNG, so a test can assert
+    /// exactly which entry a full table gives up. The cursor advances past the
+    /// nominated slot so consecutive evictions walk the whole table instead of
+    /// thrashing one entry (see `eviction_cursor`).
+    ///
+    /// Expired slots are skipped. `find_empty` already reclaims those on the
+    /// write path, so reaching here means the survivors are live -- but a
+    /// direct call may still observe one, and returning an expired entry as a
+    /// victim would waste an eviction the control plane has to authorise.
+    pub fn eviction_candidate(&mut self) -> Option<KeyAddress> {
+        let n = self.slots.len();
+        if n == 0 {
+            return None;
+        }
+        let start = self
+            .eviction_cursor
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % n;
+        for offset in 0..n {
+            let idx = (start + offset) % n;
+            match &self.slots[idx] {
+                Some(s) if !s.is_expired() => {
+                    self.eviction_cursor
+                        .store(idx + 1, std::sync::atomic::Ordering::Relaxed);
+                    return Some(s.address);
+                }
+                _ => {}
+            }
+        }
+        // Every slot is expired. Nominate the first one anyway: it is dead, so
+        // the control plane authorising its eviction costs nothing.
+        self.slots.iter().flatten().next().map(|s| s.address)
+    }
+
+    /// Remove the slot holding `address`, only if it still holds it.
+    ///
+    /// Conditional on purpose. The control plane authorises an eviction by
+    /// advancing the generation, but the slot may be refilled before this runs;
+    /// an unconditional remove would then delete a value the control plane has
+    /// since committed. Returning `false` is safe because the reservation
+    /// already invalidated whatever was there.
+    pub fn remove_if_address(&mut self, address: KeyAddress) -> Result<bool, CacheError> {
+        let n = self.slots.len();
+        for idx in 0..n {
+            if let Some(slot) = &self.slots[idx]
+                && slot.address == address
+            {
+                let taken = self.slots[idx].take();
+                if let Some(taken) = taken {
+                    // Slot index is in-range by construction; dealloc cannot fail.
+                    let _ = self.pool.deallocate(taken.pool_idx);
+                }
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }

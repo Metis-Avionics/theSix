@@ -162,6 +162,38 @@ pub trait CacheTier<V>: Send + Sync {
         )
     }
 
+    /// Nominate one stored entry as an eviction candidate, if this tier has any.
+    ///
+    /// A tier **nominates**; it never decides. The default is `None`: a tier
+    /// that does not implement eviction says so, rather than the manager
+    /// assuming a victim exists. Overriders must be deterministic -- a
+    /// nondeterministic policy makes eviction untestable, and this crate holds
+    /// its tiers to provable behaviour.
+    ///
+    /// The returned address is the control-plane address of the entry, not the
+    /// key. A tier cannot return the key: retaining key material is exactly
+    /// what the confidentiality invariant forbids.
+    fn eviction_candidate(&self) -> Option<crate::integrity::KeyAddress> {
+        None
+    }
+
+    /// Remove the slot at `address`, but **only if it still holds that
+    /// address**.
+    ///
+    /// The conditionality is the whole point. The control plane reserves an
+    /// eviction by advancing the entry's generation, but between that and this
+    /// await the slot may have been refilled. An unconditional remove would
+    /// then delete a *newer* value that the control plane has already
+    /// committed, which is the silent-stale defect this pairing exists to
+    /// prevent. Returning `false` when the address moved is the safe answer:
+    /// the reserved value is already invalidated by the generation bump.
+    ///
+    /// Default `Ok(false)`, consistent with `eviction_candidate`.
+    fn remove_if_address(&self, address: crate::integrity::KeyAddress) -> Result<bool, CacheError> {
+        let _ = address;
+        Ok(false)
+    }
+
     async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError>;
 
     async fn set(

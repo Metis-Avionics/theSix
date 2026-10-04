@@ -322,6 +322,7 @@ cases = [
     "corrupt_payload",
     "invalid_metadata",
     "capacity_exhaustion",
+    "eviction_reclaims_a_saturated_ladder",
     "cancelled_operation",
     "duplicate_operation",
     "stale_generation",
@@ -808,6 +809,15 @@ hidden_blocking = false
 # with this repository's credentials. Pinned by SHA, the code that ran is the
 # code that was reviewed.
 ci_actions_sha_pinned = true
+# A saturated ladder reclaims a slot rather than refusing the write. Eviction is
+# control-plane authorised: the tier nominates an address, the control plane
+# admits it only if the entry is Ready, unowned and intent-free, and the
+# generation is advanced before the slot is dropped. Eviction is a last resort
+# after the ladder walk is exhausted, never the first move -- degrading
+# preserves a hotter rung, evicting at the first full rung destroys it.
+eviction_is_control_plane_authorised = true
+eviction_is_last_resort_after_degradation = true
+eviction_may_discard_a_ready_entry = true
 runtime_block_on = false
 lock_across_await = false
 silent_backend_substitution = false
@@ -978,8 +988,3 @@ reason = """
 no test asserts nested_block_on never happens. Nothing in the suite calls block_on from inside async context, so the invariant is unobserved rather than verified.
 """
 
-[[verification.invariant_waiver]]
-invariant = "concurrency.testing.promotion_eviction_races"
-reason = """
-eviction is not implemented, so there is no promotion/eviction race to schedule. This is the known eviction limitation; the clause should become provable when eviction lands.
-"""

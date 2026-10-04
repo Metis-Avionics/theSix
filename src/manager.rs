@@ -225,6 +225,16 @@ impl<K, V, P> CacheManager<K, V, P> {
     /// behind an unbounded loop that would livelock the executor.
     const MAX_COMMIT_ATTEMPTS: usize = 64;
 
+    /// How many times one write may reclaim a slot before giving up (B17).
+    ///
+    /// Each pass evicts at most one entry and then re-walks the ladder, so this
+    /// is an upper bound on the work a single `set` can do against a saturated
+    /// ladder. It is deliberately generous: in practice a pass frees the slot
+    /// the very next rung needs and the write lands. The bound exists so a
+    /// ladder whose entries are all unevictable -- every one `InFlight` -- makes
+    /// progress to a refusal instead of spinning.
+    const MAX_EVICTION_PASSES: usize = 16;
+
     /// How many times `get_or_fetch` may hand the entry to another caller before
     /// giving up.
     ///
@@ -542,7 +552,29 @@ where
                 // not a sweep that tried and lost — it is a job this sweep does not
                 // have the information to do, and folding the two together would
                 // make a permanently stuck key look like ordinary contention.
-                IntentKind::Move => report.needs_reconciliation += 1,
+                //
+                // The claim is nevertheless released (B15). Leaving it held
+                // wedged the key's population path permanently: `acquire`
+                // declines while an owner is set, so nothing could ever write
+                // or populate it again, and only an external reconciler that
+                // never arrived could clear it.
+                //
+                // Releasing is safe precisely because this does *not* resolve
+                // the move. The entry is marked `Failed` with its generation
+                // advanced and its intent cleared, so nothing points at the
+                // emptied source: reads report a miss and a later write
+                // supersedes whatever the interrupted move left behind. For a
+                // cache entry that is recoverable; a permanently unusable key is
+                // not. The obligation stays visible in `needs_reconciliation`,
+                // so releasing the wedge never hides it.
+                IntentKind::Move => {
+                    report.needs_reconciliation += 1;
+                    match self.cachelito.release_population_claim(address) {
+                        Ok(true) => report.released_for_reconciliation += 1,
+                        Ok(false) => {}
+                        Err(_) => report.failed += 1,
+                    }
+                }
             }
         }
         report
@@ -930,175 +962,280 @@ where
         //   commits and the other's token is refused. That is correct
         //   optimistic concurrency, but surfacing it makes an ordinary write look
         //   like a failure, so the loser re-reads and tries again.
-        let mut rung = decision.tier;
         let mut last_error = CacheError::TierUnavailable;
+        // Two passes: the first walks the ladder, the second runs after
+        // eviction has freed a slot. Eviction is the *last resort*, not the
+        // first move (B17) -- degrading preserves a hotter rung's contents,
+        // whereas evicting at the first full rung throws them away to make room
+        // for a colder key. That is a worse cache, not a better one.
+        // Eviction is attempted after *every* exhausted walk, not only the
+        // first. Gating it to `pass == 0` looked like a bound and was not: the
+        // first eviction advanced the pass, and every later exhaustion then
+        // skipped the reclaim and refused the write -- so the ladder still ran
+        // out, once. The bound that matters is how much work one write may do,
+        // which is MAX_EVICTION_PASSES below.
+        'pass: for _pass in 0..=Self::MAX_EVICTION_PASSES {
+            let mut rung = decision.tier;
 
-        'outer: while rung.is_cache_rung() {
-            let Some(tier) = self.bound_tier(&rung) else {
-                rung = previous_rung(rung);
-                continue;
-            };
+            'outer: while rung.is_cache_rung() {
+                let Some(tier) = self.bound_tier(&rung) else {
+                    rung = previous_rung(rung);
+                    continue;
+                };
 
-            let mut lost_races = 0usize;
-            loop {
-                // Phase 1: record the intent. From here the entry reads as a miss,
-                // so a crash between the phases cannot expose a half-written
-                // value.
-                let token = self
-                    .cachelito
-                    .prepare(key_ref.0, None, rung, IntentKind::Write)?;
+                let mut lost_races = 0usize;
+                loop {
+                    // Phase 1: record the intent. From here the entry reads as a miss,
+                    // so a crash between the phases cannot expose a half-written
+                    // value.
+                    let token = self
+                        .cachelito
+                        .prepare(key_ref.0, None, rung, IntentKind::Write)?;
 
-                // From here the intent is owned by the guard, not by control
-                // flow. Every exit below either disarms it explicitly or lets
-                // `Drop` abort it, so a cancelled `set` cannot leave the key
-                // `Prepared` with an owner nobody will satisfy.
-                let mut intent = IntentGuard::new(&self.cachelito, token);
+                    // From here the intent is owned by the guard, not by control
+                    // flow. Every exit below either disarms it explicitly or lets
+                    // `Drop` abort it, so a cancelled `set` cannot leave the key
+                    // `Prepared` with an owner nobody will satisfy.
+                    let mut intent = IntentGuard::new(&self.cachelito, token);
 
-                // Phase 2: the data write, outside every guard.
-                let set_result = self
-                    .observed_write(
-                        Operation::Set,
-                        &key_ref,
-                        rung,
-                        tier.set(&key_ref, value.clone(), ctx.ttl()),
-                    )
-                    .await;
-                self.record_outcome(rung, set_result);
+                    // Phase 2: the data write, outside every guard.
+                    let set_result = self
+                        .observed_write(
+                            Operation::Set,
+                            &key_ref,
+                            rung,
+                            tier.set(&key_ref, value.clone(), ctx.ttl()),
+                        )
+                        .await;
+                    self.record_outcome(rung, set_result);
 
-                // A failed write is ambiguous unless the tier says otherwise.
-                //
-                // The commit-failure path below already removes what it created; the
-                // error path did not, so a backend that stored the bytes and then
-                // reported failure left the control plane saying "aborted" and the
-                // rung holding a value nobody authorised. Because `abort` restores
-                // the previous state, that residue was not merely an orphan: on a
-                // previously-populated key the rung had silently become the *new*
-                // value while the control plane still described the old one, which
-                // is `partial_commit_visible = true` reached by accident.
-                //
-                // Compensating unconditionally would be worse, and an earlier version
-                // of this did exactly that, gated on a per-tier capability flag — which
-                // broke `write_failure_fails_a_write_and_leaves_the_old_value`. A tier
-                // that rejects a write provably stored nothing, so the rung still holds
-                // the *previous* value, and removing that destroys a good value in the
-                // name of clearing residue that does not exist.
-                //
-                // The discriminator is `WriteIndeterminate`, and it has to be: only the
-                // tier knows whether its bytes landed. A capability flag is a
-                // per-tier blanket claim and cannot distinguish a rejected write from
-                // an accepted one, so it over-removes. `ATOMIC_WRITE_OR_ERROR` remains
-                // as reported capability — it is true and a consumer may want it — but
-                // it does not govern this decision.
-                if let Err(CacheError::WriteIndeterminate) = set_result {
-                    let _ = self.bounded(tier.remove(&key_ref)).await;
-                }
+                    // A failed write is ambiguous unless the tier says otherwise.
+                    //
+                    // The commit-failure path below already removes what it created; the
+                    // error path did not, so a backend that stored the bytes and then
+                    // reported failure left the control plane saying "aborted" and the
+                    // rung holding a value nobody authorised. Because `abort` restores
+                    // the previous state, that residue was not merely an orphan: on a
+                    // previously-populated key the rung had silently become the *new*
+                    // value while the control plane still described the old one, which
+                    // is `partial_commit_visible = true` reached by accident.
+                    //
+                    // Compensating unconditionally would be worse, and an earlier version
+                    // of this did exactly that, gated on a per-tier capability flag — which
+                    // broke `write_failure_fails_a_write_and_leaves_the_old_value`. A tier
+                    // that rejects a write provably stored nothing, so the rung still holds
+                    // the *previous* value, and removing that destroys a good value in the
+                    // name of clearing residue that does not exist.
+                    //
+                    // The discriminator is `WriteIndeterminate`, and it has to be: only the
+                    // tier knows whether its bytes landed. A capability flag is a
+                    // per-tier blanket claim and cannot distinguish a rejected write from
+                    // an accepted one, so it over-removes. `ATOMIC_WRITE_OR_ERROR` remains
+                    // as reported capability — it is true and a consumer may want it — but
+                    // it does not govern this decision.
+                    if let Err(CacheError::WriteIndeterminate) = set_result {
+                        let _ = self.bounded(tier.remove(&key_ref)).await;
+                    }
 
-                match set_result {
-                    Ok(()) => {
-                        // Phase 3: commit. `commit` re-checks the generation, so an
-                        // invalidation that landed during the await wins and this
-                        // write is rejected rather than silently undoing it.
-                        return match self.cachelito.commit(intent.token(), ctx.ttl()) {
-                            Ok(()) => {
-                                intent.disarm();
-                                Ok(())
-                            }
-                            // A lost race is not an error, and it is not a
-                            // reason to change rung. The winner's value is
-                            // *newer* than this one, so the response is to
-                            // re-prepare against the generation it left behind
-                            // and try again right here.
-                            //
-                            // This arm used to fall out of a bounded retry loop
-                            // that, when exhausted, set `last_error =
-                            // StaleGeneration` and walked down the ladder. That
-                            // was wrong twice over: it wrote a losing, older
-                            // value into a colder tier, and because the walk
-                            // *consumed* the budget it could run out of rungs
-                            // and hand the caller a control-plane error from a
-                            // public API documented never to do so.
-                            Err(CacheError::StaleGeneration) => {
-                                lost_races += 1;
-                                if lost_races >= Self::MAX_COMMIT_ATTEMPTS {
-                                    let e = CacheError::WriteContended;
-                                    // The token is already dead, so the guard
-                                    // aborts it as we release. Nothing was
-                                    // committed at this rung by this attempt.
-                                    drop(intent);
-                                    return Err(e);
+                    match set_result {
+                        Ok(()) => {
+                            // Phase 3: commit. `commit` re-checks the generation, so an
+                            // invalidation that landed during the await wins and this
+                            // write is rejected rather than silently undoing it.
+                            return match self.cachelito.commit(intent.token(), ctx.ttl()) {
+                                Ok(()) => {
+                                    intent.disarm();
+                                    Ok(())
                                 }
-                                // Yield rather than spin: the writer we lost
-                                // to needs the executor to make progress too.
-                                tokio::task::yield_now().await;
-                                continue;
-                            }
-                            Err(e) => {
-                                // Uncommitted: the rung holds residue this write
-                                // created, so remove it before releasing the intent.
-                                let _ = tier.remove(&key_ref).await;
+                                // A lost race is not an error, and it is not a
+                                // reason to change rung. The winner's value is
+                                // *newer* than this one, so the response is to
+                                // re-prepare against the generation it left behind
+                                // and try again right here.
+                                //
+                                // This arm used to fall out of a bounded retry loop
+                                // that, when exhausted, set `last_error =
+                                // StaleGeneration` and walked down the ladder. That
+                                // was wrong twice over: it wrote a losing, older
+                                // value into a colder tier, and because the walk
+                                // *consumed* the budget it could run out of rungs
+                                // and hand the caller a control-plane error from a
+                                // public API documented never to do so.
+                                Err(CacheError::StaleGeneration) => {
+                                    lost_races += 1;
+                                    if lost_races >= Self::MAX_COMMIT_ATTEMPTS {
+                                        let e = CacheError::WriteContended;
+                                        // The token is already dead, so the guard
+                                        // aborts it as we release. Nothing was
+                                        // committed at this rung by this attempt.
+                                        drop(intent);
+                                        return Err(e);
+                                    }
+                                    // Yield rather than spin: the writer we lost
+                                    // to needs the executor to make progress too.
+                                    tokio::task::yield_now().await;
+                                    continue;
+                                }
+                                Err(e) => {
+                                    // Uncommitted: the rung holds residue this write
+                                    // created, so remove it before releasing the intent.
+                                    let _ = tier.remove(&key_ref).await;
+                                    intent.abort(e);
+                                    Err(e)
+                                }
+                            };
+                        }
+                        // This rung cannot take the write. Abort cleanly, then try the
+                        // next one down.
+                        //
+                        // Any rung-level failure forces the walk, because each one means
+                        // *this* rung cannot serve and a lower one might: full,
+                        // unavailable, slow enough to hit the bound, or holding a
+                        // record it cannot vouch for. Degrading only on capacity left a
+                        // write failing outright whenever the preferred rung was merely
+                        // down or slow, which is exactly the single-tier cascade the
+                        // contract forbids. If every rung below refuses, the walk ends
+                        // and the remembered error is returned, so nothing is masked.
+                        //
+                        // Errors that indicate a caller or contract problem rather than a
+                        // rung problem — `ConfigurationError`, `Miss` — return
+                        // immediately, because a lower rung cannot fix them.
+                        Err(
+                            e @ (CacheError::CapacityExhausted
+                            | CacheError::TierUnavailable
+                            | CacheError::Timeout
+                            | CacheError::Corrupted
+                            | CacheError::SerializationFailed
+                            | CacheError::WriteIndeterminate),
+                        ) => {
+                            // Only an error that proves nothing was written may
+                            // restore the interrupted state. The rest leave the entry
+                            // unservable: `TierUnavailable` and `Timeout` in this very
+                            // arm are both compatible with a write that landed, and
+                            // restoring `Ready` over a rung of unknown contents is how
+                            // an uncommitted value became readable.
+                            if write_provably_stored_nothing(e) {
+                                intent.abort_proven_clean(e);
+                            } else {
                                 intent.abort(e);
-                                Err(e)
                             }
-                        };
-                    }
-                    // This rung cannot take the write. Abort cleanly, then try the
-                    // next one down.
-                    //
-                    // Any rung-level failure forces the walk, because each one means
-                    // *this* rung cannot serve and a lower one might: full,
-                    // unavailable, slow enough to hit the bound, or holding a
-                    // record it cannot vouch for. Degrading only on capacity left a
-                    // write failing outright whenever the preferred rung was merely
-                    // down or slow, which is exactly the single-tier cascade the
-                    // contract forbids. If every rung below refuses, the walk ends
-                    // and the remembered error is returned, so nothing is masked.
-                    //
-                    // Errors that indicate a caller or contract problem rather than a
-                    // rung problem — `ConfigurationError`, `Miss` — return
-                    // immediately, because a lower rung cannot fix them.
-                    Err(
-                        e @ (CacheError::CapacityExhausted
-                        | CacheError::TierUnavailable
-                        | CacheError::Timeout
-                        | CacheError::Corrupted
-                        | CacheError::SerializationFailed
-                        | CacheError::WriteIndeterminate),
-                    ) => {
-                        // Only an error that proves nothing was written may
-                        // restore the interrupted state. The rest leave the entry
-                        // unservable: `TierUnavailable` and `Timeout` in this very
-                        // arm are both compatible with a write that landed, and
-                        // restoring `Ready` over a rung of unknown contents is how
-                        // an uncommitted value became readable.
-                        if write_provably_stored_nothing(e) {
-                            intent.abort_proven_clean(e);
-                        } else {
-                            intent.abort(e);
+                            last_error = e;
+                            rung = previous_rung(rung);
+                            continue 'outer;
                         }
-                        last_error = e;
-                        rung = previous_rung(rung);
-                        continue 'outer;
-                    }
-                    Err(e) => {
-                        // Undo phase 1 so the entry is claimable again, and report
-                        // the data-plane error rather than the bookkeeping one.
-                        if write_provably_stored_nothing(e) {
-                            intent.abort_proven_clean(e);
-                        } else {
-                            intent.abort(e);
+                        Err(e) => {
+                            // Undo phase 1 so the entry is claimable again, and report
+                            // the data-plane error rather than the bookkeeping one.
+                            if write_provably_stored_nothing(e) {
+                                intent.abort_proven_clean(e);
+                            } else {
+                                intent.abort(e);
+                            }
+                            return Err(e);
                         }
-                        return Err(e);
                     }
                 }
+                // Unreachable: the inner loop only ever exits by returning (every
+                // path out of it is a `return` or a `continue 'outer`), so there is
+                // no longer a way to exhaust it and fall through to a rung change.
+                // This is the line that used to turn a lost race into a rung
+                // descent; its absence is the fix for D1.
             }
-            // Unreachable: the inner loop only ever exits by returning (every
-            // path out of it is a `return` or a `continue 'outer`), so there is
-            // no longer a way to exhaust it and fall through to a rung change.
-            // This is the line that used to turn a lost race into a rung
-            // descent; its absence is the fix for D1.
+
+            // The ladder walk is exhausted. Only now is eviction worth its cost.
+            if last_error == CacheError::CapacityExhausted
+                && self.try_free_somewhere_in_the_ladder(key_ref.0)
+            {
+                // A slot exists somewhere now; walk the ladder again and take it.
+                continue 'pass;
+            }
+            break;
         }
 
         Err(last_error)
+    }
+
+    /// Reclaim one slot anywhere in the ladder, coldest rung first.
+    ///
+    /// Coldest-first because that is where the ladder walk was heading, so those
+    /// are the least valuable entries to lose. An earlier version reversed the
+    /// order and evicted from L1: the hottest rung then kept accepting every
+    /// write, the ladder never degraded at all, and the soak test asserting
+    /// degradation failed -- which is how the mistake surfaced.
+    ///
+    /// Returns whether anything was actually freed. `false` means every bound
+    /// rung's candidates were refused (all `InFlight`, or a tier that does not
+    /// implement eviction), and the caller should stop and report rather than
+    /// keep asking.
+    fn try_free_somewhere_in_the_ladder(&self, key: &[u8]) -> bool {
+        let mut budget = 0usize;
+        for candidate in crate::policy::cache_ladder() {
+            let Some(tier) = self.bound_tier(&candidate) else {
+                continue;
+            };
+            if self.try_evict_at_rung(&tier, key, &mut budget) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Free one slot at `tier` by evicting an entry the control plane agrees is
+    /// evictable. Returns whether a slot was actually reclaimed.
+    ///
+    /// The two-phase shape is the safety property (B17). The tier only
+    /// *nominates* an address; the control plane *authorises* it, atomically,
+    /// by checking admissibility and advancing the generation. Only then is the
+    /// slot removed, and conditionally on the address still being there.
+    ///
+    /// Why the generation bump matters: without it, a writer between `prepare`
+    /// and `commit` could commit into a slot that eviction is about to reuse.
+    /// The commit checks `token.expired_by(entry.generation())`; bumping first
+    /// makes that true, so the stranded write is refused rather than landing in
+    /// a slot that now describes a different key. Without this the tier would
+    /// have to evict on trust, and the result is a silently stale value -- the
+    /// exact defect B19 was promoted for.
+    ///
+    /// `attempts` is bounded by the caller across the whole write. A rung whose
+    /// every entry is unevictable (all `InFlight`, or all owned by populations)
+    /// must not spin: the walk degrades instead.
+    fn try_evict_at_rung(
+        &self,
+        tier: &Arc<dyn CacheTier<V>>,
+        key: &[u8],
+        attempts: &mut usize,
+    ) -> bool {
+        const MAX_EVICTION_ATTEMPTS: usize = 8;
+
+        while *attempts < MAX_EVICTION_ATTEMPTS {
+            *attempts += 1;
+            // Phase 1: the tier nominates. Default `None` means this tier does
+            // not support eviction at all, so we stop immediately rather than
+            // pretend.
+            let Some(address) = tier.eviction_candidate() else {
+                return false;
+            };
+
+            // Phase 2: the control plane disposes. Synchronous, so no shard
+            // guard is held across the await below.
+            match self.cachelito.reserve_eviction(address) {
+                Ok(true) => {}
+                // The nominated entry became ineligible (a population claimed
+                // it, a commit intent appeared). Refusal is a normal outcome;
+                // try the next candidate.
+                Ok(false) => continue,
+                Err(_) => return false,
+            }
+
+            // Phase 3: drop the slot, but only if it still holds the address we
+            // authorised. The generation bump has already invalidated it either
+            // way, so a `false` here is safe -- it means the slot was refilled
+            // and a newer value now owns it.
+            let r = matches!(tier.remove_if_address(address), Ok(true));
+            return r;
+        }
+        let _ = key;
+        false
     }
 
     pub async fn invalidate(&self, key: &K, ctx: &CacheContext) -> Result<(), CacheError> {

@@ -423,6 +423,7 @@ async fn an_unresolvable_move_is_reported_separately_from_a_failure() {
     let m = mgr();
     let ctx = test_ctx();
     let framed = testkit::framed_key(&ctx, "m");
+    let key_for_m = "m".to_string();
     m.cachelito()
         .prepare(&framed, None, TierId::L2, IntentKind::Move)
         .expect("prepare");
@@ -448,14 +449,42 @@ async fn an_unresolvable_move_is_reported_separately_from_a_failure() {
         "the sweep discarded the move intent, destroying the only evidence that a \
          move was in flight"
     );
+    // The claim is released even though the move is not resolved (B15). The
+    // entry moves to `Failed` rather than back to `Ready`: `acquire` accepts a
+    // `Failed` entry, so the key becomes writable again, whereas a `Prepared`
+    // entry with an owner is declined by both `acquire` and the write path --
+    // the permanent wedge this finding describes. Restoring the pre-intent state
+    // instead would point the control plane at a source rung the interrupted
+    // move had already emptied.
     assert_eq!(
         snap.state,
-        EntryState::Prepared,
-        "the entry left an unresolvable move no longer marked as in-flight"
+        EntryState::Failed,
+        "the released entry should be Failed, not Prepared (wedged) and not \
+         Ready (which would point at an emptied source)"
+    );
+    assert!(
+        !snap.population_owner,
+        "the population claim was not released, so the key stays wedged"
+    );
+
+    // And the key is genuinely usable again: a fresh write commits through the
+    // normal path.
+    m.set(&key_for_m, "written-after-recovery".to_string(), &ctx)
+        .await
+        .expect("the key must be writable after its claim was released");
+    assert_eq!(
+        m.get(&key_for_m, &ctx).await.expect("read"),
+        Some("written-after-recovery".to_string()),
+        "the released key did not serve the value written after recovery"
     );
 
     // And the distinction is real, not cosmetic: a write in the same sweep is
     // resolved, a move is not, and the report says which happened.
+    //
+    // The move here is a *fresh* key. The first move's intent was legitimately
+    // superseded by the write above -- `prepare` overwrites a retained intent --
+    // which is the intended lifecycle: the evidence survives until the key is
+    // next written, and not beyond.
     m.cachelito()
         .prepare(
             &testkit::framed_key(&ctx, "w"),
@@ -464,6 +493,14 @@ async fn an_unresolvable_move_is_reported_separately_from_a_failure() {
             IntentKind::Write,
         )
         .expect("prepare a write");
+    m.cachelito()
+        .prepare(
+            &testkit::framed_key(&ctx, "m2"),
+            None,
+            TierId::L2,
+            IntentKind::Move,
+        )
+        .expect("prepare a second move");
     let both = m.recover_older_than(Duration::from_secs(0));
     assert_eq!(both.recovered, 1, "the write was not resolved");
     assert_eq!(

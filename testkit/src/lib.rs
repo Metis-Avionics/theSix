@@ -728,6 +728,16 @@ pub fn faulty_corrupting<V: Clone + Send + Sync + 'static + thesix::IntegrityChe
 /// that fails cleanly stores nothing, so asserting against one proves nothing
 /// about residue at all — which is how the original gap survived: the write path
 /// was tested only with tiers that kept their promises.
+/// The control-plane address of `key` under the default placement, which is
+/// what every in-tree stub uses unless a test injects another `Placement`.
+///
+/// Exposed so a test can address a slot the way the manager does, instead of
+/// re-deriving the hash and getting it subtly wrong.
+#[must_use]
+pub fn address_via_manager_fingerprint(key: &[u8]) -> thesix::KeyAddress {
+    thesix::KeyAddress::of(key, thesix::Placement::Default)
+}
+
 /// A tier that wins every commit race it can reach.
 ///
 /// On every non-re-entrant `set` it performs a competing `manager.set` for the

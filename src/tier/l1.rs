@@ -64,6 +64,17 @@ impl<V: Clone + Send + Sync + 'static + IntegrityCheck> CacheTier<V> for L1Stub<
         self.inner.contains(key)
     }
 
+    fn eviction_candidate(&self) -> Option<crate::integrity::KeyAddress> {
+        self.inner.eviction_candidate()
+    }
+
+    fn remove_if_address(
+        &self,
+        address: crate::integrity::KeyAddress,
+    ) -> Result<bool, crate::error::CacheError> {
+        self.inner.remove_if_address(address)
+    }
+
     fn health(&self) -> TierHealth {
         TierHealth::default()
     }

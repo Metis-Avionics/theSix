@@ -382,11 +382,34 @@ fn the_default_ladder_survives_a_key_flood() {
         println!("{written} distinct keys in {:?}", started.elapsed());
         assert!(written > 1_000, "only {written} keys were accepted");
 
-        // Every accepted value must still be readable, whichever rung took it.
+        // With eviction enabled (B17) a saturated ladder reclaims a slot rather
+        // than refusing the write, so an early key can legitimately be gone by
+        // the time it is read. The invariant that must hold is therefore
+        // *narrower and stronger* than "everything is still there":
+        //
+        //   a read returns either the correct value or a miss, and NEVER a
+        //   different value.
+        //
+        // The old assertion ("every accepted value is still readable") was true
+        // only because a full ladder refused writes instead of evicting. Keeping
+        // it would have meant keeping the defect B17 exists to remove; dropping
+        // the read-back entirely would have stopped proving anything. A silently
+        // wrong value -- another key's bytes, or a stale generation -- is the
+        // failure this still catches.
+        let mut evicted = 0_usize;
         for i in (0..written).rev() {
-            let got = m.get(&format!("flood{i}"), &ctx).await.expect("read");
-            assert_eq!(got, Some("v".to_string()), "key flood{i} was lost");
+            match m.get(&format!("flood{i}"), &ctx).await {
+                Ok(Some(v)) => assert_eq!(
+                    v,
+                    "v".to_string(),
+                    "flood{i} came back with the WRONG value, which is a                      correctness failure and not eviction"
+                ),
+                Ok(None) => evicted += 1,
+                Err(thesix::CacheError::Miss) => evicted += 1,
+                Err(e) => panic!("read flood{i} failed with {e:?}"),
+            }
         }
+        println!("{evicted} of {written} reads reported a miss (evicted)");
     });
 }
 

@@ -1077,65 +1077,82 @@ against every claim in this repository that the gates were already covering it.
 
 [[bug]]
 id = "B15"
-title = "A swept Move intent wedges its key's population path permanently, with no automatic remedy"
+title = "A swept Move intent wedged its key's population path permanently"
 severity = "should-fix"
-status = "open"
+status = "resolved"
 blocks_merge = false
 verified = true
-locations = ["src/continuity.rs:141", "src/manager.rs:537", "theSix.toml:recovery_direction_prepare_move"]
+locations = [
+  "src/manager.rs:recover_older_than",
+  "src/control/cachelito.rs:release_population_claim",
+  "src/continuity.rs:RecoveryReport",
+]
 violates = []
-source = "independent review of both PRs at 5ab1aaa, listed as remaining debt"
+source = "independent review of both PRs at 5ab1aaa; confirmed against source during the 0.4.0 backlog pass"
 relates_to = "B3"
 summary = """
-B3 is resolved and this does not reopen it. B3 fixed a *disagreement*: the contract
-promised `complete-forward` while the runtime could only report failure. Both now
-say `external-reconciliation`, which is honest.
+B3 made the direction honest -- a `Move` maps to `ExternalReconciliation`, not
+`complete-forward` -- and left a capability gap with a permanent cost. The sweep
+counted a move in `needs_reconciliation` and left the entry `Prepared` with
+`population_owner = true`. Both `acquire` and the write path decline a `Prepared`
+entry that holds an owner, so nothing could ever write or populate that key
+again; only an external reconciler holding the key bytes could clear it, and one
+that never arrived left the key wedged for the life of the process.
+"""
+fix = """
+The claim is now released while the intent is deliberately **kept**.
 
-What remains is a capability gap rather than a contradiction, and it has a
-permanent cost. `RecoveryDirection::for_kind(Move)` returns
-`ExternalReconciliation` (src/continuity.rs:141) and the sweep counts these
-separately as `needs_reconciliation` (src/manager.rs:537) rather than resolving
-them. So the intent is left intact — `Prepared`, with `population_owner = true` —
-and `acquire` declines while an owner is set. The population path for that key is
-wedged until something outside the crate reconciles it.
-"""
-mechanism = """
-move_entry:  prepare(kind=Move, owner=true) -> remove source -> set dest -> commit
-crash between remove-source and commit:
-  sweep:      for_kind(Move) == ExternalReconciliation -> counted, not resolved
-  entry:      stays Prepared, population_owner = true
-  get_or_fetch: acquire declines -> caller becomes a waiter against an owner
-                that will never arrive -> burns the full bound and fails
-"""
-re_derived = """
-Verified against source rather than taken from the review: `IntentKind::Move =>
-Self::ExternalReconciliation` at src/continuity.rs:141, and `IntentKind:: Move =>
-report.needs_reconciliation += 1` at src/manager.rs:537. The entry is left intact
-rather than failed, so nothing releases the claim.
-"""
-required_fix = """
-Two options, both contract changes rather than patches:
+`Cachelito::release_population_claim(address)` marks the entry `Failed`, advances
+the generation and drops the population owner, without clearing the intent.
 
-  (a) persist the key bytes, or a durable handle to them, in `CommitIntent`. This
-      collides with the payload-free intent invariant, which is a contract
-      guarantee in its own right — `commit_protocol` exists to forbid exactly this.
-  (b) reorder the move so the commit precedes the source removal. Then abort is
-      always safe: a crash before the commit leaves the source intact, and a crash
-      after it leaves only an unreachable duplicate at the source. This makes the
-      wedge a transient rather than a permanent state.
+Two decisions inside that, both load-bearing:
 
-Option (b) is the cheaper of the two and needs a test that pins the ordering,
-because the current order is what makes abort unsafe.
+* `Failed` rather than the restored pre-intent state. Restoring would point the
+  control plane at a source rung the interrupted move had already emptied, and a
+  read would serve that emptiness as though it were the value -- turning a
+  visible wedge into silent wrong data. `Failed` points nowhere: reads miss, and
+  a later write supersedes whatever the move left behind. It is sufficient to
+  unblock the key because `acquire` already accepts `Absent | Failed | Stale`.
+* The intent is retained rather than cleared. Clearing it, as
+  `abort_intent_by_address` does, destroys the only record that a move was in
+  flight, and the control plane keeps only a key hash -- so the report could say
+  "one move needs reconciliation" without saying which key. Retaining it costs
+  nothing operationally because `prepare` overwrites an existing intent rather
+  than refusing, so the key stays writable and the evidence survives until the
+  key is next written.
+
+`RecoveryReport` gains `released_for_reconciliation`, kept separate from both
+`recovered` (nothing was recovered) and `needs_reconciliation` (that is the
+obligation, this is the remedy taken for the wedge). Folding them together would
+make a stuck key look like ordinary contention, which is the confusion this
+finding was filed against.
 """
-related_window = """
-A move removes the source rung *before* it commits, so a crash in that window
-leaves the value only at the destination. Any future reconciliation pass must
-handle that window rather than assuming the source is still authoritative.
+verification = """
+`an_unresolvable_move_is_reported_separately_from_a_failure` extended rather than
+replaced. Its three original assertions (recovered 0, needs_reconciliation 1,
+failed 0) are untouched and still hold. The state assertion changed from
+`Prepared` to `Failed`, with the reason stated in the test, and the retained
+intent assertion is unchanged -- so the evidence property is still proven.
+
+New assertions: the population owner is cleared, and a fresh `set`/`get` through
+the released key succeeds. Mutation-checked: with the release made a no-op the
+test fails on the state assertion.
+
+One test detail worth recording: the second sweep phase originally reused the
+same key, and its move count went to zero because the write added above had
+legitimately superseded the retained intent. That is the intended lifecycle, not
+a defect, so the phase now uses a distinct key and says why.
+"""
+rationale = """
+Fixed rather than accepted. The crate's refusal to resolve the move is correct
+and unchanged; what was wrong was paying for that honesty with a permanently
+unusable key. Releasing the claim while keeping the evidence makes the cost
+proportional -- an obligation reported, not a wedge.
 """
 
 [[bug]]
 id = "B16"
-title = "Six declared invariants have no proving test and are waived"
+title = "Five declared invariants have no proving test and are waived (one closed)"
 severity = "should-fix"
 status = "open"
 blocks_merge = false
@@ -1177,36 +1194,94 @@ entries, each with a `reason`, and the reasons match the enumeration above.
 
 [[bug]]
 id = "B17"
-title = "Nothing evicts, so a cache whose whole ladder is full refuses new writes"
+title = "Nothing evicted, so a cache whose whole ladder is full refused new writes"
 severity = "should-fix"
-status = "open"
+status = "resolved"
 blocks_merge = false
 verified = true
-locations = ["src/tier/fixed_tier_stub.rs:256", "src/manager.rs"]
-violates = []
-source = "independent review of both PRs at 5ab1aaa"
+locations = [
+  "src/manager.rs:set",
+  "src/control/cachelito.rs:reserve_eviction",
+  "src/tier/trait.rs",
+  "src/tier/fixed_tier_stub.rs",
+]
+violates = ["concurrency.testing.promotion_eviction_races"]
+source = "independent review of both PRs at 5ab1aaa; scope re-derived during the 0.4.0 backlog pass"
 relates_to = "B16"
 summary = """
-`FixedTierStub::set` returns `CacheError::CapacityExhausted` when full
-(src/tier/fixed_tier_stub.rs:256). `CacheManager` degrades down the ladder on that
-error, which is honest and lossless — but when every rung is full there is nothing
-left to degrade to, and the write is refused. A cache with no eviction eventually
-stops accepting writes entirely.
+`FixedTierStub::set` returns `CapacityExhausted` when its slot table is full, and
+`set` degrades down the ladder on that error. The walk reaches L1 and then L0,
+and when both are full there is nothing left to degrade to, so the write was
+refused. Measured on `main` at `e46a041`: 1_024 keys accepted at L1, 953 at L0,
+then `CapacityExhausted` on write 1_977 -- and never again.
+
+`find_empty` already reclaimed empty, self-owned and *expired* slots, so the
+real gap was narrower than the finding implied: only a full table of live
+non-expiring entries could never be reclaimed.
 """
-re_derived = """
-Verified rather than assumed: `Err(CacheError::CapacityExhausted)` at
-src/tier/fixed_tier_stub.rs:256, and a search for `fn evict` / `evict(` across
-`src/` returns nothing. There is no eviction implementation, partial or otherwise.
+fix = """
+Eviction, in three parts so the data plane never decides anything:
+
+* `CacheTier` gains `eviction_candidate()` and `remove_if_address()`, both
+  defaulted pessimistically (`None` / `Ok(false)`) in the spirit of
+  `capability()`. A tier nominates; it does not authorise.
+* `Cachelito::reserve_eviction(address)` is the authority. Under the shard lock
+  it admits only an entry that is `Ready`, unowned and intent-free, and it
+  advances the generation *before* returning, so a commit holding a token for the
+  old generation is refused rather than landing in a slot about to be reused.
+* `set` calls eviction only once the ladder walk is exhausted, coldest bound rung
+  first, and re-walks. It is a last resort, not the first move: degrading
+  preserves a hotter rung's contents, whereas evicting at the first full rung
+  destroys them.
+
+Evicting from the data plane alone would have been unsafe, and the reason is
+worth recording because it shaped the whole design: an eviction that did not
+touch the control plane would leave the generation untouched, so a writer
+between `prepare` and `commit` would still commit successfully -- into a slot
+now holding a different key's value. That is silent stale data, the same family
+as B2/B6/B19.
 """
-required_fix = """
-Blocked on a policy decision rather than on engineering. Eviction is a policy
-choice — LRU, sampled, clock — and the contract deliberately leaves policy to the
-consumer, so this cannot be closed by picking one inside the crate. Closing it
-means either implementing a policy behind a consumer-supplied hook, or declaring
-the limitation in the contract rather than leaving it implied by the ladder's
-degradation behaviour.
+verification = """
+`eviction_reclaims_a_saturated_ladder` is a declared negative case in
+`theSix.toml` and `NEGATIVE_CASES`, proven in the negative layer: 4_000 writes
+are all accepted where `main` refused at 1_977, and every read is checked to
+return either the correct value or a miss -- never a wrong one.
+
+Two authorisation tests in the concurrency layer prove the safety properties:
+an entry with an outstanding commit intent is not evictable, and a settled
+`Ready` entry is. `removing_by_a_stale_address_refuses_and_keeps_the_value`
+covers the address-conditional removal.
+
+The conditional removal was mutation-checked: made unconditional, it fails with
+"a foreign address must never remove a resident slot" (`left: true,
+right: false`). The generation bump is defence in depth and is *not* covered by
+that mutation -- the eligibility refusal is what closes the tested window -- so
+it is recorded as belt-and-braces rather than claimed as load-bearing.
+
+Two soak assertions changed, and deliberately so. `the_default_ladder_survives_a_key_flood`
+previously required every accepted value to still be readable, which was true
+only *because* a full ladder refused writes. It now requires the narrower and
+stronger property: a read returns the correct value or a miss, never a different
+value. 1_031 of 3_000 reads report a miss (evicted) and none report a wrong
+value. `the_manager_degrades_down_the_ladder_before_it_fails` was left untouched
+and still passes, which is the check that eviction did not quietly become the
+first move.
+
+Three mistakes during this work are worth recording because each was caught by a
+test rather than by reading:
+
+* evicting hottest-rung-first, which kept L1 accepting every write and meant the
+  ladder never degraded -- caught by the untouched degradation test;
+* gating eviction to `pass == 0`, which allowed exactly one eviction per process
+  and then refused again -- caught by the flood test still stopping at 1_964;
+* several edits that silently failed to apply, producing false readings. Every
+  later edit asserts its anchor.
 """
-blocks = "B16's `promotion_eviction_races` waiver cannot be lifted before this lands."
+rationale = """
+Fixed rather than waived. "A cache that eventually stops accepting writes" is a
+defect in the thing the crate exists to be, and the safe version needed the
+control plane involved, which is now how it works.
+"""
 
 [[bug]]
 id = "B18"
