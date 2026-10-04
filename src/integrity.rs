@@ -365,6 +365,8 @@ mod tests {
     /// computed independently.
     #[test]
     fn blanket_digest_is_two_seeded_fnv_lanes_over_the_hash_stream() {
+        testkit::proves!("cia.integrity.digest_is_cryptographic");
+
         for i in 0..1_000_u32 {
             let value = i.to_le_bytes();
 
@@ -427,6 +429,8 @@ mod tests {
 
     #[test]
     fn seeded_hasher_matches_the_byte_lane_it_mirrors() {
+        testkit::proves!("cia.integrity.digest");
+
         // `SeededFnv` reimplements `fnv1a` over a `Hash` stream. If the two ever
         // diverge, the blanket digest silently stops being the documented
         // construction, so pin them together.

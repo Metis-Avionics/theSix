@@ -14,6 +14,8 @@ use thesix::CacheManager;
 
 #[tokio::test]
 async fn test_concurrent_readers() {
+    testkit::proves!("concurrency.testing.concurrent_reads");
+
     let manager = make_manager(DefaultPolicy);
     let key = "shared-key".to_string();
 
@@ -39,6 +41,11 @@ async fn test_concurrent_readers() {
 
 #[tokio::test]
 async fn test_concurrent_writer_readers() {
+    testkit::proves!(
+        "concurrency.testing.concurrent_writes",
+        "concurrency.testing.read_write_races"
+    );
+
     let manager = make_manager(DefaultPolicy);
     let key = "rw-key".to_string();
 
@@ -526,6 +533,8 @@ fn address_of_is_ready(
 /// the slot it wrote is not the slot anyone will read.
 #[tokio::test]
 async fn eviction_invalidates_an_in_flight_commit() {
+    testkit::proves!("concurrency.testing.promotion_eviction_races");
+
     let key = "racing".to_string();
     let ctx = test_ctx();
     let framed = testkit::framed_key(&ctx, &key);

@@ -236,6 +236,22 @@ fn a_proof_may_not_point_at_this_module() {
 /// the meaning of the flag.
 #[test]
 fn every_semantic_section_is_marked_required() {
+    testkit::proves!(
+        "acid.atomicity.required",
+        "acid.consistency.required",
+        "acid.durability.required",
+        "acid.isolation.required",
+        "acid.required",
+        "capabilities.required",
+        "cia.availability.required",
+        "cia.confidentiality.required",
+        "cia.integrity.required",
+        "cia.required",
+        "concurrency.required",
+        "continuity.required",
+        "hpa.required"
+    );
+
     let doc: toml::Value = toml::from_str(CONTRACT).expect("theSix.toml must parse");
     let table = doc.as_table().expect("the contract is a table");
 

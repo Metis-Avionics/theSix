@@ -105,6 +105,8 @@ proptest! {
     /// *something* consistent-looking — so it has to be checked against a model.
     #[test]
     fn no_silent_data_loss(ops in prop::collection::vec(op_gen(), 1..16)) {
+    testkit::proves!("no_silent_data_loss");
+
         let rt = runtime();
         let m = manager();
         let ctx = test_ctx();
@@ -180,6 +182,8 @@ proptest! {
     fn no_cross_key_corruption(
         pairs in prop::collection::vec((key_gen(), key_gen(), "[a-z]{1,8}"), 1..12),
     ) {
+    testkit::proves!("acid.isolation.cross_key_interference", "no_cross_key_corruption");
+
         // Sized from the generated input: with everything forced onto one slot,
         // a fixed small table would just be testing `CapacityExhausted`.
         let capacity = pairs.len() * 2 + 2;
@@ -233,6 +237,8 @@ proptest! {
         bound in prop::collection::vec(prop::bool::ANY, 0..7),
         writes in prop::collection::vec(key_gen(), 0..8),
     ) {
+    testkit::proves!("acid.consistency.authority_inversion", "no_authority_inversion");
+
         let rt = runtime();
         let mut tiers: Vec<Arc<dyn CacheTier<String>>> = Vec::new();
         for i in 0..7 {
@@ -288,6 +294,8 @@ proptest! {
         ops in prop::collection::vec(op_gen(), 1..12),
         moves in prop::collection::vec(prop_oneof![Just(true), Just(false)], 0..8),
     ) {
+    testkit::proves!("acid.consistency.invalid_state_may_be_promoted", "no_invalid_state_promotion");
+
         let rt = runtime();
         let m = manager();
         let ctx = test_ctx();
@@ -365,6 +373,8 @@ proptest! {
         stall_after in 0usize..4,
         probes in prop::collection::vec(key_gen(), 1..8),
     ) {
+    testkit::proves!("acid.isolation.deadlock_tolerance", "concurrency.deadlock_free", "no_deadlock", "no_lock_across_await");
+
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -433,6 +443,8 @@ proptest! {
     /// authority role it was not given, or durability it has not proved.
     #[test]
     fn no_capability_misreporting(bound in 0usize..8) {
+    testkit::proves!("acid.durability.false_durability_claims", "no_capability_misreporting", "no_false_durability");
+
         let tiers: Vec<Arc<dyn CacheTier<String>>> = (0..bound)
             .map(|_| Arc::new(L0Stub::<String>::new()) as Arc<dyn CacheTier<String>>)
             .collect();
@@ -482,6 +494,8 @@ proptest! {
         keys in prop::collection::vec(key_gen(), 1..10),
         rounds in 1usize..4,
     ) {
+    testkit::proves!("recovery_is_idempotent");
+
         let m = manager();
         let ctx = test_ctx();
         let mut expected = 0usize;
@@ -530,6 +544,8 @@ proptest! {
 /// Generations must be monotonic under arbitrary operation sequences.
 #[test]
 fn generations_never_regress() {
+    testkit::proves!("concurrency.testing.random_interleavings");
+
     let rt = runtime();
     rt.block_on(async move {
         let ops: Vec<Op> = vec![
@@ -655,6 +671,8 @@ async fn a_faulty_tier_never_lies_about_its_ledger() {
 /// Continuity must never report a rung healthy when it is not bound.
 #[test]
 fn continuity_never_claims_an_unbound_rung_is_healthy() {
+    testkit::proves!("capabilities.unbound_rung_is_substituted");
+
     for bound in 0..8usize {
         let tiers: Vec<Arc<dyn CacheTier<String>>> = (0..bound)
             .map(|_| Arc::new(L0Stub::<String>::new()) as Arc<dyn CacheTier<String>>)
@@ -677,6 +695,8 @@ fn continuity_never_claims_an_unbound_rung_is_healthy() {
 /// A `Corrupted` read must never be converted into a value by any wrapper.
 #[tokio::test]
 async fn corruption_is_never_swallowed() {
+    testkit::proves!("acid.consistency.corruption_may_be_silently_accepted");
+
     let mut stub = thesix::FixedTierStub::<String>::with_capacity(4).expect("stub");
     let key = KeyRef(b"c");
     stub.set(&key, "good".to_string(), None).expect("set");

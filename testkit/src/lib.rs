@@ -748,6 +748,35 @@ impl<V: Clone + Send + Sync + 'static + thesix::IntegrityCheck> CacheTier<V> for
     }
 }
 
+/// Declares, inside a test body, which contract clauses that test proves.
+///
+/// This exists because a locator registry binds a clause to a `path::fn`, and
+/// resolving that pair only proves the function exists. Citing a real but
+/// irrelevant test satisfies such a gate, which is the same defect as citing a
+/// comment that describes a check nobody wrote: the name resolves and the claim
+/// is still empty.
+///
+/// Putting the label in the test reverses the direction of trust. The registry
+/// says which test it expects; the test says what it actually proves; the gate
+/// requires the two to agree. A mis-citation then fails, because the wrongly
+/// cited test's own list does not contain the clause.
+///
+/// It expands to a `const _` binding rather than nothing, so the declaration is
+/// real code the compiler checks instead of a comment a reader has to trust.
+/// Whether the named clause is still declared in `theSix.toml` is checked
+/// separately by `tests/contract/invariant.rs`, which is the layer that can read
+/// the contract.
+///
+/// Nothing here can catch a test that lies in its own label. That is the
+/// irreducible part -- a test asserting the wrong thing while claiming the right
+/// clause -- and it is what the mutation evidence in `bugs.toml` B20 is for.
+#[macro_export]
+macro_rules! proves {
+    ($($clause:literal),+ $(,)?) => {
+        const _: &str = concat!($($clause, "|",)* "");
+    };
+}
+
 /// Wrap `inner` in a fault tier and return both, so the caller keeps the handle
 /// it needs for ledger assertions.
 pub fn faulty<V: Clone + Send + Sync + 'static + thesix::IntegrityCheck>(

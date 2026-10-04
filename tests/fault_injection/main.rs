@@ -83,6 +83,8 @@ fn every_fault_class_has_a_stable_name() {
 
 #[tokio::test]
 async fn latency_stalls_without_failing() {
+    testkit::proves!("latency");
+
     let (m, ledger, _t) = armed(FaultPlan::new().push_latency_ms(OpKind::Set, 20));
     let started = std::time::Instant::now();
     m.set(&"k".to_string(), "v".to_string(), &test_ctx())
@@ -97,6 +99,8 @@ async fn latency_stalls_without_failing() {
 
 #[tokio::test]
 async fn timeout_fails_the_operation() {
+    testkit::proves!("timeout");
+
     let (m, ledger, _t) = armed(FaultPlan::new().push(OpKind::Set, FaultClass::Timeout));
     let r = m.set(&"k".to_string(), "v".to_string(), &test_ctx()).await;
     assert_eq!(r, Err(CacheError::Timeout));
@@ -111,6 +115,8 @@ async fn timeout_fails_the_operation() {
 
 #[tokio::test]
 async fn hang_parks_the_operation_and_leaves_the_control_plane_free() {
+    testkit::proves!("hang", "hpa.isolation.slow_backend_may_block_control_plane");
+
     let (m, ledger, handle) = armed(FaultPlan::new().push(OpKind::Get, FaultClass::ReadFailure));
     let key = "hangs".to_string();
     m.set(&key, "v".to_string(), &test_ctx())
@@ -153,6 +159,8 @@ async fn hang_parks_the_operation_and_leaves_the_control_plane_free() {
 
 #[tokio::test]
 async fn read_failure_fails_a_read_only() {
+    testkit::proves!("read_failure");
+
     let (m, ledger, _t) = armed(FaultPlan::new().push(OpKind::Get, FaultClass::ReadFailure));
     let key = "r".to_string();
     m.set(&key, "v".to_string(), &test_ctx())
@@ -179,6 +187,8 @@ async fn read_failure_fails_a_read_only() {
 /// unservable, so the next read misses and repopulates.
 #[tokio::test]
 async fn write_failure_never_serves_the_replacement_and_leaves_no_intent() {
+    testkit::proves!("write_failure");
+
     let (m, ledger, handle) = armed(FaultPlan::new());
     let key = "w".to_string();
     m.set(&key, "original".to_string(), &test_ctx())
@@ -225,6 +235,8 @@ async fn write_failure_never_serves_the_replacement_and_leaves_no_intent() {
 
 #[tokio::test]
 async fn metadata_failure_fails_the_operation_but_not_the_entry() {
+    testkit::proves!("metadata_failure");
+
     let (m, ledger, handle) = armed(FaultPlan::new());
     let key = "meta".to_string();
     m.set(&key, "v".to_string(), &test_ctx())
@@ -249,6 +261,8 @@ async fn metadata_failure_fails_the_operation_but_not_the_entry() {
 
 #[tokio::test]
 async fn corruption_is_detected_rather_than_served() {
+    testkit::proves!("cia.integrity.corrupt_data_promoted", "corruption");
+
     let (tier, ledger) = faulty_corrupting(
         Arc::new(L0Stub::<String>::new()) as Arc<dyn CacheTier<String>>,
         FaultPlan::new(),
@@ -291,6 +305,8 @@ async fn corruption_is_detected_rather_than_served() {
 
 #[tokio::test]
 async fn disconnect_looks_like_an_unavailable_rung() {
+    testkit::proves!("disconnect");
+
     let (m, ledger, _t) = armed(FaultPlan::new().push(OpKind::Set, FaultClass::Disconnect));
     let r = m.set(&"d".to_string(), "v".to_string(), &test_ctx()).await;
     assert_eq!(r, Err(CacheError::TierUnavailable));
@@ -299,6 +315,8 @@ async fn disconnect_looks_like_an_unavailable_rung() {
 
 #[tokio::test]
 async fn capacity_exhaustion_is_reported_as_such() {
+    testkit::proves!("capacity_exhaustion");
+
     let (m, ledger, _t) = armed(FaultPlan::new().push(OpKind::Set, FaultClass::CapacityExhaustion));
     let r = m
         .set(&"full".to_string(), "v".to_string(), &test_ctx())
@@ -309,6 +327,8 @@ async fn capacity_exhaustion_is_reported_as_such() {
 
 #[tokio::test]
 async fn failure_after_n_operations_succeeds_first_then_fails() {
+    testkit::proves!("failure_after_n_operations");
+
     let (m, ledger, handle) = armed(FaultPlan::new());
     handle.arm(FaultPlan::new().push_after_n(OpKind::Set, FaultClass::WriteFailure, 2));
 
@@ -332,6 +352,8 @@ async fn failure_after_n_operations_succeeds_first_then_fails() {
 
 #[tokio::test]
 async fn cancellation_releases_the_claim() {
+    testkit::proves!("cancellation");
+
     let m = testkit::manager_from_parts(
         thesix::DefaultPolicy,
         thesix::Cachelito::new(),
@@ -464,6 +486,8 @@ async fn the_recorder_sees_operations_behind_a_fault() {
 /// A second rung must keep serving when the first is failing.
 #[tokio::test]
 async fn one_failing_rung_does_not_take_the_others_down() {
+    testkit::proves!("continuity.backend_failure_isolation");
+
     let (bad, _ledger) = testkit::faulty(
         Arc::new(L0Stub::<String>::new()) as Arc<dyn CacheTier<String>>,
         FaultPlan::new().push(OpKind::Set, FaultClass::WriteFailure),
@@ -508,6 +532,8 @@ async fn one_failing_rung_does_not_take_the_others_down() {
 /// producing residue at all.
 #[tokio::test]
 async fn the_partial_write_fault_really_stores_bytes_before_failing() {
+    testkit::proves!("partial_write");
+
     let stub = Arc::new(L0Stub::<String>::new());
     let (tier, ledger) = testkit::faulty(
         Arc::clone(&stub) as Arc<dyn CacheTier<String>>,
@@ -654,6 +680,8 @@ async fn a_provably_rejected_write_leaves_the_committed_value_alone() {
 /// population recovers the rung's contents.
 #[tokio::test]
 async fn a_misreported_write_never_serves_its_residue() {
+    testkit::proves!("acid.atomicity.partial_commit_visible");
+
     let inner = Arc::new(L0Stub::<String>::new()) as Arc<dyn CacheTier<String>>;
     let tier = testkit::MisreportingTier::wrap(Arc::clone(&inner));
     let manager = single_rung(Arc::clone(&tier) as Arc<dyn CacheTier<String>>);
