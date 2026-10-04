@@ -1,10 +1,10 @@
 [handover]
-status = "revision_complete"
-phase = "v2_hpa_continuity_contract"
-last_updated = "2026-10-04T00:00:00+01:00"
+status = "verification_complete_awaiting_rereview"
+phase = "hpa_continuity_contract"
+last_updated = "2026-10-04T18:00:00+01:00"
 
 summary = """
-2.0.0: the architecture is now a machine-checked contract, and the crate's own
+0.4.0: the architecture is now a machine-checked contract, and the crate's own
 tests found the defects that the contract's existence attracted.
 
 theSix.toml is the source of truth. cargo xtask executes the gates it declares,
@@ -157,9 +157,59 @@ only in a reflog on another machine - is not scanned. That is the same blind spo
 gate has as any other history check, and it is why the seven rewritten commits needed
 a force-push rather than only a local rebase: until the remote ref moved, the gate
 correctly kept reporting them.
+
+The last pass closed three gaps that were all the same shape: a declaration nobody was
+made responsible for.
+
+CI could not run for this PR at all. Both workflow triggers were filtered to
+`branches: [main]`, so a stacked branch produced no checks, no aggregator and no
+required status - `main` protection and a branch that cannot raise a check are
+independent features that compose into nothing. The trigger is now unfiltered and
+main requires exactly one check, `Verification (all gates)`, with `if: always()` on it.
+That `if` is load-bearing: without it a failed dependency makes the aggregator
+`skipped`, and GitHub scores a skipped required check as passing, so the protection
+would have been satisfied by the failure it exists to catch.
+
+The authorship gate arrived by way of its own failure. It forbids attribution
+trailers by key, and it caught this repository's own commit messages - including one
+added while writing the fix, by habit, in a commit whose whole subject was the
+trailer. The rule is on the key and does not read the value, which is the property
+that makes it usable: a trailer claiming to attribute nobody is still a trailer. Its
+fixtures were then found to be environment-dependent - they set `--author`, which is
+only the author, and took the committer from whatever global git config the host
+carried. They passed on the developer machine and failed on the runner, in a helper
+that piped stderr into a pipe it never read, so the failure said only `git commit
+failed`.
+
+The declared-cases gap was the subtler one. `[testing.property].invariants` declares
+nine invariants and `[testing.fault_injection].faults` declares twelve faults; both
+were checked against a `coverage.rs` name list for set equality, which proves the two
+lists agree and not that a test exists. All twenty-one were covered. The property
+binding lived in two comments - `// no_deadlock / no_lock_across_await` and
+`// no_capability_misreporting / no_false_durability` - so two `proptest!` blocks each
+claimed two invariants, and deleting or renaming either left every gate green while
+theSix.toml still asserted `no_deadlock`. `PROPERTY_CASE_PROOFS` and
+`FAULT_CASE_PROOFS` now bind each declared name to a `path::fn`, which is checked to
+exist. Writing that check found that the check itself was defeatable: it matched
+`fn <name>` as a substring, so `no_authority_inversion_RENAMED` satisfied a claim on
+`no_authority_inversion` - renaming a test aside kept its coverage alive, which is the
+most obvious route to defeating the registry being added.
 """
 
 pending_work = """
+- The residual limit of every proof registry, now stated once and applying to three of
+  them. `missing_locators` proves a function of that name is defined in that file. It
+  does not prove the function is a test, and it does not prove the test exercises the
+  clause it is cited for. A row pointing at a real but irrelevant function passes.
+  Closing this needs the instrument the fault layer already has - assert that the
+  injected fault actually fired, per row - rather than a better string match.
+- An unverified concurrency caveat, carried forward and never closed: `peek` observes
+  without claiming, and `CacheTier::get` returns a bare `V`, so a value read from a
+  rung across an `await` cannot be revalidated against the generation it was read at.
+  If an abort lands in that window the caller holds a value the control plane has
+  stopped describing. Either `get` needs to return something carrying its generation,
+  or the read path needs a post-read generation check. It needs a test that forces the
+  interleaving, which is why it is written here rather than described as safe.
 - Move recovery needs a real answer. `theSix.toml` declares
   `recovery_direction_prepare_move = "external-reconciliation"` and the runtime
   implements exactly that, so the contract and the code agree — but the consequence is
@@ -185,16 +235,7 @@ pending_work = """
   are pinned variously by SHA and by version tag. SHA-pinning every action is the
   consistent end state; the SHAs resolve the same way this one did, it has just not
   been done for all of them.
-- The gate-coverage gap is now closed *mechanically*, and the residual limit is a
-  judgement rather than a hole. All 95 declared invariants across the seven semantic
-  sections are bound to a proving test in `testkit::coverage::INVARIANT_PROOFS` (89) or
-  waived with a stated reason in `[[verification.invariant_waiver]]` (6), and
-  `tests/contract/invariant.rs` requires the union to equal the declared set exactly.
-  Adding, renaming or deleting an invariant now fails until the registry moves with it.
-  The limit: this proves a test is *named and exists*, not that it proves the invariant,
-  so naming a test that ignores the clause still satisfies the gate. Six clauses are
-  waived for exactly this reason and are listed with their reasons rather than hidden.
-- The six waived invariants are the honest remainder of that audit and are the next
+- The six waived invariants are the honest remainder of the audit and are the next
   thing worth closing: `unbounded_retry` (nothing counts retries), `silent_stale_data_
   acceptance` (nothing distinguishes silent from explicit stale service),
   `recovering_from_available` (the state exists, no test drives a rung into it),
@@ -214,18 +255,18 @@ pending_work = """
 - read_repair / reconciliation. ContinuityState::Reconciling is representable and
   reported, but nothing drives it: there is no pass that compares a rung against the
   authority and repairs drift.
-- Move recovery. `theSix.toml` declares `external-reconciliation` and the runtime
-  implements exactly that: a swept move intent is reported and left for an external
-  reconciler. Doing better means persisting the key bytes (or a durable handle) in
-  `CommitIntent`, which collides with the payload-free intent invariant — so it is
-  a contract change, not a patch. Related: a move removes the source rung before it
-  commits, so a crash in that window leaves the value only at the destination, and
-  any reconciliation pass must handle that window.
 - Atomic multi-key operations. The commit protocol is per-entry. A caller wanting
   "these twenty keys or none" still needs to coordinate outside the crate.
 - Streaming / non-ByteValue payloads. Integrity framing covers the fixed tier stub
   (via IntegrityCheck) and the byte-oriented backends (via an explicit frame), but a
   payload that cannot produce a digest has no integrity story.
+- Wall clock, for whoever cares: the 26 gates take ~54s warm, and `loom` alone is 27.6s
+  of that — 51%. Every real test binary combined is about 5s for 263 tests, so there
+  is no test-level speedup available; sccache, nextest and the GH cache already cover
+  compilation. The one lever that exists is narrowing loom's bound or moving it off the
+  mandatory path, which trades away exhaustive interleavings and so is a judgement
+  call rather than a free win. Do not "optimise" this by caching gate verdicts: a
+  replayed verdict is the same defect as B5 one level up.
 """
 
 remaining = [
@@ -256,18 +297,27 @@ decisions = [
     "Abort of a write with an unknown outcome does NOT restore the pre-intent state; it leaves the entry Failed and advances the generation. Only abort_proven_clean restores, and only for SerializationFailed and CapacityExhausted. Restoring over a rung of unknown contents is how an uncommitted value became readable, and the cost of not restoring is one repopulation rather than a wrong answer",
     "Control-plane identity is a 128-bit KeyFingerprint and placement is a separate 64-bit hash, bundled as KeyAddress so no call site can hold one without the other. Placement is injectable in Cachelito as well as the stub, which is what makes no_cross_key_corruption demonstrable in the control plane instead of merely declared",
     "Move recovery was resolved by redefining the contract rather than by implementing the recovery, on the grounds that persisting key bytes in CommitIntent violates the payload-free intent invariant. This is the one place the contract was changed to match reality instead of the reverse, and it is recorded as such rather than presented as a fix",
+    "Declared cases are bound to proving tests by a path::fn table, not by matching names. `[testing.property].invariants` and `[testing.fault_injection].faults` are declared with names that do not match the tests that prove them - descriptive test names are worth more than contract-shaped ones - so the correspondence cannot be derived and has to be written down. `declare_cases!` was not extended to cover this: it emits #[tokio::test], these are proptest! blocks, and the property mapping is one-to-many",
+    "The locator check is word-bounded, not substring. `fn no_authority_inversion_RENAMED` satisfied a claim on `no_authority_inversion`, so renaming a test aside kept its coverage claim alive - the most obvious way to defeat the registry that was being added to prevent exactly that",
+    "The authorship gate's rule is on the trailer KEY and never reads the value. That is what makes it usable: a trailer attributing nobody is still a trailer, and the gate caught this repository's own history, including one written by habit while committing the fix. Fixtures set an explicit committer identity via -c user.name/-c user.email, because --author sets only the author and the committer was otherwise inherited from the host's global git config - which is why the suite passed locally and failed on the runner",
+    "A gate is not done when it passes locally. The authorship fixtures failed only in CI, and the helper discarded stderr, so the failure said `git commit failed` and nothing else. The helper now reports stderr, on the same reasoning as B8: a check whose failure mode is silent is not a check",
+    "Caching gate verdicts was considered and rejected. A replayed verdict is the B5 defect one level up - something that reads as the gate without being it - and it would make a 54s matrix unauditable. The gate matrix is already dominated by loom (27.6s of 54s), not by test execution (~5s for 263 tests), so there is no test-level speedup to buy",
+    "Versions are 0.3.0 (PR2) and 0.4.0 (PR3), not 1.0.0 and 2.0.0. The published version is 0.2.3, and a pre-1.0 crate signals breaking changes by bumping the minor rather than the major. Labelling these 1.0.0 and 2.0.0 would have claimed API stability twice over - once for a release that invalidates every cached key, and again on the next breaking change - and the major numbers would have carried no information a consumer could act on. 0.x keeps the promise honest and leaves 1.0.0 meaning something",
 ]
 
 blockers = []
 
 [handover.next_agent]
-focus = "PR3 needs re-review: the external approval was of 99d1c70, and the head is now far past it with the verification architecture rebuilt (C1-C6). CI is green end to end for the first time in this repo's history, including the fuzz smoke-run, and main is protected so merge requires the aggregated gate. No open blocking findings across 9 tracked. Remaining substantive work is in pending_work: move recovery (a contract change), the six waived invariants, eviction, and SHA-pinning the remaining action refs."
+focus = "PR3 is green and CLEAN, and needs RE-REVIEW rather than more work. The external approval was of 99d1c70; the head is now 624f11b with the verification architecture rebuilt on top of it. CI is green end to end for the first time in this repo's history - 26 gates, 25 CI jobs, all of them executing the contract-declared gates - including the fuzz smoke-run that had never run. main is protected and requires the aggregated gate, so merge cannot bypass it. No open blocking findings across 9 tracked. The substantive remaining work is in pending_work and none of it is mechanical: move recovery (a contract change), the six waived invariants, eviction, the unverified peek/get concurrency caveat, and SHA-pinning the remaining action refs."
 tasks = [
-    "Do NOT treat the green gate run as evidence that a declared invariant is TRUE. It is now evidence that every declared invariant is bound to a proving test or an explicit waiver (89 + 6 of 95), which is a different and weaker claim: the registry proves a test is named and exists, not that it exercises the clause. The six waivers are listed in [[verification.invariant_waiver]] with reasons and are the honest next target.",
+    "RE-REVIEW is the blocking task, not code. The approval on record is of 99d1c70. Everything since - the workflow rewrite, the invariant proof registry, the attribution gate and its forced history rewrite, the case-proof registries - is unreviewed. Do not read the green gate run as evidence that any of it is correct: a green run is evidence that every declared clause is bound to a proving test or an explicit waiver, which is a weaker and different claim.",
+    "Do NOT cache, memoise or short-circuit a gate verdict. A replayed pass is the B5 shape one level up, and merge_readiness in particular exists to judge the branch rather than the change - a cached judgement of the branch is the exact thing it must not read.",
+    "Every proof registry now shares one residual limit: it proves a function is named and exists, not that it exercises the clause. `missing_locators` is deliberately word-bounded so a test cannot be renamed out of the way, but a row pointing at a real, irrelevant function still passes. The instrument that closes this is per-row fault-ledger assertion, not a stricter string match.",
+    "The one unverified correctness claim left is the peek/get race: `peek` observes without claiming and `CacheTier::get` returns a bare `V`, so a value read across an await cannot be revalidated against the generation it was read at, and an abort landing in that window leaves the caller holding a value the control plane has stopped describing. It needs a test that forces the interleaving before it can be called safe.",
     "merge_readiness is a required CI job with no continue-on-error, so a new blocks_merge finding turns the branch red immediately. That is intentional - fixing the finding is what turns it green - but do not silence it with continue-on-error.",
     "Move recovery is the largest known gap: a swept Move intent wedges the population path for that key with no automatic remedy. Option (b) in pending_work (commit before source removal, then allow the sweep to abort) is the cheaper of the two and needs a test pinning the reorder.",
-    "2.0.0 is a breaking release and invalidates every cached key, because tenant is now part of the key. It has not been published; the crates.io version is 0.2.3.",
-    "PR #2 (feat/async-tiers-l6-graph-backends, v1.0.0) is open against main and was allowed to land first deliberately. This branch is built on top of it, so merge order matters.",
+    "PR #2 (feat/async-tiers-l6-graph-backends, v0.3.0) is open against main and was allowed to land first deliberately. This branch is built on top of it, so merge order matters. Neither is merged, and nothing here is published.",
+    "0.4.0 is a breaking release and invalidates every cached key, because tenant is now part of the key. It has not been published; the crates.io version is still 0.2.3. Publishing is deliberately NOT automated - see the note in the changelog entries about the release order.",
 ]
 
 [session]
@@ -347,7 +397,7 @@ tests_passing = [
 ]
 
 [changelog]
-version = "2.0.0"
+version = "0.4.0"
 date = "2026-10-04"
 entries = [
     { type = "added", description = "theSix.toml as the machine-checked source of truth; specs/*.toml deleted", scope = "theSix.toml" },
@@ -374,6 +424,14 @@ entries = [
     { type = "changed", description = "BackendKind::is_native() replaced by is_implemented(); the old predicate returned true for five absent backends", scope = "src/tier/trait.rs" },
     { type = "changed", description = "Build profiles use debug = 0; debuginfo filled the disk mid-matrix", scope = "Cargo.toml" },
     { type = "added", description = "Every declared invariant is bound to a proving test or an explicit waiver. 89 proofs, 6 waivers, checked for exact set equality so an invariant cannot be declared without something responsible for it", scope = "testkit/src/coverage.rs, tests/contract/invariant.rs, theSix.toml" },
+    { type = "added", description = "PROPERTY_CASE_PROOFS and FAULT_CASE_PROOFS bind each of the 9 declared property invariants and 12 declared faults to a path::fn that must exist. Both were previously checked as name lists for set equality, which proves two lists agree and not that a test exists; the property binding lived in two comments", scope = "testkit/src/coverage.rs, tests/contract/main.rs" },
+    { type = "added", description = "missing_locators / unclaimed / overclaimed move the existence and coverage rules into testkit so one rule has one spelling; tests/contract/invariant.rs had its own copy of the locator walk", scope = "testkit/src/coverage.rs, tests/contract/invariant.rs" },
+    { type = "added", description = "authorship gate: forbids attribution trailer KEYS across every commit message on every ref, reporting commit and subject without reprinting the trailer value. Unavailable (exit 3) on a shallow clone, so a depth-1 checkout cannot pass as a clean history", scope = "xtask/src/gates.rs, theSix.toml, .github/workflows/ci.yml" },
+    { type = "fixed", description = "The authorship gate's git fixtures set only --author and inherited the committer from the host's global config, so 12 of 32 xtask tests failed on CI while passing locally; the helper also discarded stderr, so the failure said only 'git commit failed'", scope = "xtask/src/gates.rs" },
+    { type = "fixed", description = "The locator existence check matched `fn <name>` as a substring, so renaming a cited test aside kept its coverage claim alive", scope = "testkit/src/coverage.rs" },
+    { type = "changed", description = "CI triggers are unfiltered, so a stacked branch raises checks at all; main requires exactly `Verification (all gates)` with strict:true, admins enforced and force-push disabled", scope = ".github/workflows/ci.yml" },
+    { type = "changed", description = "History rewritten to remove attribution trailers from seven commits, found by the authorship gate. The rewrite was correct and the force-push that published it was not optional: until the remote ref moved, the gate kept correctly reporting them", scope = "git history" },
+    { type = "added", description = "Release order is recorded rather than automated. 0.4.0 publishes only after PR2 (0.3.0) and PR3 are both merged and PR3 is re-reviewed; cargo publish is irreversible, so it is a human step with a dry-run first, not something a session does on finishing a task", scope = "living.toml" },
     { type = "added", description = "tests/contract parses .github/workflows/ci.yml and holds it to the contract in both directions, plus a bash -n lint over every run: block. The comment claiming this check existed was true for the first time", scope = "tests/contract/workflow.rs, .github/workflows/ci.yml" },
     { type = "fixed", description = "The gate runner leaked cargo's own CARGO_MANIFEST_DIR and CARGO_PKG_* into every gate, so `cargo xtask run machete` walked the wrong tree. The documented invocation was the broken one", scope = "xtask/src/gates.rs" },
     { type = "fixed", description = "The check and clippy gates omitted --workspace, so the gate runner and test harness were never linted; four warnings had accumulated there uncaught", scope = "theSix.toml" },

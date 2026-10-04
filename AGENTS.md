@@ -170,7 +170,7 @@ separator. Concatenation would make tenant `ab` + key `c` indistinguishable from
 tenant `a` + key `bc`. An oversized frame is **rejected, not truncated**.
 
 `IdentityContext::tenant` used to be read by zero lines of the crate; it is now
-part of the key. **This invalidates every existing cached key** — see the 2.0.0
+part of the key. **This invalidates every existing cached key** — see the 0.4.0
 release notes.
 
 ## Test layers

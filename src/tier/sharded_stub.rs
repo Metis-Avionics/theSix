@@ -5,7 +5,7 @@
 //! `DashMap` is named in this crate's `AGENTS.md` as a rejected choice: "the
 //! control plane is a pre-allocated sharded slot map (no `DashMap`; `TETANUS` Rule
 //! 3)". Both objections hold and the second one got sharper when the tiers went
-//! async in 1.0.
+//! async in 0.3.0.
 //!
 //! Rule 3 is about allocation: `DashMap` allocates on insert, so a cache that
 //! is supposed to have a fixed, pre-allocated footprint no longer does. The

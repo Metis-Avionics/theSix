@@ -116,7 +116,7 @@ the recovery path still carried B2's defect, plus a CI job that could not run.
   behaviour regressed — one of them required `abort` to restore `Ready`, i.e. it
   asserted the bug.
 
-## v2.0.0 — architectural revision
+## v0.4.0 — architectural revision
 
 The architecture is now stated as a machine-checked contract. [`theSix.toml`](./theSix.toml)
 is the source of truth; `cargo xtask` executes the verification gates it declares and
@@ -279,7 +279,7 @@ among them `test_tier_recovery` (which called `set_healthy(true)` — already th
 default, so no failure was ever injected) and `test_strict_policy_denies_anonymous_writes`
 (which never issued an anonymous write).
 
-## v1.0.0 — 2026-10-02
+## v0.3.0 — 2026-10-02
 
 ### Added
 - `L6` authority tier — Postgres with pgvector is the intended binding. Excluded from the cache ladder: never blind-written, never invalidated, never selected as a fallback rung
