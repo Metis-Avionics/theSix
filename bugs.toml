@@ -1152,44 +1152,91 @@ proportional -- an obligation reported, not a wedge.
 
 [[bug]]
 id = "B16"
-title = "Five declared invariants have no proving test and are waived (one closed)"
+title = "Four declared invariants had no proving test; one cannot be closed without a contract decision"
 severity = "should-fix"
-status = "open"
+status = "resolved"
 blocks_merge = false
 verified = true
-locations = ["theSix.toml:verification.invariant_waiver", "testkit/src/coverage.rs"]
-violates = []
-source = "independent review of both PRs at 5ab1aaa; enumerated by B9's audit"
-relates_to = "B9"
+locations = [
+  "src/manager.rs:refresh_detailed",
+  "src/capability.rs:OperationalState",
+  "theSix.toml:verification.invariant_waiver",
+  "testkit/src/coverage.rs:INVARIANT_PROOFS",
+]
+violates = [
+  "capabilities.must_distinguish.recovering_from_available",
+  "cia.availability.unbounded_retry",
+  "cia.integrity.silent_stale_data_acceptance",
+  "concurrency.nested_block_on",
+]
+source = "0.4.0 backlog pass; re-examined each waiver individually rather than in bulk"
+relates_to = "B19, B20"
 summary = """
-B9 bound 89 of the 95 declared invariant leaves to a proving test and waived 6
-with stated reasons, requiring the union to equal the declared set exactly. The
-waivers are the honest remainder rather than bookkeeping, and they are recorded in
-the contract rather than hidden. This finding tracks closing them.
+Five declared invariants had no proving test and were waived. Each waiver is a
+statement that a clause exists with nothing behind it, which is the same defect
+B18 and B20 describe for other parts of the contract.
+
+Four are now proven. The fifth turned out not to be a missing test but a missing
+mechanism, and is reported rather than closed.
 """
-the_six = """
-  capabilities.must_distinguish.recovering_from_available
-      The state is representable and required; no test drives a rung into it.
-  cia.availability.unbounded_retry
-      Ladder descent is bounded by LAST_CACHE_TIER, but nothing counts retries.
-  cia.integrity.silent_stale_data_acceptance
-      Nothing distinguishes *silent* stale acceptance from explicit stale service.
-  concurrency.blocking_runtime_thread
-      Every tier is an in-process stub, so there is no blocking call to catch.
-  concurrency.nested_block_on
-      Nothing in the suite nests block_on, so the invariant is unobserved.
-  concurrency.testing.promotion_eviction_races
-      Eviction is not implemented, so there is no race to schedule.
+fix = """
+`cia.integrity.silent_stale_data_acceptance` required an implementation, not a
+test. `refresh` returned `Option<V>`, so a value served because revalidation
+failed was byte-identical to one the fetch had just produced, and the caller could
+not tell. Two changes:
+
+* `refresh_detailed` returns `Lookup<V>` with a `Freshness` of `Fresh` or `Stale`.
+  `refresh` is now the lossy wrapper over it, so existing callers are unaffected
+  and revalidating callers can opt into the distinction.
+* `refresh` fails *closed* on the fetch and applies its own documented
+  stale-while-revalidate fallback. Previously the policy's fail-open mode let
+  `become_population_owner` scan other rungs and return their value as a
+  successful population -- indistinguishable from a fresh value. That was the
+  invariant failing at the only place it could: not by serving stale bytes, but by
+  serving them with a success status claiming they were current.
+
+`capabilities.must_distinguish.recovering_from_available` needed a tier that can
+report the state at all. Every in-tree stub reports one state, so the waiver said
+"no test exists" when the truth was "no test could exist". `StatedTier` in testkit
+overrides only `state`, leaving `backend` to the inner tier so a test cannot claim
+a backend the rung was not built with.
+
+`cia.availability.unbounded_retry` counts rather than assumes. Each of the three
+retry loops is asserted separately, because any one could be made unbounded alone.
+
+`concurrency.nested_block_on` is a source scan backed by a mechanism: the test
+also asserts that nested `block_on` *panics*. Without that half the scan would be
+textual opinion, and a `block_on` on a non-runtime thread would pass it while
+reintroducing the deadlock.
 """
-scope_note = """
-Two of the six are not test-authoring work and cannot be closed by writing a test.
-`blocking_runtime_thread` needs a genuinely blocking backend, and
-`promotion_eviction_races` is blocked on B17. The remaining four are reachable
-today. Treating all six as equally cheap would misestimate the work.
+verification = """
+`stale_service_is_reported_rather_than_silent` mutation-checked: labelling the
+stale arm `Fresh` fails it.
+
+`retry_counts_are_bounded_and_observed` initially asserted the write was offered
+to every rung once, and failed with 2 of 6. That assertion was wrong, not the code:
+the walk starts at the rung policy chose and steps toward L0, so it does not visit
+rungs the policy never routed to. The test now asserts the property the invariant
+actually names -- no rung is offered more than once -- and says why coverage is not
+the claim. Worth recording as a case where reading the failure would have been easy
+to misattribute.
+
+`nested_block_on_is_absent_from_the_crate_and_would_be_caught` scans non-comment
+lines only, since the trait docs and the test itself discuss the hazard by name.
+
+`concurrency.blocking_runtime_thread` is the one that stays waived, and it is not a
+test gap. `spawn_blocking` appears nowhere in `src/` and the contract has no clause
+requiring it; the obligation exists only as prose in the `CacheTier` doc comment,
+which places it on backend implementors -- user code this crate cannot instrument.
+Closing it honestly requires either narrowing the clause to what the crate
+guarantees, or adding a real offload path plus a blocking in-tree backend. The
+waiver now states both options instead of describing a missing test that could
+have been written.
 """
-re_derived = """
-Confirmed by reading `[[verification.invariant_waiver]]` in theSix.toml: six
-entries, each with a `reason`, and the reasons match the enumeration above.
+rationale = """
+Four closed because each had a real property behind it and a real proof available.
+The fifth is left open with a decision attached rather than closed with a test that
+would have proven something else.
 """
 
 [[bug]]

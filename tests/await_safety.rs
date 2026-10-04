@@ -239,3 +239,67 @@ async fn the_watchdog_detects_a_blocked_control_plane() {
 
     drop(parked);
 }
+
+/// `concurrency.nested_block_on = false` must be observed, not assumed.
+///
+/// A test asserting "we never call `block_on` from async context" is worth nothing
+/// unless it would notice if we started. Two halves, and the second is the one that
+/// usually goes missing:
+///
+/// * the crate's own source contains no `block_on` at all — no `Handle::block_on`,
+///   no `Runtime::block_on`, no `futures::executor::block_on`;
+/// * `block_on` *does* panic when nested, so the property is checkable rather than
+///   a matter of opinion. Without this half, a future `block_on` that happened to
+///   run on a non-runtime thread would pass a purely textual scan while
+///   reintroducing exactly the deadlock the invariant names.
+///
+/// The second half is why the first half is allowed to be a text scan: it is
+/// backed by a mechanism that is known to fail loudly.
+#[test]
+fn nested_block_on_is_absent_from_the_crate_and_would_be_caught() {
+    // Half one: no `block_on` anywhere in the library.
+    let mut offenders = Vec::new();
+    for entry in
+        std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src")).expect("src is readable")
+    {
+        let path = entry.expect("dir entry").path();
+        if path.extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("source file is readable");
+        for (n, line) in text.lines().enumerate() {
+            // Skip the prose: this file and the trait docs discuss the hazard by
+            // name, and a comment mentioning it is not a call to it.
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                continue;
+            }
+            if trimmed.contains("block_on") {
+                offenders.push(format!("{}:{}: {trimmed}", path.display(), n + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "`block_on` appears in the library, where nesting it inside an async context \
+         deadlocks:\n{}",
+        offenders.join("\n")
+    );
+
+    // Half two: nesting is observable. `block_on` panics on a runtime thread, so if
+    // the crate ever reintroduced one inside an async call, this is the failure it
+    // would produce — asserted here so the panic behaviour cannot itself change
+    // silently and leave the scan above checking nothing.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("a current-thread runtime builds");
+    rt.block_on(async {
+        let nested =
+            std::panic::catch_unwind(|| tokio::runtime::Handle::current().block_on(async { 1u8 }));
+        assert!(
+            nested.is_err(),
+            "nesting block_on inside async context did not panic, so the invariant is \
+             not observable and the scan above would prove nothing"
+        );
+    });
+}

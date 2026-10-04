@@ -282,6 +282,39 @@ pub struct CacheManager<K, V, P> {
     _key: PhantomData<K>,
 }
 
+/// Whether a returned value was current or a fallback.
+///
+/// This exists because "serve the stale value when revalidation fails" and
+/// "silently pass stale data off as fresh" are the same bytes on the wire and
+/// opposite promises. `cia.integrity.silent_stale_data_acceptance = false`
+/// was a claim the crate could not honour while `refresh` returned a bare
+/// `Option<V>`: a caller holding `Some(old)` after a failed revalidation had
+/// no way to learn that, so the distinction existed nowhere to be observed.
+///
+/// `Stale` means *this value may be out of date and was served because
+/// something better could not be produced right now*. It is not an error and
+/// not a corruption report; it is a caveat the caller is now obliged to see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// Produced by the fetch, or the current committed value.
+    Fresh,
+    /// A previously committed value, served because revalidation failed or
+    /// was already in progress.
+    Stale,
+}
+
+/// A value plus whether it is a fallback.
+///
+/// A `None` value is never stale: staleness is a property of a value that was
+/// returned, so `freshness` is only meaningful when `value` is `Some`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Lookup<V> {
+    /// The value read, or `None` for a miss.
+    pub value: Option<V>,
+    /// Whether `value` is a stale fallback.
+    pub freshness: Freshness,
+}
+
 impl<K, V, P> CacheManager<K, V, P>
 where
     K: Key + Send + Sync,
@@ -1295,12 +1328,19 @@ where
         self.bounded(tier.contains(&key_ref)).await
     }
 
-    pub async fn refresh<F, Fut>(
+    /// Stale-while-revalidate, reporting whether the served value is a fallback.
+    ///
+    /// This is the primitive; [`CacheManager::refresh`] is the lossy wrapper over
+    /// it, kept because callers that never revalidate have no use for the
+    /// distinction. Callers that do should prefer this, because the wrapper
+    /// discards exactly the information that makes stale-while-revalidate safe to
+    /// reason about.
+    pub async fn refresh_detailed<F, Fut>(
         &self,
         key: &K,
         ctx: &CacheContext,
         fetch: F,
-    ) -> Result<Option<V>, CacheError>
+    ) -> Result<Lookup<V>, CacheError>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<V, CacheError>>,
@@ -1310,8 +1350,19 @@ where
         let mut buf = [0u8; MAX_KEY_SIZE];
         let key_ref = Self::encode_key(key, ctx, &mut buf)?;
         let request = Self::request_for(CacheOperation::Refresh, key, ctx);
-        let decision = self.resolve(&request, ctx);
+        let mut decision = self.resolve(&request, ctx);
         Self::authorize(&decision)?;
+
+        // `refresh` fails *closed* on the fetch itself, then applies its own
+        // documented stale-while-revalidate fallback below.
+        //
+        // Leaving the policy's fail-open mode in place let `become_population_owner`
+        // scan other rungs and return their value as a successful population, which
+        // this method then had no way to distinguish from a value the fetch just
+        // produced. That is `cia.integrity.silent_stale_data_acceptance = false`
+        // failing at the only place it could: not by serving stale bytes, but by
+        // serving them with a success status that says they were fresh.
+        decision.fail_mode = FailMode::Closed;
 
         // Peek first: `refresh` reads the current value before deciding whether
         // it needs to revalidate, and `acquire` would claim ownership as a side
@@ -1347,25 +1398,55 @@ where
         let snapshot = self.cachelito.acquire(key_ref.0, decision.tier)?;
         if !snapshot.population_owner {
             // Someone is already revalidating. Serve what we have; a refresh is
-            // explicitly allowed to be served from a stale value.
-            return Ok(current);
+            // explicitly allowed to be served from a stale value -- and now says
+            // so, rather than returning it indistinguishably from a fresh one.
+            return Ok(Lookup {
+                value: current,
+                freshness: Freshness::Stale,
+            });
         }
 
         match self
             .become_population_owner(key, key_ref, snapshot.generation, ctx, &decision, fetch)
             .await
         {
-            Ok(new_value) => Ok(Some(new_value)),
+            Ok(new_value) => Ok(Lookup {
+                value: Some(new_value),
+                freshness: Freshness::Fresh,
+            }),
             // Stale-while-revalidate: serve the old value when revalidation
             // fails. This is the documented contract of `refresh`, so it is not
             // an error swallow — but it must not hide the *first* failure, when
             // there is nothing stale to serve.
             Err(e) if current.is_some() => {
                 self.record_telemetry_refresh_failure(&key_ref, &snapshot, e);
-                Ok(current)
+                Ok(Lookup {
+                    value: current,
+                    freshness: Freshness::Stale,
+                })
             }
             Err(e) => Err(e),
         }
+    }
+
+    /// Stale-while-revalidate, discarding whether the served value was a fallback.
+    ///
+    /// Prefer [`CacheManager::refresh_detailed`] where the distinction matters: this
+    /// wrapper cannot tell a caller that `Some(v)` arrived as stale, which is the
+    /// whole point of `cia.integrity.silent_stale_data_acceptance = false`.
+    pub async fn refresh<F, Fut>(
+        &self,
+        key: &K,
+        ctx: &CacheContext,
+        fetch: F,
+    ) -> Result<Option<V>, CacheError>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<V, CacheError>>,
+    {
+        self.refresh_detailed(key, ctx, fetch)
+            .await
+            .map(|l| l.value)
     }
 
     pub async fn promote(&self, key: &K, ctx: &CacheContext) -> Result<(), CacheError> {

@@ -1002,3 +1002,121 @@ fn tenant_contexts_are_distinct() {
     let registry = TierRegistry::new();
     assert_eq!(registry.len(), 7);
 }
+
+/// Every retry path in the write path must have a declared ceiling, and the
+/// ceiling must be observable.
+///
+/// `cia.availability.unbounded_retry = false` was waived because ladder descent
+/// is bounded by `LAST_CACHE_TIER` but "nothing asserts a retry count, so a future
+/// retry loop could be unbounded and the gate would stay green". Counting is the
+/// only thing that makes the bound real: a bounded descent is an implementation
+/// detail until a test asserts the number.
+///
+/// Each loop is asserted separately, because any one of them could be made
+/// unbounded without touching the others.
+#[tokio::test]
+async fn retry_counts_are_bounded_and_observed() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    // (1) Every rung refuses a write. The ladder is descended once, so each rung
+    // is offered the write exactly once — not retried on the way down.
+    let refusing: Vec<Arc<dyn CacheTier<String>>> = default_tiers::<String>()
+        .into_iter()
+        .map(|t| {
+            let (f, _) = faulty(
+                t,
+                FaultPlan::new().push(OpKind::Set, FaultClass::WriteFailure),
+            );
+            f as Arc<dyn CacheTier<String>>
+        })
+        .collect();
+    let (tiers, tallies) = testkit::record_all(refusing);
+    let rung_count = tallies.len();
+    let m = manager_from_tiers(DefaultPolicy, tiers, Duration::from_millis(250));
+
+    assert!(
+        m.set(&"refused".to_string(), "v".to_string(), &test_ctx())
+            .await
+            .is_err(),
+        "a set that every rung refused must fail rather than succeed somewhere"
+    );
+    let per: Vec<u64> = tallies.iter().map(|t| t.writes.load(SeqCst)).collect();
+    let offered: u64 = per.iter().sum();
+
+    // The claim is *at most once per rung*, not "once per rung": the walk starts
+    // at the rung policy chose and steps toward L0, so it does not visit rungs the
+    // policy never routed to. Asserting equality with the rung count would be
+    // asserting a different design, and would have sent this finding the other
+    // way -- a bound is about the ceiling, not the coverage.
+    let most = per.iter().copied().max().unwrap_or(0);
+    assert_eq!(
+        most, 1,
+        "a rung was offered {most} writes; a refused rung must be stepped off, not \
+         retried in place, or descent is unbounded"
+    );
+    assert!(
+        offered >= 2 && offered <= rung_count as u64,
+        "expected a bounded descent of 2..={rung_count} rungs, saw {offered} \
+         (per-rung {per:?})"
+    );
+
+    // (2) Eviction cannot spin. A ladder with one too-small rung and one refusing
+    // rung has no room to evict into, so the write terminates and surfaces the
+    // capacity error instead of looping.
+    let tiny = {
+        let (f, _) = faulty(
+            Arc::new(L0Stub::<String>::new()),
+            FaultPlan::new().push(OpKind::Set, FaultClass::CapacityExhaustion),
+        );
+        f as Arc<dyn CacheTier<String>>
+    };
+    let (dead, _) = faulty(
+        Arc::new(L0Stub::<String>::new()),
+        FaultPlan::new().push(OpKind::Set, FaultClass::WriteFailure),
+    );
+    let m = manager_from_tiers(
+        DefaultPolicy,
+        vec![tiny, dead as Arc<dyn CacheTier<String>>],
+        Duration::from_millis(250),
+    );
+    let err = m
+        .set(&"no-room".to_string(), "v".to_string(), &test_ctx())
+        .await
+        .expect_err("a ladder with nowhere to evict must not report success");
+    assert!(
+        matches!(err, CacheError::CapacityExhausted),
+        "expected the capacity error to surface, got {err:?}"
+    );
+
+    // (3) A permanently lost commit race ends at the declared ceiling rather than
+    // spinning. The thief wins every race, so only the budget stops the loop.
+    let key = "contended-retry".to_string();
+    let thief = testkit::ThiefTier::wrap(
+        Arc::new(L0Stub::<String>::new()) as Arc<dyn CacheTier<String>>,
+        &key,
+    );
+    let m = manager_from_tiers(
+        DefaultPolicy,
+        vec![testkit::RecordingTier::wrap(thief.clone())],
+        Duration::from_millis(250),
+    );
+    thief.attach(&m);
+
+    let err = m
+        .set(&key, "mine".to_string(), &test_ctx())
+        .await
+        .expect_err("a permanently lost commit race must not report success");
+    assert!(
+        matches!(err, CacheError::WriteContended),
+        "exhausting the commit-race budget must surface WriteContended, got {err:?}"
+    );
+    let attempts = thief.steals();
+    assert!(
+        attempts > 1,
+        "the race budget was never exercised ({attempts} races)"
+    );
+    assert!(
+        attempts <= 64,
+        "the thief won {attempts} times, above the declared ceiling of 64"
+    );
+}

@@ -205,7 +205,7 @@ pub use fault::{ArmedFault, DeterministicRng, FaultClass, FaultLedger, FaultPlan
 pub use identity::{CacheContext, IdentityContext};
 pub use integrity::{ContentDigest, IntegrityCheck, KeyAddress, KeyFingerprint, Placement};
 pub use key::{Key, KeyRef, MAX_KEY_SIZE, TENANT_SEPARATOR, frame_tenant_key};
-pub use manager::CacheManager;
+pub use manager::{CacheManager, Freshness, Lookup};
 pub use policy::{
     CacheOperation, CachePolicy, CacheRequest, CacheState, DefaultPolicy, FailMode, PolicyDecision,
     PopulationStrategy, StrictPolicy,

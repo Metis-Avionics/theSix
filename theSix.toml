@@ -959,32 +959,16 @@ aggregates_into = "verify"
 # ---------------------------------------------------------------------------
 
 [[verification.invariant_waiver]]
-invariant = "capabilities.must_distinguish.recovering_from_available"
-reason = """
-Recovering and Available are both representable in OperationalState and the contract requires the distinction, but no test drives a rung into Recovering and asserts a report. The state is checked for existence, never for behaviour.
-"""
-
-[[verification.invariant_waiver]]
-invariant = "cia.availability.unbounded_retry"
-reason = """
-no test counts retries. Ladder descent is bounded by LAST_CACHE_TIER, but nothing asserts a retry count, so a future retry loop could be unbounded and the gate would stay green.
-"""
-
-[[verification.invariant_waiver]]
-invariant = "cia.integrity.silent_stale_data_acceptance"
-reason = """
-nothing distinguishes silent stale acceptance from explicit stale service. test_refresh_serves_stale_on_failure asserts stale IS served on failure; no test asserts the staleness is reported to the caller rather than passed off as fresh.
-"""
-
-[[verification.invariant_waiver]]
 invariant = "concurrency.blocking_runtime_thread"
 reason = """
 no test asserts that a blocking backend call is offloaded rather than run on a runtime worker. The tiers are all in-process stubs, so there is no blocking call to catch.
-"""
 
-[[verification.invariant_waiver]]
-invariant = "concurrency.nested_block_on"
-reason = """
-no test asserts nested_block_on never happens. Nothing in the suite calls block_on from inside async context, so the invariant is unobserved rather than verified.
+Re-examined rather than closed, because the gap is not only a missing test. There is no offload mechanism to test: `spawn_blocking` appears nowhere in `src/`, and the contract contains no clause requiring one. The obligation exists only as prose in the `CacheTier` doc comment, which puts it on backend implementors, and third-party tiers are user code this crate cannot instrument. So `blocking_runtime_thread = false` currently asserts a property of configured backends that the crate neither enforces nor can observe.
+
+What *is* proven, and is the part the crate owns, is recorded separately: `concurrency.blocking_runtime_thread` is not claimed as proven, but `blocking_calls_stay_inside_the_tier_that_made_them` demonstrates that a deliberately blocking tier does not block the control plane or other keys.
+
+Closing this honestly needs a decision, not a test:
+* narrow the clause to what the crate guarantees ("the crate introduces no blocking call on any code path"), prove it by source scan plus the control-plane responsiveness test, and leave offloading to `BLOCKING_IO` as a backend declaration; or
+* add a real offload path and a blocking in-tree backend, then prove the backend's blocking work reaches `spawn_blocking`.
 """
 

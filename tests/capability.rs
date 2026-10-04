@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use testkit::{default_tiers, manager_from_tiers, record_all, test_ctx};
+use testkit::{StatedTier, default_tiers, manager_from_tiers, record_all, test_ctx};
 use thesix::{
     BackendKind, CacheTier, CapabilityFlags, DurabilityClass, L0Stub, OperationalState,
     TierCapability, TierId,
@@ -314,4 +314,61 @@ fn l0_reports_exactly_in_memory_and_volatile() {
     assert!(!cap.is_authoritative());
     assert!(!cap.is_blocking_io());
     assert_eq!(cap.durability, DurabilityClass::Volatile);
+}
+
+/// `Recovering` must be reported as itself, not folded into a neighbour.
+///
+/// `OperationalState::Recovering` means "coming back after a failure, not yet
+/// trusted". The two states it could be collapsed into are both wrong in opposite
+/// directions: reporting `Available`/`Healthy` tells a consumer the rung is
+/// serving normally when it is not yet trusted, and reporting `Unavailable` throws
+/// away the fact that it is on its way back, which is the only thing that makes
+/// "how long until I can write here again" answerable.
+///
+/// The anti-vacuity control is that the rung really is bound and really does
+/// report `Recovering` — otherwise the assertion below would pass against a
+/// report that never mentioned it.
+#[tokio::test]
+async fn recovering_is_reported_as_recovering_and_distinguished_from_available() {
+    let mut tiers = default_tiers::<String>();
+    let wrapped = StatedTier::wrap(tiers[2].clone(), OperationalState::Recovering);
+    tiers[2] = wrapped;
+    let m = manager_from_tiers(
+        thesix::DefaultPolicy,
+        tiers,
+        std::time::Duration::from_secs(1),
+    );
+
+    let reported = m.capabilities()[&TierId::L2];
+    assert!(
+        reported.is_bound(),
+        "L2 must be bound or this test proves nothing"
+    );
+    assert_eq!(
+        reported.state,
+        OperationalState::Recovering,
+        "Recovering was not reported as Recovering"
+    );
+    // The distinction the contract asks for, asserted against both neighbours.
+    assert_ne!(
+        reported.state,
+        OperationalState::Unavailable,
+        "Recovering collapsed into Unavailable, discarding that it is returning"
+    );
+    assert!(
+        !reported.state.is_serving(),
+        "Recovering claims to be serving; it is explicitly not yet trusted"
+    );
+
+    // And the wrapper changes only the report, not the storage behaviour: the
+    // rung still holds and returns what was written to it.
+    let ctx = test_ctx();
+    let key = "recovering-rung".to_string();
+    m.set(&key, "v".to_string(), &ctx)
+        .await
+        .expect("a Recovering rung still accepts writes; it is not Unavailable");
+    assert_eq!(
+        m.get(&key, &ctx).await.expect("read"),
+        Some("v".to_string())
+    );
 }

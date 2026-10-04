@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use thesix::{
     CacheError, CacheManager, CachePolicy, CacheRequest, CacheState, Cachelito, DefaultPolicy,
-    EntryState, Generation, IdentityContext, KeyRef, L0Stub, L1Stub, L2Stub, L3Stub, L4Stub,
-    L5Stub, MemoryPool, PolicyDecision, TestTier, TierId, TierRegistry,
+    EntryState, Freshness, Generation, IdentityContext, KeyRef, L0Stub, L1Stub, L2Stub, L3Stub,
+    L4Stub, L5Stub, MemoryPool, PolicyDecision, TestTier, TierId, TierRegistry,
 };
 
 use common::{anon_ctx, make_manager, make_manager_with_timeout, test_ctx};
@@ -216,4 +216,63 @@ async fn test_ttl_lazy_expiry() {
     tokio::time::sleep(Duration::from_millis(120)).await;
     let result = manager.get(&key, &test_ctx()).await;
     assert!(matches!(result, Err(CacheError::Miss)));
+}
+
+/// Serving a stale value is a documented feature; serving it *silently* is the
+/// failure `cia.integrity.silent_stale_data_acceptance = false` forbids.
+///
+/// `test_refresh_serves_stale_on_failure` above asserts that the old value comes
+/// back when revalidation fails. On its own that assertion is half a contract:
+/// the same bytes answer for "the revalidator just produced this" and "we could
+/// not reach the source and are returning yesterday's answer", so a caller had no
+/// way to tell. The waiver said so precisely -- nothing distinguished silent
+/// stale acceptance from explicit stale service.
+///
+/// `refresh_detailed` is what makes it distinguishable, and these assertions are
+/// the proof: the failing-revalidation path reports `Stale`, the succeeding path
+/// reports `Fresh`, and the two are not the same value to a caller.
+#[tokio::test]
+async fn stale_service_is_reported_rather_than_silent() {
+    let manager = make_manager(DefaultPolicy);
+    let key = "freshness".to_string();
+
+    // A successful revalidation is `Fresh`.
+    manager
+        .set(&key, "old".to_string(), &test_ctx())
+        .await
+        .unwrap();
+    let fresh = manager
+        .refresh_detailed(&key, &test_ctx(), || async { Ok("new".to_string()) })
+        .await
+        .unwrap();
+    assert_eq!(
+        fresh.freshness,
+        Freshness::Fresh,
+        "a produced value is not stale"
+    );
+    assert_eq!(fresh.value.as_deref(), Some("new"));
+
+    // A failed revalidation serves the committed value *and says it is a
+    // fallback*. This is the assertion the waiver said did not exist.
+    manager
+        .set(&key, "committed".to_string(), &test_ctx())
+        .await
+        .unwrap();
+    let stale = manager
+        .refresh_detailed(&key, &test_ctx(), || async {
+            Err(CacheError::PopulationFailed)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        stale.freshness,
+        Freshness::Stale,
+        "a value served because revalidation failed was reported as fresh, which is \
+         silent stale acceptance"
+    );
+    assert_eq!(stale.value.as_deref(), Some("committed"));
+
+    // And the two are distinguishable at the type level, which is what makes the
+    // distinction usable rather than decorative.
+    assert_ne!(fresh.freshness, stale.freshness);
 }
