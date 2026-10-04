@@ -892,3 +892,102 @@ Discovered only by running CI, which is the argument for B10 rather than an
 endorsement of it. The honest sequence is that fixing "CI does not run" revealed
 "CI cannot run", and both were invisible until the first was fixed.
 """
+
+[[bug]]
+id = "B12"
+title = "The gate runner leaked cargo's description of its own package into every gate it spawned"
+severity = "blocking"
+status = "resolved"
+resolved_at = "second-review-remediation"
+accepted_by = "user"
+verified = true
+blocks_merge = true
+locations = ["xtask/src/gates.rs", "xtask/src/contract.rs", "theSix.toml"]
+violates = ["verification_required = true", "tool probing and argv construction are under test rather than trusted"]
+source = "second CI run on this branch, after B11 was fixed"
+summary = """
+With CI running, the `Dependency audit` job failed at `machete`:
+
+    Analyzing dependencies of crates in machete...
+    Error: Errors when walking over directories:
+    machete: IO error for operation on machete: No such file or directory
+
+`cargo machete` had been told to analyse a directory called `machete`. The cause
+is that `cargo xtask run <gate>` is `cargo run --package xtask --`, and cargo
+exports `CARGO_MANIFEST_DIR` plus the `CARGO_PKG_*` family describing *xtask's own
+package* into the process it runs. xtask spawned gates with that environment
+intact, so `cargo machete` read `CARGO_MANIFEST_DIR`, decided it had been pointed
+at `xtask/`, and walked the wrong tree.
+
+The gate passed when xtask was invoked as `./target/debug/xtask`, which inherits
+none of those variables, and failed under `cargo xtask` -- which is what the
+README, `AGENTS.md` and the CI workflow all tell you to use. The documented
+invocation was the broken one and the working one was undocumented.
+"""
+resolution = """
+`scrub_cargo_env` strips `CARGO`, `CARGO_MANIFEST_DIR`, `CARGO_MANIFEST_PATH`,
+`CARGO_CRATE_NAME`, `CARGO_BIN_NAME`, `CARGO_PRIMARY_PACKAGE`, `CARGO_TARGET_TMPDIR`
+and every `CARGO_PKG_*` from each spawned gate. xtask is a gate runner, not a cargo
+subcommand; its children should see the caller's environment. The `CARGO_PKG_*`
+family is enumerated rather than hard-coded because it grows with manifest fields.
+`LD_LIBRARY_PATH` is deliberately left alone -- it is how cargo locates the freshly
+built binary and it has caused no observed misbehaviour, so removing it would
+exceed the evidence.
+"""
+rationale = """
+The regression test reads `CARGO_MANIFEST_DIR` from the test process instead of
+assigning it, because `std::env::set_var` is unsafe in edition 2024 and the crate
+forbids unsafe code. That is not a compromise: `cargo test` sets exactly these for
+the test binary, so the test observes the real condition. It fails if the scrubbing
+is removed, and needs no edit when cargo adds another variable.
+"""
+
+[[bug]]
+id = "B13"
+title = "The check and clippy gates never compiled or linted the gate runner or the test harness"
+severity = "should-fix"
+status = "resolved"
+resolved_at = "second-review-remediation"
+accepted_by = "user"
+verified = true
+blocks_merge = false
+locations = ["theSix.toml", "xtask/src/gates.rs", "xtask/src/contract.rs"]
+violates = ["clippy_warnings_as_errors = true", "verification_required = true"]
+source = "own audit, surfaced while fixing B12"
+summary = """
+`check` and `clippy` ran `cargo check/clippy --all-targets --all-features` with no
+`--workspace`. TheSix's `Cargo.toml` is both a package and the workspace root, so
+cargo defaulted to the current package: the crate under test was linted and the two
+other workspace members were not. `xtask` and `testkit` are separate crates.
+
+So `verification.required.clippy_warnings_as_errors = true` was true of the library
+and silent about the gate runner -- the code that decides which gates pass. Four
+warnings had accumulated there, including one that would have been caught the moment
+the gate existed. Nothing noticed, because no gate looked.
+"""
+further_divergence_found_while_fixing_it = """
+`[verification.merge_readiness].tracker = "bugs.toml"` was declared in the contract
+and ignored: the gate joined a literal `"bugs.toml"` onto the root. A declared
+setting the code never read, which is the same shape as the workflow comment in B8.
+
+Separately, `bugs.toml`'s own `[meta]` counts are *deliberately* not consulted, and
+the struct fields that parsed them were dead code. That part is right -- a tracker
+that states its own expected contents can be edited to agree with whatever it
+currently holds -- so the fields were removed with the rationale kept in a comment
+rather than "fixed" into use.
+"""
+resolution = """
+Both gates now pass `--workspace`. Four latent warnings became hard failures and
+were fixed: the misplaced `#[must_use]` described in B12's companion commit, two
+collapsible `if let` chains in the merge-readiness count check, and two
+`useless_format` calls in the gate's own tests.
+
+The contract's `tracker` value is now read and used instead of hardcoded, with a
+test that rewrites the declared path in a fixture and asserts the loaded contract
+follows it -- asserting the default value would not have caught the divergence.
+"""
+rationale = """
+`--workspace` on a linter is the same argument as `serde_yaml` for the workflow
+check: a gate that claims to cover the repository should ask the tool to cover the
+repository. Both new assertions were mutation-tested.
+"""

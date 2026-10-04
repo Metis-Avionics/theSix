@@ -148,6 +148,56 @@ pub struct GateResult {
     pub detail: Option<String>,
 }
 
+/// Strip the environment `cargo run` injects into xtask's own process.
+///
+/// `cargo xtask run <gate>` is `cargo run --package xtask --`, and cargo exports a
+/// pile of `CARGO_*` variables describing *xtask's own package* to the process it
+/// runs. Anything xtask then spawns inherits them, so a gate that shells out to
+/// another cargo tool is told the manifest directory is `xtask/` rather than the
+/// repository root.
+///
+/// This is not hypothetical. `cargo machete` reads `CARGO_MANIFEST_DIR`, decided it
+/// had been pointed at `xtask/`, and walked the wrong tree:
+///
+///     Analyzing dependencies of crates in machete...
+///     Error: Errors when walking over directories:
+///     machete: IO error for operation on machete: No such file or directory
+///
+/// The gate passed when xtask was invoked as `./target/debug/xtask`, which has none
+/// of these variables, and failed under `cargo xtask` — which is the invocation the
+/// README, `AGENTS.md` and the CI workflow all use. So the documented way to run a
+/// gate was the broken one, and the way that happened to work was the undocumented
+/// one. xtask is a gate runner, not a cargo subcommand: its children should see the
+/// caller's environment.
+///
+/// `LD_LIBRARY_PATH` is left alone. It is cargo's mechanism for finding the freshly
+/// built binary, and on the toolchain this repository targets it has caused no
+/// observed misbehaviour; removing it would be a larger change than the evidence
+/// supports.
+fn scrub_cargo_env(cmd: &mut Command) {
+    const FIXED: &[&str] = &[
+        "CARGO",
+        "CARGO_MANIFEST_DIR",
+        "CARGO_MANIFEST_PATH",
+        "CARGO_CRATE_NAME",
+        "CARGO_BIN_NAME",
+        "CARGO_PRIMARY_PACKAGE",
+        "CARGO_TARGET_TMPDIR",
+    ];
+    // CARGO_PKG_* is an open set that grows with manifest fields, so enumerate it
+    // rather than hard-coding a list that would rot.
+    let pkg_keys: Vec<String> = std::env::vars()
+        .map(|(key, _)| key)
+        .filter(|key| key.starts_with("CARGO_PKG_"))
+        .collect();
+    for key in FIXED {
+        cmd.env_remove(key);
+    }
+    for key in &pkg_keys {
+        cmd.env_remove(key);
+    }
+}
+
 /// Build the argv for a gate without running it. Exposed so `--dry-run` can
 /// print exactly what would be executed, which is the only way to review a
 /// 23-gate matrix without running it.
@@ -214,6 +264,9 @@ pub struct RunOptions {
     /// runner was invoked without one, in which case the gate reports
     /// `Unavailable` rather than trusting the tracker's self-declaration.
     pub expected: Option<ExpectedFindings>,
+    /// Tracker path as declared by `[verification.merge_readiness].tracker`, so
+    /// the gate follows the contract instead of a hardcoded filename.
+    pub tracker: String,
     pub toolchain: Toolchain,
     pub dry_run: bool,
     pub verbose: bool,
@@ -235,7 +288,13 @@ pub fn run(gate: &Gate, opts: &RunOptions) -> GateResult {
     }
 
     if gate.kind == GateKind::Tracker {
-        return merge_readiness(&gate.name, &opts.root, started, opts.expected.as_ref());
+        return merge_readiness(
+            &gate.name,
+            &opts.root,
+            started,
+            opts.expected.as_ref(),
+            &opts.tracker,
+        );
     }
 
     let (program, args) = argv.split_first().expect("argv_for never returns empty");
@@ -245,6 +304,7 @@ pub fn run(gate: &Gate, opts: &RunOptions) -> GateResult {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    scrub_cargo_env(&mut cmd);
     for (k, v) in opts.toolchain.env() {
         cmd.env(k, v);
     }
@@ -425,24 +485,13 @@ pub fn test_target_exists(root: &Path, target: &str) -> bool {
 /// tracker that fails to parse cannot report the bugs it exists to report.
 #[derive(Debug, serde::Deserialize)]
 struct BugFile {
-    #[serde(default)]
-    meta: BugMeta,
+    /// `[meta]` is intentionally not deserialised, including its finding counts.
+    /// Those counts are declared by the tracker *itself*, so a tracker that states
+    /// its own expected contents can be edited to agree with whatever it currently
+    /// holds — the defusal this gate exists to prevent. The counts compared against
+    /// come from `theSix.toml`, which the tracker does not control.
     #[serde(default)]
     bug: Vec<BugEntry>,
-}
-
-/// The expected finding counts, declared by the tracker itself.
-///
-/// This is what stops the gate being defused by deletion. A tracker that can be
-/// emptied to make a readiness check pass is not a tracker, it is a switch — and
-/// the first version of this gate had exactly that hole, found by
-/// `empty_tracker_is_rejected`.
-#[derive(Debug, Default, serde::Deserialize)]
-struct BugMeta {
-    #[serde(default)]
-    findings_blocking: Option<usize>,
-    #[serde(default)]
-    findings_should_fix: Option<usize>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -478,6 +527,7 @@ fn merge_readiness(
     root: &Path,
     started: Instant,
     expected: Option<&ExpectedFindings>,
+    tracker: &str,
 ) -> GateResult {
     let done = |outcome: Outcome, detail: String| GateResult {
         name: name.to_string(),
@@ -486,7 +536,7 @@ fn merge_readiness(
         detail: Some(detail),
     };
 
-    let path = root.join("bugs.toml");
+    let path = root.join(tracker);
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return done(
             Outcome::Unavailable,
@@ -521,19 +571,19 @@ fn merge_readiness(
             "no merge-readiness expectations supplied by the contract".to_string(),
         );
     };
-    if let Some(want) = expected.blocking {
-        if want != actual_blocking {
-            count_problems.push(format!(
-                "theSix.toml expects {want} blocking finding(s), tracker holds {actual_blocking}"
-            ));
-        }
+    if let Some(want) = expected.blocking
+        && want != actual_blocking
+    {
+        count_problems.push(format!(
+            "theSix.toml expects {want} blocking finding(s), tracker holds {actual_blocking}"
+        ));
     }
-    if let Some(want) = expected.should_fix {
-        if want != actual_should_fix {
-            count_problems.push(format!(
-                "theSix.toml expects {want} should-fix finding(s), tracker holds {actual_should_fix}"
-            ));
-        }
+    if let Some(want) = expected.should_fix
+        && want != actual_should_fix
+    {
+        count_problems.push(format!(
+            "theSix.toml expects {want} should-fix finding(s), tracker holds {actual_should_fix}"
+        ));
     }
     if count_problems.is_empty() && file.bug.is_empty() {
         count_problems.push("tracker holds no findings at all".to_string());
@@ -604,6 +654,7 @@ fn merge_readiness(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::{ExpectedFindings, Outcome, merge_readiness};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -634,6 +685,10 @@ mod tests {
         }
     }
 
+    /// Tracker filename for fixtures. Matches what `theSix.toml` declares, so the
+    /// gate reads the contract's path rather than a hardcoded one.
+    const TRACKER: &str = "bugs.toml";
+
     fn check(body: &str) -> Outcome {
         // Expectations are derived from the fixture itself unless a test cares,
         // so a count assertion tests the count check rather than the fixture.
@@ -644,7 +699,13 @@ mod tests {
 
     fn check_with(body: &str, want: ExpectedFindings) -> Outcome {
         let dir = fixture(body);
-        let r = merge_readiness("merge_readiness", &dir, Instant::now(), Some(&want));
+        let r = merge_readiness(
+            "merge_readiness",
+            &dir,
+            Instant::now(),
+            Some(&want),
+            TRACKER,
+        );
         let _ = std::fs::remove_dir_all(&dir);
         r.outcome
     }
@@ -680,6 +741,7 @@ mod tests {
             )),
             Instant::now(),
             Some(&expected(3, 0)),
+            TRACKER,
         );
         assert_eq!(r.outcome, Outcome::Failed);
         let detail = r.detail.expect("a failing gate must explain itself");
@@ -691,9 +753,9 @@ mod tests {
     #[test]
     fn resolved_with_rationale_passes() {
         assert_eq!(
-            check(&format!(
-                "[[bug]]\nid = \"B1\"\ntitle = \"t\"\nstatus = \"resolved\"\nblocks_merge = true\nrationale = \"guard added\"\n"
-            )),
+            check(
+                "[[bug]]\nid = \"B1\"\ntitle = \"t\"\nstatus = \"resolved\"\nblocks_merge = true\nrationale = \"guard added\"\n",
+            ),
             Outcome::Passed
         );
     }
@@ -764,6 +826,7 @@ mod tests {
             &dir,
             Instant::now(),
             Some(&expected(0, 0)),
+            TRACKER,
         );
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(r.outcome, Outcome::Unavailable);
@@ -798,10 +861,8 @@ mod tests {
     #[test]
     fn downgrading_severity_to_dodge_the_gate_fails() {
         // B1 flipped to non-blocking to escape the check.
-        let body = format!(
-            "[meta]\nfindings_blocking = 0\nfindings_should_fix = 1\n[[bug]]\nid = \"B1\"\ntitle = \"t\"\nstatus = \"open\"\nblocks_merge = false\n"
-        );
-        assert_eq!(check_with(&body, expected(3, 2)), Outcome::Failed);
+        let body = "[meta]\nfindings_blocking = 0\nfindings_should_fix = 1\n[[bug]]\nid = \"B1\"\ntitle = \"t\"\nstatus = \"open\"\nblocks_merge = false\n";
+        assert_eq!(check_with(body, expected(3, 2)), Outcome::Failed);
     }
 
     #[test]
@@ -813,5 +874,79 @@ mod tests {
             "[[bug]]\nid = \"B4\"\ntitle = \"t\"\nstatus = \"open\"\nblocks_merge = false\n"
         );
         assert_eq!(check(&body), Outcome::Passed);
+    }
+
+    /// The gate runner must not hand `cargo run`'s environment to its children.
+    ///
+    /// `cargo xtask run <gate>` is `cargo run --package xtask --`, so cargo exports
+    /// `CARGO_MANIFEST_DIR` and the `CARGO_PKG_*` family describing *xtask's own
+    /// package*. Anything xtask spawns inherits them. `cargo machete` reads
+    /// `CARGO_MANIFEST_DIR`, concluded it had been pointed at `xtask/`, and walked
+    /// the wrong tree -- so `cargo xtask run machete` failed while
+    /// `./target/debug/xtask run machete`, which has none of those variables,
+    /// passed. The documented invocation was the broken one.
+    ///
+    /// The variables are read from this process rather than assigned, because
+    /// `std::env::set_var` is unsafe in edition 2024 and this crate forbids unsafe
+    /// code. That is not a limitation: `cargo test` sets exactly these for the test
+    /// binary, so the test observes the real condition instead of a synthetic one.
+    #[test]
+    fn gate_children_do_not_inherit_cargos_own_package_environment() {
+        assert!(
+            std::env::var("CARGO_MANIFEST_DIR").is_ok(),
+            "CARGO_MANIFEST_DIR must be set for this test to mean anything; cargo \
+             sets it for test binaries, so being absent means the test is running \
+             outside the situation it exists to check"
+        );
+
+        let mut cmd = Command::new("bash");
+        scrub_cargo_env(&mut cmd);
+        let out = cmd
+            .arg("-c")
+            .arg("echo \"[${CARGO_MANIFEST_DIR-unset}][${CARGO_PKG_NAME-unset}]\"")
+            .output()
+            .expect("bash must be runnable to test this");
+
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "[unset][unset]",
+            "a gate would inherit cargo's description of xtask's own package"
+        );
+    }
+
+    /// The tracker path is read from the contract, not hardcoded in the gate.
+    ///
+    /// `[verification.merge_readiness].tracker` existed in the contract while the
+    /// gate joined a literal `"bugs.toml"` onto the root -- a declared setting the
+    /// code ignored. Asserting the default value would not catch that, so this
+    /// rewrites the declared path and checks the loaded contract follows it.
+    #[test]
+    fn the_tracker_path_is_read_from_the_contract() {
+        let real = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("theSix.toml");
+        let text = std::fs::read_to_string(&real).expect("the contract must be readable");
+        assert!(
+            text.contains("tracker = \"bugs.toml\""),
+            "the contract should declare tracker = \"bugs.toml\"; if it was renamed, this \
+             fixture needs updating"
+        );
+
+        let dir = std::env::temp_dir().join(format!("thesix-tracker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let moved = dir.join("elsewhere.toml");
+        std::fs::write(
+            &moved,
+            text.replace("tracker = \"bugs.toml\"", "tracker = \"elsewhere.toml\""),
+        )
+        .expect("write fixture");
+
+        let contract = crate::contract::Contract::load(&moved).expect("fixture must load");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            contract.tracker, "elsewhere.toml",
+            "the loaded contract ignored the declared tracker path"
+        );
     }
 }

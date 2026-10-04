@@ -115,6 +115,7 @@ fn main() -> ExitCode {
     let opts = RunOptions {
         root: root.clone(),
         expected: Some(contract.expected_findings),
+        tracker: contract.tracker.clone(),
         toolchain: toolchain.clone(),
         dry_run: cli.dry_run,
         verbose: cli.verbose,

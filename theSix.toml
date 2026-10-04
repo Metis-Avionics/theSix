@@ -517,8 +517,8 @@ anti_vacuity_required = true
 # is open.
 [verification.merge_readiness]
 tracker = "bugs.toml"
-expected_blocking = 7
-expected_should_fix = 4
+expected_blocking = 8
+expected_should_fix = 5
 
 [verification.required]
 fmt = true
@@ -620,14 +620,14 @@ description = "Unit tests for the gate runner itself. The runner decides what pa
 [[verification.gate]]
 name = "check"
 kind = "cargo"
-args = ["check", "--all-targets", "--all-features"]
-description = "Compiles every target under every feature."
+args = ["check", "--workspace", "--all-targets", "--all-features"]
+description = "Compiles every target of every workspace member under every feature. `--workspace` because the gate runner and the test harness are separate crates: without it they are never compiled by this gate at all."
 
 [[verification.gate]]
 name = "clippy"
 kind = "cargo"
-args = ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
-description = "Warnings are errors. The crate also sets `#![deny(warnings)]` at the root."
+args = ["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
+description = "Warnings are errors, across every workspace member. Without `--workspace` this linted only the root crate, which is how four warnings accumulated in the gate runner itself with no gate noticing."
 
 [[verification.gate]]
 name = "doc"

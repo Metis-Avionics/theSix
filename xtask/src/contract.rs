@@ -77,12 +77,22 @@ pub struct Gate {
 /// counts have to live somewhere the tracker does not control.
 #[derive(Debug, Default, Deserialize)]
 struct MergeReadiness {
-    #[serde(default)]
-    tracker: Option<String>,
+    /// Path to the findings tracker, relative to the repository root. Read by the
+    /// `merge_readiness` gate rather than hardcoded, so moving the tracker is a
+    /// contract edit that the gate follows instead of silently ignoring.
+    #[serde(default = "default_tracker")]
+    tracker: String,
     #[serde(default)]
     expected_blocking: Option<usize>,
     #[serde(default)]
     expected_should_fix: Option<usize>,
+}
+
+/// The tracker path assumed when the contract does not declare one. Matches what
+/// `theSix.toml` ships so an omitted key behaves like the declared one rather than
+/// failing late.
+fn default_tracker() -> String {
+    "bugs.toml".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,6 +230,8 @@ pub struct Contract {
     /// Expected merge-readiness finding counts, declared by the contract so the
     /// tracker cannot be defused by editing itself.
     pub expected_findings: crate::gates::ExpectedFindings,
+    /// Tracker path as declared by `[verification.merge_readiness].tracker`.
+    pub tracker: String,
 }
 
 impl Contract {
@@ -432,6 +444,7 @@ impl Contract {
                 blocking: parsed.verification.merge_readiness.expected_blocking,
                 should_fix: parsed.verification.merge_readiness.expected_should_fix,
             },
+            tracker: parsed.verification.merge_readiness.tracker.clone(),
         })
     }
 
