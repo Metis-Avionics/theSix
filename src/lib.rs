@@ -29,192 +29,192 @@
 
 //! # theSix
 //!
-//! Policy-driven six-tier cache orchestration for Rust.
-//!
-//! ## Architecture
-//!
-//! theSix separates the cache system into a **control plane** and a **data plane**:
+//! Policy-driven six-tier cache orchestration, built around an explicit
+//! **high-performance availability (HPA) data-continuity contract**.
 //!
 //! ```text
-//! Application
-//!   │
-//!   ▼
-//! CacheManager      ← API / orchestration
-//!   │
-//!   ▼
-//! Policy Engine     ← decides what should happen
-//!   │
-//!   ▼
-//! Cachelito         ← coordinates concurrent state (control plane)
-//!   │
-//!   ▼
-//! Six-Tier Data Plane ← actual cache implementations
-//!   ├── L0 request-local
-//!   ├── L1 hot-local
-//!   ├── L2 local
-//!   ├── L3 distributed
-//!   ├── L4 persistent
-//!   └── L5 origin-fallback
+//!                     Consumer
+//!                         |
+//!                         v
+//!         theSix continuity / policy plane
+//!         locality | availability | performance
+//!         consistency | durability | recovery
+//!                         |
+//!     +-------------------+-------------------+
+//!     v                   v                   v
+//! Performance         Continuity           Security
+//! & locality          & recovery           CIA
+//!     +-------------------+-------------------+
+//!                         v
+//!         Heterogeneous storage / cache / authority
 //! ```
 //!
-//! The application should never need to know that L3 happens to be Redis.
+//! Consumers depend on the *continuity contract*, not on a backend. L0-L6 are
+//! replaceable infrastructure; the rung a value lands on is policy's decision,
+//! and authority is configured rather than inferred from a tier number.
 //!
-//! ## `CacheManager`
+//! # Guarantees
 //!
-//! `CacheManager` is the public API. It exposes cache operations
-//! (`get`, `get_or_fetch`, `set`, `invalidate`, `remove`, `exists`,
-//! `refresh`, `promote`, `demote`) and enforces authentication and
-//! authorization before any state is touched.
+//! | Property | Mechanism |
+//! |---|---|
+//! | Atomicity | Two-phase commit with a payload-free intent record. A crash leaves an intent, never a half-visible value. |
+//! | Isolation | Single-flight population ownership; no control guard is ever held across an `.await`. |
+//! | Durability honesty | `DurabilityClass` is `Volatile`, `Delegated` or `Verified`. Only a restart test may grant `Verified`. |
+//! | Integrity | Every stored value carries a content digest; a damaged record is refused, not served. |
+//! | Tenant isolation | The tenant is framed into the key, so a cross-tenant read finds nothing. |
+//! | Capability honesty | A rung is reported as `Unbound` rather than silently replaced by another. |
+//! | Bounded control plane | Every rung-scanning path is bounded by `LAST_CACHE_TIER`, so a fallback can never surface authority data. |
 //!
-//! Tier selection is delegated to the policy engine; the application never
-//! selects a tier directly.
+//! # The control plane and the data plane
 //!
-//! ## Cachelito
+//! [`Cachelito`] is the control-plane state registry: a pre-allocated sharded
+//! slot map holding entry state, generation, population ownership and a commit
+//! intent. It stores **no application payloads** — the intent record is a key
+//! hash, a target rung, a generation and a kind, so a crash cannot leak a value
+//! through it.
 //!
-//! Cachelito is the control-plane state registry. It uses a sharded
-//! fixed-size slot map to track per-key control state (entry state, generation, tier,
-//! population ownership, tier health) without storing application payloads.
+//! [`CacheTier`] implementations are the data plane: they store and retrieve
+//! values, and decide nothing. They are `async` because real backends are I/O.
 //!
-//! Key invariants:
-//! - Control state does not store payload data.
-//! - Control guards must not cross `.await` points.
-//! - Control guards must not cross I/O.
+//! [`CacheManager`] sits between them, enforcing authentication, delegating tier
+//! selection to a [`CachePolicy`], and coordinating through [`Cachelito`]. Every
+//! control-plane call is synchronous and returns an owned snapshot, so
+//! no shard guard can be held across an `.await` by construction.
 //!
-//! ## Policy Engine
-//!
-//! The policy engine determines tier selection based on operation type,
-//! key metadata, entry metadata, cache state, tier health, and identity.
-//!
-//! The `CachePolicy` trait is the abstraction; `DefaultPolicy` is a basic
-//! implementation. Custom policies can be supplied via the `P` type parameter
-//! on `CacheManager`.
-//!
-//! ## Six Logical Tiers
-//!
-//! | Tier | Role | Scope | Persistent |
-//! |------|------|-------|------------|
-//! | L0 | Request-local | Request | No |
-//! | L1 | Hot-local | Process | No |
-//! | L2 | Local | Process | No |
-//! | L3 | Distributed | Cluster | No |
-//! | L4 | Persistent | Host | Yes |
-//! | L5 | Origin-fallback | External | No |
-//!
-//! Backend implementations are configurable and not part of the core contract.
-//!
-//! ## Single-Flight Semantics
-//!
-//! For a given key, only one caller may populate the cache at a time.
-//! Other callers wait for the population to complete. This prevents
-//! cache stampedes on concurrent misses.
-//!
-//! Flow:
-//! - First caller becomes population owner → fetches → publishes
-//! - Other callers wait → join existing population
-//! - Owner failure releases state; waiters receive the error
-//!
-//! ## Generation Invalidation
-//!
-//! Every population captures the current generation. If a newer generation
-//! exists (due to invalidation), stale population results are rejected.
+//! # Atomicity, concretely
 //!
 //! ```text
-//! generation 41 → population starts
-//! generation 42 → invalidation
-//! population 41 completes → rejected (stale)
+//! prepare(key, generation, rung)  ->  entry is Prepared; reads see a miss
+//! write to the rung               ->  no payload anywhere in the control plane
+//! commit(token)                   ->  Ready, intent cleared, waiters notified
+//! abort(token)                    ->  restores the interrupted state
 //! ```
 //!
-//! ## Concurrency Guarantees
+//! Recovery resolves an outstanding intent by kind: a [`IntentKind::Write`]
+//! aborts, because the value is reproducible; an [`IntentKind::Move`] completes
+//! forward, because aborting it would discard an already-committed value. Both
+//! directions are idempotent.
 //!
-//! - Multiple concurrent readers are supported.
-//! - Concurrent reads and writes on unrelated keys do not block each other.
-//! - Contention on the same key is coordinated via Cachelito's single-flight.
-//! - No global lock around the entire cache hierarchy.
-//! - No control guard held across await points.
+//! # Capability semantics
 //!
-//! ## Failure Modes
+//! Asking "which backend is this?" previously had no honest answer — the only
+//! way to find out was to issue an operation and receive `TierUnavailable`, which
+//! cannot distinguish *not compiled in*, *bound but down*, and *never
+//! implemented*. See [`TierCapability`], [`CapabilityFlags`],
+//! [`OperationalState`] and [`DurabilityClass`].
 //!
-//! - **Tier unavailable**: Policy may route to next tier (fail-open) or fail fast (fail-closed).
-//! - **Population failure**: Owner failure releases in-flight state; waiters receive error.
-//! - **Stale generation**: Population result rejected if generation changed.
-//! - **Timeout**: Waiter or owner timeout releases state and returns `CacheError::Timeout`.
-//! - **Unauthenticated**: Request rejected if no identity provided.
-//! - **Unauthorized**: Request rejected if policy denies access.
+//! Those are three axes rather than one enum because the properties are not
+//! mutually exclusive: a rung can be persistent *and* shared *and* degraded at
+//! the same moment.
 //!
-//! ## Example
+//! # Observability
+//!
+//! [`OperationRecord`] carries the eleven fields needed to reconstruct an
+//! operation, with two deliberate omissions: no payload, and no key. A key is
+//! identified by a non-reversible [`KeyIdentity`] — a digest plus a length —
+//! because keys are as sensitive as the data they name.
+//!
+//! # Example
 //!
 //! ```no_run
-//! use thesix::{CacheManager, CacheTier, CacheContext, MemoryPool, IdentityContext};
 //! use std::sync::Arc;
+//! use thesix::{CacheContext, CacheManager, CacheTier, Cachelito, DefaultPolicy,
+//!              IdentityContext, L0Stub, L1Stub, L2Stub, L3Stub, L4Stub, L5Stub,
+//!              MemoryPool, TierRegistry};
 //!
 //! # async fn example() {
-//! // Create tier stubs, cachelito, policy, registry, and the value pool.
-//! let cachelito = thesix::Cachelito::new();
-//! let policy = thesix::DefaultPolicy;
-//! let registry = thesix::TierRegistry::new();
 //! let tiers: Vec<Arc<dyn CacheTier<String>>> = vec![
-//!     Arc::new(thesix::L0Stub::<String>::new()),
-//!     Arc::new(thesix::L1Stub::<String>::new()),
-//!     Arc::new(thesix::L2Stub::<String>::new()),
-//!     Arc::new(thesix::L3Stub::<String>::new()),
-//!     Arc::new(thesix::L4Stub::<String>::new()),
-//!     Arc::new(thesix::L5Stub::<String>::new()),
+//!     Arc::new(L0Stub::<String>::new()),
+//!     Arc::new(L1Stub::<String>::new()),
+//!     Arc::new(L2Stub::<String>::new()),
+//!     Arc::new(L3Stub::<String>::new()),
+//!     Arc::new(L4Stub::<String>::new()),
+//!     Arc::new(L5Stub::<String>::new()),
 //! ];
-//! let pool = MemoryPool::<String>::new(1024).expect("pool allocation failed");
+//! let pool = MemoryPool::<String>::new(1024).expect("pool");
 //!
-//! let manager: CacheManager<String, String, thesix::DefaultPolicy> =
-//!     CacheManager::new(policy, cachelito, registry, tiers, pool);
+//! let manager: CacheManager<String, String, DefaultPolicy> =
+//!     CacheManager::new(DefaultPolicy, Cachelito::new(), TierRegistry::new(), tiers, pool);
 //!
-//! // Build a request context carrying the caller identity (builder pattern).
+//! // Identity carries the tenant, and the tenant is part of the key: two tenants
+//! // using the same application key never share an entry.
 //! let ctx = CacheContext::new(IdentityContext::new(
 //!     "alice".to_string(),
 //!     vec!["reader".to_string()],
 //!     "tenant-1".to_string(),
 //! ));
 //!
-//! // Application code never selects a tier:
-//! let key = "my-key".to_string();
+//! // Application code never selects a tier.
 //! let value = manager
-//!     .get_or_fetch(&key, &ctx, || async { Ok("value".to_string()) })
+//!     .get_or_fetch(&"order-42".to_string(), &ctx, || async { Ok("payload".to_string()) })
 //!     .await;
 //! # }
 //! ```
 //!
-//! ## Crate Layout
+//! # Crate layout
 //!
 //! | Module | Purpose |
 //! |--------|---------|
-//! | `src/manager` | `CacheManager` — public API and orchestration |
-//! | `src/control` | `Cachelito` — control-plane state registry |
-//! | `src/policy` | Policy engine, operations, decisions |
-//! | `src/tier` | Tier abstraction and L0–L5 implementations |
-//! | `src/entry` | Entry state, generation, cache entry |
-//! | `src/error` | Structured error types |
-//! | `src/identity` | Authentication context |
-//! | `src/key` | `Key` trait and `KeyRef` borrowed key view |
-//! | `src/pool` | `MemoryPool` fixed-capacity value allocator |
+//! | [`manager`] | `CacheManager` — the public API and orchestration |
+//! | [`control`] | `Cachelito` — control-plane state, generations, commit intents |
+//! | [`policy`] | `CachePolicy`, operations, decisions, the ladder bound |
+//! | [`capability`] | `TierCapability` and its three reporting axes |
+//! | [`continuity`] | Continuity states, recovery direction and outcomes |
+//! | [`integrity`] | Content digests, key fingerprints, slot placement |
+//! | [`telemetry`] | `OperationRecord`, `TelemetrySink`, latency percentiles |
+//! | [`tier`] | The `CacheTier` trait and the L0-L6 bindings |
+//! | [`entry`] | `EntryState`, `Generation`, `CommitToken` |
+//! | [`error`] | `CacheError` — the single error type |
+//! | [`identity`] | `IdentityContext` and `CacheContext` |
+//! | [`key`] | `Key`, `KeyRef`, tenant key framing |
+//! | [`pool`] | `MemoryPool`, a fixed-capacity value allocator |
+//! | [`fault`] | Deterministic, seedable fault injection (feature `faults`) |
+//!
+//! # Contract
+//!
+//! [`theSix.toml`](./theSix.toml) is the source of truth for the architecture and
+//! is machine-checked: `cargo xtask contract` validates it, and `tests/contract`
+//! asserts it agrees with this crate.
 
+pub mod capability;
+pub mod continuity;
 pub mod control;
 pub mod entry;
 pub mod error;
+#[cfg(feature = "faults")]
+pub mod fault;
 pub mod identity;
+pub mod integrity;
 pub mod key;
 pub mod manager;
 pub mod policy;
 pub mod pool;
+pub mod telemetry;
 pub mod tier;
 
+pub use capability::{CapabilityFlags, DurabilityClass, OperationalState, TierCapability};
+pub use continuity::{
+    ContinuityReport, ContinuityState, RecoveryDirection, RecoveryOutcome, RecoveryReport,
+};
 pub use control::cachelito::Cachelito;
 pub use entry::{CacheEntry, EntryState, Generation};
+pub use entry::{CommitIntent, CommitToken, IntentKind};
 pub use error::CacheError;
+#[cfg(feature = "faults")]
+pub use fault::{ArmedFault, DeterministicRng, FaultClass, FaultLedger, FaultPlan, OpKind};
 pub use identity::{CacheContext, IdentityContext};
-pub use key::{Key, KeyRef};
+pub use integrity::{ContentDigest, IntegrityCheck, KeyAddress, KeyFingerprint, Placement};
+pub use key::{Key, KeyRef, MAX_KEY_SIZE, TENANT_SEPARATOR, frame_tenant_key};
 pub use manager::CacheManager;
 pub use policy::{
     CacheOperation, CachePolicy, CacheRequest, CacheState, DefaultPolicy, FailMode, PolicyDecision,
     PopulationStrategy, StrictPolicy,
 };
 pub use pool::MemoryPool;
+pub use telemetry::{
+    KeyIdentity, LatencyPercentiles, NoTelemetry, Operation, OperationRecord, Outcome,
+    RingTelemetry, TelemetrySink,
+};
 pub use tier::fixed_tier_stub::FixedTierStub;
 pub use tier::{BackendKind, CacheTier, TierHealth, TierId, TierRegistry};
 pub use tier::{

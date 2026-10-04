@@ -4,43 +4,20 @@ use crate::error::CacheError;
 use crate::key::KeyRef;
 use crate::tier::TierId;
 
-/// The data plane: a tier stores and retrieves values. It decides nothing.
-///
-/// Routing, authorization, single-flight ownership, generation and health live
-/// in the control plane (`Cachelito`), which stays synchronous. A tier must
-/// therefore never hold entry state, generation counters or population
-/// ownership — if a backend needs those, it is doing the control plane's job.
-///
-/// # Why these methods are `async`
-///
-/// Real backends are I/O: `Redis`, `Postgres`, `Neo4j`, `HelixDB`, `RocksDB` and `Oxigraph`
-/// all block or await. Before 1.0 this trait was synchronous, so those backends
-/// could only be reached by blocking inside a sync method — which deadlocks
-/// whenever the caller is already on a runtime thread. `CacheManager`'s own
-/// methods were already `async`, so this trait was the last synchronous edge in
-/// the data path.
-///
-/// The control plane stays sync deliberately: `Cachelito` is a pre-allocated
-/// sharded slot map (no `DashMap`, TETANUS Rule 3) whose `acquire()` returns an
-/// owned `ControlSnapshot`. Because the snapshot is owned, no shard guard is
-/// ever held across an `.await`. `tiers_and_await_safety` asserts that property
-/// rather than trusting it, since async-ing the tiers made it load-bearing.
-///
-/// `#[async_trait]` rather than native `async fn in trait`: this trait is used
-/// as `Arc<dyn CacheTier<V>>`, and native AFIT is not dyn-compatible.
 /// What a tier is actually bound to.
 ///
 /// This type exists because "which backend is this?" previously had no answer.
 /// A consumer could only find out by issuing an operation and receiving
 /// `TierUnavailable`, which is indistinguishable between *not compiled in*,
 /// *bound but down*, and *never implemented*. Those three demand different
-/// responses - change the build, retry, or stop asking - and collapsing them
+/// responses — change the build, retry, or stop asking — and collapsing them
 /// into one error is what led a downstream project to rule the whole crate
 /// unusable.
 ///
-/// `InMemoryFallback` is the one that must never be passed off as something
-/// richer: an L3 whose backend is `InMemoryFallback` is process-local and is
-/// emphatically not the distributed tier the ladder advertises.
+/// A variant existing here does not mean an implementation exists. See
+/// [`BackendKind::is_implemented`]. For what a given rung can be relied on,
+/// see [`crate::capability::TierCapability`], which is richer than this enum
+/// because durability, sharing and authority are not mutually exclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BackendKind {
     /// A real in-memory tier (L0-L2), doing its declared job.
@@ -63,30 +40,45 @@ pub enum BackendKind {
 }
 
 impl BackendKind {
-    /// Whether this backend is a genuine implementation of its tier's contract,
-    /// as opposed to a stand-in or a refusal.
+    /// Whether code for this backend exists anywhere in this crate.
     ///
-    /// `InMemoryFallback` is false on purpose: a fallback keeps the ladder
-    /// functioning but does not deliver the tier's advertised property, and a
-    /// caller deciding whether it can rely on durability or cross-process sharing
-    /// needs to be told no.
+    /// This replaces the old `is_native()`, which answered `true` for `Moka`,
+    /// `RocksDb`, `Postgres`, `Neo4j` and `Helix` — five backends the crate does
+    /// not contain. A consumer reading `is_native() == true` for Postgres was
+    /// told a store was durable and shared when nothing was even compiled in.
+    ///
+    /// This answers "is there code", not "is it bound right now": a
+    /// feature-gated backend reports `true` here whether or not its feature is
+    /// enabled. For what a *particular* manager actually has bound, ask
+    /// [`crate::capability::TierCapability`], which comes from the tier instance
+    /// and therefore cannot claim a feature that is not compiled in.
     #[must_use]
-    pub fn is_native(&self) -> bool {
-        !matches!(
+    pub const fn is_implemented(&self) -> bool {
+        matches!(
             self,
-            Self::InMemoryFallback | Self::Unavailable | Self::Test
+            Self::InMemory
+                | Self::InMemoryFallback
+                | Self::Redis
+                | Self::Sled
+                | Self::Oxigraph
+                | Self::Origin
+                | Self::Test
         )
     }
 
-    /// Whether values written here survive a process restart.
+    /// Whether values written through this backend reach a store that outlives
+    /// the process, according to the backend's own design.
+    ///
+    /// This describes the backend, not what this crate has verified. For the
+    /// evidence question see `DurabilityClass`.
     #[must_use]
-    pub fn is_persistent(&self) -> bool {
+    pub const fn is_persistent_by_design(&self) -> bool {
         matches!(self, Self::Sled | Self::RocksDb | Self::Postgres)
     }
 
-    /// Whether the backend is shared across processes or hosts.
+    /// Whether the store is reachable from more than one process, by design.
     #[must_use]
-    pub fn is_shared(&self) -> bool {
+    pub const fn is_shared_by_design(&self) -> bool {
         matches!(
             self,
             Self::Redis | Self::Postgres | Self::Neo4j | Self::Helix | Self::Origin
@@ -115,6 +107,38 @@ impl std::fmt::Display for BackendKind {
     }
 }
 
+/// The data plane: a tier stores and retrieves values. It decides nothing.
+///
+/// Routing, authorization, single-flight ownership, generation and health live
+/// in the control plane (`Cachelito`), which stays synchronous. A tier must
+/// therefore never hold entry state, generation counters or population
+/// ownership — if a backend needs those, it is doing the control plane's job.
+///
+/// # Why these methods are `async`
+///
+/// Real backends are I/O: `Redis`, `Postgres`, `Neo4j`, `HelixDB`, `RocksDB` and `Oxigraph`
+/// all block or await. Before 1.0 this trait was synchronous, so those backends
+/// could only be reached by blocking inside a sync method — which deadlocks
+/// whenever the caller is already on a runtime thread. `CacheManager`'s own
+/// methods were already `async`, so this trait was the last synchronous edge in
+/// the data path.
+///
+/// Making the trait `async` is necessary but not sufficient: an `async fn` that
+/// calls a blocking syscall still blocks the reactor thread it is running on. A
+/// backend that does real I/O must additionally declare
+/// [`CapabilityFlags::BLOCKING_IO`](crate::capability::CapabilityFlags::BLOCKING_IO)
+/// or move the work to `spawn_blocking`, and a consumer needs to be able to tell
+/// which it is.
+///
+/// The control plane stays sync deliberately: `Cachelito` is a pre-allocated
+/// sharded slot map (no `DashMap`, TETANUS Rule 3) whose `acquire()` returns an
+/// owned `ControlSnapshot`. Because the snapshot is owned, no shard guard is
+/// ever held across an `.await`. The `concurrency` and `loom` test layers assert
+/// that property rather than trusting it, since async-ing the tiers made it
+/// load-bearing.
+///
+/// `#[async_trait]` rather than native `async fn in trait`: this trait is used
+/// as `Arc<dyn CacheTier<V>>`, and native AFIT is not dyn-compatible.
 #[async_trait::async_trait]
 pub trait CacheTier<V>: Send + Sync {
     fn name(&self) -> String;
@@ -122,6 +146,21 @@ pub trait CacheTier<V>: Send + Sync {
     /// What this tier is bound to. Required as of 1.0: a tier that cannot say
     /// what it is cannot be reported on, which is the whole point.
     fn backend(&self) -> BackendKind;
+
+    /// What this tier can be relied on for, right now.
+    ///
+    /// The default is deliberately pessimistic: it reports `Unavailable` and
+    /// claims nothing. A tier that can do better must say so, because a
+    /// silently-optimistic default is the misreporting this surface exists to
+    /// prevent — and every in-tree tier overrides it.
+    fn capability(&self) -> crate::capability::TierCapability {
+        crate::capability::TierCapability::new(
+            self.backend(),
+            crate::capability::CapabilityFlags::EMPTY,
+            crate::capability::OperationalState::Unavailable,
+            crate::capability::DurabilityClass::Volatile,
+        )
+    }
 
     async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError>;
 

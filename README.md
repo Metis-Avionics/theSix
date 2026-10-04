@@ -1,272 +1,181 @@
 # theSix
 
+[![CI](https://github.com/Metis-Avionics/theSix/actions/workflows/ci.yml/badge.svg)](https://github.com/Metis-Avionics/theSix/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/thesix.svg)](https://crates.io/crates/thesix)
-[![docs.rs](https://img.shields.io/docsrs/thesix)](https://docs.rs/thesix)
-[![CI](https://github.com/Metis-Avionics/theSix/actions/workflows/ci.yml/badge.svg)](https://github.com/Metis-Avionics/theSix/actions)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![docs.rs](https://docs.rs/thesix/badge.svg)](https://docs.rs/thesix)
 
-Policy-driven six-tier cache orchestration for Rust. theSix is a cache
-*orchestration* system, not merely a cache implementation: application code
-never selects tiers, a policy engine routes every operation, and a control
-plane (`Cachelito`) coordinates concurrent state — including single-flight
-population so a cache miss never triggers a stampede.
+Policy-driven six-tier cache orchestration for Rust, built around an explicit
+**high-performance availability (HPA) data-continuity contract**.
 
-```rust
-let value = manager
-    .get_or_fetch(&key, &ctx, || async { Ok("value".to_string()) })
-    .await?;
+> **The contract is the source of truth.** [`theSix.toml`](./theSix.toml) declares
+> the architecture's invariants, and this file, the crate docs and `AGENTS.md`
+> derive from it. Where prose and contract could disagree, the contract wins — and
+> `cargo xtask contract` fails the build if they do.
+
+## The boundary
+
+```text
+                    Consumer
+                        │
+                        ▼
+        theSix continuity / policy plane
+        locality · availability · performance
+        consistency · durability · recovery
+                        │
+    ┌───────────────────┼───────────────────┐
+    ▼                   ▼                   ▼
+Performance         Continuity           Security
+& locality          & recovery           CIA
+    └───────────────────┼───────────────────┘
+                        ▼
+        Heterogeneous storage / cache / authority
 ```
 
-No `manager.l3.get(...)`. That distinction is the whole point.
+Consumers depend on the **continuity contract**, not on a backend. L0–L6 are
+replaceable infrastructure: the rung a value lands on is decided by policy, and
+authority is configured rather than inferred from a tier number.
 
-## Installation
-
-```toml
-[dependencies]
-thesix = "1.0"
-```
-
-Optional real backends (in-memory stubs are the default):
-
-| Feature | Backend | Notes |
-|---------|---------|-------|
-| `redis` | `L3RedisBackend` (distributed) | Synchronous client — call via `spawn_blocking` in async code |
-| `sled`  | `L4SledBackend` (persistent) | Embedded sled; TTL prefix + lazy eviction |
-| `oxigraph` | `L5OxigraphBackend` (RDF/SPO) | In-process store; one quad per entry, SPARQL-queryable. Uses `default-features = false` because oxigraph's default feature is `rocksdb` |
-
-Not implemented, deliberately: Postgres/pgvector, Neo4j and HelixDB. Each needs
-a live service to verify, and a tier that cannot be run is a liability in a cache
-library. `rocksdb` is not a feature for the same reason — it compiles RocksDB's
-C++ and would make every `--all-features` CI run a native compile.
-
-```toml
-thesix = { version = "1.0", features = ["redis", "sled", "oxigraph"] }
-```
-
-### What is each tier bound to?
-
-A default build binds L0-L2 as in-memory tiers, L3-L5 as **in-memory fallbacks**,
-and leaves L6 unbound. Ask rather than infer:
-
-```rust,ignore
-let caps = manager.capabilities();
-assert!(!caps[&thesix::TierId::L3].is_shared()); // a fallback is not the distributed rung
-assert_eq!(caps[&thesix::TierId::L6], thesix::BackendKind::Unavailable); // not bound
-```
-
-Before 1.0 there was no way to ask. You found out by issuing an operation and
-catching `TierUnavailable`, which is indistinguishable between not-compiled-in,
-bound-but-down, and never-implemented.
-
-Backends store bytes, so values must implement `ByteValue` (`Vec<u8>` and
-`String` are provided; implement the two-method trait for your own types).
-
-**Requirements:** Rust 1.98+, edition 2024, Tokio runtime (the public API is
-`async`; the tier trait is async as of 1.0, while the control plane stays
-synchronous).
-
-## Quick start
+## Quickstart
 
 ```rust
 use std::sync::Arc;
-use thesix::{
-    CacheContext, CacheManager, CacheTier, Cachelito, DefaultPolicy,
-    IdentityContext, MemoryPool, TierRegistry,
-    L0Stub, L1Stub, L2Stub, L3Stub, L4Stub, L5Stub,
-};
+use thesix::{CacheContext, CacheManager, CacheTier, Cachelito, DefaultPolicy,
+             IdentityContext, MemoryPool, TierRegistry};
 
-#[tokio::main]
-async fn main() -> Result<(), thesix::CacheError> {
-    // Six tiers, dumb by design: policy + Cachelito decide everything.
-    let tiers: Vec<Arc<dyn CacheTier<String>>> = vec![
-        Arc::new(L0Stub::new()),
-        Arc::new(L1Stub::new()),
-        Arc::new(L2Stub::new()),
-        Arc::new(L3Stub::new()),
-        Arc::new(L4Stub::new()),
-        Arc::new(L5Stub::new()),
-    ];
-    let manager: CacheManager<String, String, DefaultPolicy> = CacheManager::new(
-        DefaultPolicy,
-        Cachelito::new(),
-        TierRegistry::new(),
-        tiers,
-        MemoryPool::new(1024).expect("pool allocation failed"),
-    );
+# async fn example() {
+let tiers: Vec<Arc<dyn CacheTier<String>>> = vec![
+    Arc::new(thesix::L0Stub::<String>::new()),
+    Arc::new(thesix::L1Stub::<String>::new()),
+    Arc::new(thesix::L2Stub::<String>::new()),
+    Arc::new(thesix::L3Stub::<String>::new()),
+    Arc::new(thesix::L4Stub::<String>::new()),
+    Arc::new(thesix::L5Stub::<String>::new()),
+];
+let pool = MemoryPool::<String>::new(1024)?;
 
-    // One request context per call site: identity + optional TTL.
-    let ctx = CacheContext::new(IdentityContext::new(
-        "alice".to_string(),
-        vec!["reader".to_string()],
-        "tenant-1".to_string(),
-    ))
-    .with_ttl(std::time::Duration::from_secs(60));
+let manager: CacheManager<String, String, DefaultPolicy> = CacheManager::new(
+    DefaultPolicy, Cachelito::new(), TierRegistry::new(), tiers, pool,
+);
 
-    let key = "my-key".to_string();
+// Identity carries the tenant. The tenant is part of the key, so two tenants
+// using the same key never share an entry.
+let ctx = CacheContext::new(IdentityContext::new(
+    "alice".into(), vec!["reader".into()], "tenant-1".into(),
+));
 
-    // Single-flight: 100 concurrent callers → exactly one fetch.
-    let value = manager
-        .get_or_fetch(&key, &ctx, || async { Ok("value".to_string()) })
-        .await?;
-    assert_eq!(value, "value");
-
-    manager.set(&key, "new-value".to_string(), &ctx).await?;
-    assert!(manager.exists(&key, &ctx).await?);
-    manager.invalidate(&key, &ctx).await?;
-    Ok(())
-}
+let key = "order-42".to_string();
+let value = manager
+    .get_or_fetch(&key, &ctx, || async { Ok("payload".to_string()) })
+    .await?;
+# Ok::<(), thesix::CacheError>(())
+# }
 ```
 
-This exact program also lives in `examples/quickstart.rs` (`cargo run --example quickstart`).
+Application code never names a rung. Every operation takes `(key, context)` and
+nothing else.
 
-Batch-analytics patterns live in `examples/polars_etl.rs` (ETL: versioned
-marts, single-flight load under a 20-reader stampede, invalidate on new
-batches) and `examples/polars_elt.rs` (ELT: raw lake with transform-on-read
-and stale-while-revalidate `refresh`). Both need `--all-features` for the
-Polars dev-dependency.
+## What the crate guarantees
 
-## How it works
+| Property | Mechanism |
+|---|---|
+| **Atomicity** | Two-phase commit with a control-plane intent record. `prepare → write → commit`; a crash leaves an intent, never a half-visible value. |
+| **Isolation** | Single-flight population ownership; no control guard is ever held across an `.await`. |
+| **Durability honesty** | `DurabilityClass` is `Volatile`, `Delegated`, or `Verified`. Only a test that drops a store and reads it back may grant `Verified`. |
+| **Integrity** | Every stored value carries a content digest. A damaged record is reported as `Corrupted`, never served. |
+| **Tenant isolation** | The tenant is framed into the key, so a cross-tenant read finds nothing rather than finding a neighbour's value. |
+| **Capability honesty** | `CapabilityFlags` × `OperationalState` × `DurabilityClass`. An unbound rung is reported `Unbound`, not silently replaced by another. |
+| **Bounded control plane** | Every rung-scanning path is bounded by `LAST_CACHE_TIER`, so a fallback can never surface authority data. |
 
-```
-Application
-    │
-    ▼
-CacheManager  ── API / orchestration (authn gate, policy authz, coordination)
-    │
-    ▼
-Policy Engine ── decides tier, operation, population strategy per request
-    │
-    ▼
-Cachelito     ── control plane: entry state, generation, tier, TTL,
-                   population ownership, tier health. Never stores payloads.
-    │
-    ▼
-Six-Tier Data Plane ── stores/retrieves values only
-    ├── L0 request-local
-    ├── L1 hot-local
-    ├── L2 local
-    ├── L3 distributed (stub, or Redis with `redis` feature)
-    ├── L4 persistent  (stub, or sled with `sled` feature)
-    └── L5 origin/fallback (stub, or pluggable fetcher/writer)
+### Atomicity, concretely
+
+```text
+prepare(key, generation, rung)  →  entry is Prepared; reads see a miss
+write to the rung               →  no payload anywhere in the control plane
+commit(token)                   →  Ready, intent cleared, waiters notified
+abort(token)                    →  restores the interrupted state
 ```
 
-**Control plane vs data plane** is the core constraint:
+Recovery resolves an outstanding intent by kind: a **write** aborts (the value is
+reproducible), a **move** completes forward (aborting it would discard an
+already-committed value). Both directions are idempotent, and a move that cannot
+be resolved without the key is *reported* rather than silently skipped.
 
-- `Cachelito` tracks state only. It must never store application payloads.
-- `CacheTier` implementations store values only. They never decide routing.
-- No control guard is ever held across `.await` or I/O — `acquire()` returns
-  a `ControlSnapshot` with an `Arc<Notify>`; waiters sleep on the notify.
-- The control plane is a pre-allocated sharded slot map (fixed capacity, no
-  per-operation allocation after init).
+## Verification
 
-## Identity and authorization
-
-Every operation takes a `&CacheContext` (builder over `IdentityContext` plus
-an optional TTL). Two gates apply:
-
-1. **Authentication** (`CacheManager::check_auth`, pre-policy):
-   unauthenticated callers get `CacheError::Unauthenticated`.
-2. **Authorization** (policy-driven, on all mutating ops — set, invalidate,
-   remove, promote, demote, refresh — plus reads): the policy's
-   `PolicyDecision.authorized` flag gates the call, else
-   `CacheError::Unauthorized`.
-
-`DefaultPolicy` is a permissive baseline; `StrictPolicy` denies anonymous
-writes. Implement `CachePolicy` for custom authz.
-
-## Policy engine
-
-Selection inputs per request: operation, key/entry metadata, live
-`CacheState`, and per-tier health. Precedence ladder (first match wins):
-
-1. explicit policy override → 2. tier health → 3. consistency →
-   4. latency → 5. capacity → 6. default tier
-
-Tier health carries an `availability` signal (0.0–1.0); five consecutive
-failures open the circuit and the registry routes around the tier
-(`TierRegistry::fail` / `recover` are fed by real tier outcomes).
-
-## Single-flight and generations
-
-A miss does not entitle every reader to populate:
-
-```
-MISS
-               │
-        ┌──────┴──────┐
-        │             │
-     ABSENT       IN_FLIGHT
-        │             │
-     become          wait
-      owner            │
-        │              │
-     fetch             │
-        │              │
-     publish ◄─────────┘
-```
-
-- First caller becomes the population **owner**; others **wait** on the
-  snapshot notify (bounded by a 5 s default timeout, configurable via
-  `with_timeout`).
-- Owner fetch is retried in place (max 3 attempts, exponential backoff);
-  terminal errors propagate to waiters; fail-open policies fall back a tier.
-- Every population captures a **generation**; `invalidate`/`remove` bump it
-  and stale publications are rejected. TTL expiry lazily transitions
-  `Ready → Stale` (served stale while revalidating by `refresh`).
-
-## API reference
-
-All ops are `async` and take `(&key, &ctx)` (`get_or_fetch`/`refresh` also
-take a fetch closure returning `Result<V, CacheError>`):
-
-| Method | Effect |
-|--------|--------|
-| `get` | Tier lookup per policy; lazy TTL expiry |
-| `get_or_fetch` | `get`, else single-flight populate |
-| `set` | Policy-routed write (authz-gated) |
-| `invalidate` | Generation bump (stale writes rejected) |
-| `remove` | Generation bump + tier eviction |
-| `exists` | Presence check without fetching |
-| `refresh` | Stale-while-revalidate |
-| `promote` / `demote` | Policy-controlled tier movement |
-
-Errors are the single `Copy` type `CacheError`: miss, tier unavailable,
-policy/auth failures (`Unauthenticated` vs `Unauthorized`), population
-failure, timeout, cancellation, stale generation, serialization,
-configuration.
-
-Admin/test-only surface (kept off the data path): `manager.tier(&TierId)`,
-`manager.cachelito()`, `TestTier::set_healthy(bool)`.
-
-## Testing and quality gates
-
-29 integration tests prove the invariants — including 100-concurrent-requests
-single-flight, owner cancellation, waiter timeout, tier failure/recovery, TTL
-expiry, and strict-policy denial. Benchmarks in `benches/`.
+Every gate is declared in `theSix.toml` and executed from it.
 
 ```bash
-cargo build
-cargo test --all-targets --all-features
-cargo bench
+just                 # the mandatory gates, in contract order
+just gates           # the same, spelled out
+just quick           # fmt + contract + check + the fast layers
+just list            # what runs, and why
+just perf            # percentile and boundedness gates
+just soak            # endurance gates
+just ready           # is this branch mergeable?
+just loom            # exhaustive control-plane interleavings
+just plan            # print every gate's argv without running it
 ```
 
-Every change must pass, in order: `cargo fmt --check` → `cargo check
---all-targets --all-features` → `cargo clippy --all-targets --all-features --
--D warnings` → `cargo test --all-targets --all-features` → `cargo doc
---no-deps` → `cargo package --list` → `cargo publish --dry-run` → `cargo deny
-check` → `cargo machete`. CI enforces all of these plus miri (no-op guard;
-the crate declares `#![forbid(unsafe_code)]`).
+`cargo xtask` is the entry point. It refuses to run a gate the contract does not
+declare, refuses to start if a declared gate has no execution strategy, and
+refuses to report success for a gate whose tooling is missing — it exits `3` for
+"could not verify" rather than `0` for "verified".
 
-## Design notes
+### Test layers
 
-- theSix is synonymous with the **six-tier orchestration model**, not with
-  any particular backend stack — L3 could be Redis today and something else
-  tomorrow without touching application code.
-- Non-goals (by design): distributed consensus, general persistence,
-  application business logic, global cache coherence.
-- Pre-1.0 the public API may still evolve (0.1 → 0.2 introduced
-  `CacheContext`); pin exact versions and read `CHANGELOG.md`.
+| Layer | Target | What it demonstrates |
+|---|---|---|
+| contract | `tests/contract` | The TOML is load-bearing: version, rung count, registries, layer bindings. |
+| unit | `integration`, `hierarchy`, `policy`, `stampede` | Round-trips, TTL, generation rejection, single-flight, authz. |
+| negative | `negative` | All 19 required failure modes, each verified by its resulting state. |
+| fault_injection | `fault_injection` | All 11 faults, each proven to have fired via its ledger. |
+| property | `property` | The 9 named invariants over randomised operation sequences. |
+| concurrency | `concurrency`, `await_safety`, `sharding`, `loom` | Adversarial races with forced interleavings. |
+| capability | `capability`, `l6_authority` | No rung claims a backend, authority, or durability it lacks. |
+| recovery | `recovery` | The full lifecycle; idempotent, repeatable recovery. |
+| durability | `durability` | Drop-and-reopen; only proven claims are `Verified`. |
+| security | `security` | Cross-tenant/key access refused; no payload in errors or telemetry. |
+| performance | `performance` | Percentiles, shard independence, bounded control plane. |
+| soak | `soak` | Slot-table pressure, tenant isolation at volume, recovery scaling. |
+| backends | `backends`, `oxigraph_backend` | Real backends behind feature gates. |
+
+### Anti-vacuity
+
+A test that cannot prove its own fault fired is decoration. Three mechanisms
+enforce this:
+
+1. **`FaultLedger`** counts every fault activation. Every negative and
+   fault-injection test asserts its fault actually fired.
+2. **Registries** in `testkit::coverage` are compared for *equality* against the
+   contract's lists, so a required case cannot be dropped from the suite without
+   the contract gate failing.
+3. **Capability assertions** check a claim against something observable. A rung
+   reporting `Healthy` must store; a rung reporting `Persistent` must survive a
+   restart; a rung reporting `authoritative` must be the configured authority rung.
+
+### Build accelerations
+
+`.cargo/config.toml` uses sccache; the gate runner additionally selects
+`clang` + `mold` when both are installed, and `cargo xtask toolchain` reports what
+it found. The crate itself has no build-script requirement and no `unsafe`.
+
+## Backends
+
+| Rung | Role | In-memory default | Real backend |
+|---|---|---|---|
+| L0 | request-local | yes | — |
+| L1 | hot-local | yes | — |
+| L2 | local | yes | — |
+| L3 | distributed | fallback | `redis` (feature) |
+| L4 | persistent | fallback | `sled` (feature) |
+| L5 | origin / graph | fallback | `oxigraph` (feature) |
+| L6 | **authority** | unbound | application-defined |
+
+The L3–L5 defaults store values so the ladder works out of the box, and report
+`BackendKind::InMemoryFallback` — they claim neither `SHARED` nor `PERSISTENT`,
+because they are process-local and saying otherwise would be a durability lie.
+`CacheManager::capabilities()` tells you what every rung is *actually* bound to.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT.

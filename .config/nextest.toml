@@ -1,0 +1,35 @@
+# nextest configuration.
+#
+# Rationale for the non-default bits:
+#
+#  * `test-threads = 4` on an 8-core box. Each test binary is its own process
+#    and the `--all-features` matrix includes polars, oxigraph and sled, several
+#    of which touch a lot of memory at startup. Letting nextest use all 8 cores
+#    reliably OOM-kills a process mid-suite, and an OOM kill looks exactly like a
+#    test failure, so the signal-to-noise ratio is worse than the ~2x slowdown.
+#
+#  * `retries = 0` deliberately. A retry that turns a flaky failure green is the
+#    same vacuous pass the contract forbids, just slower to notice.
+#
+#  * `slow-timeout` catches a wedged test rather than letting a gate run to the
+#    harness's own conclusion.
+#
+#  * `failure-output = "final"` prints each failing test's captured output once,
+#    at the end, instead of interleaving it with progress.
+
+[profile.default]
+test-threads = 4
+retries = 0
+status-level = "fail"
+final-status-level = "fail"
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+[profile.ci]
+test-threads = 4
+retries = 0
+failure-output = "final"
+slow-timeout = { period = "120s", terminate-after = 2 }
+
+[profile.quick]
+test-threads = 8
+retries = 0

@@ -87,6 +87,21 @@ impl<V: ByteValue> CacheTier<V> for L3RedisBackend<V> {
         BackendKind::Redis
     }
 
+    fn capability(&self) -> crate::capability::TierCapability {
+        // The redis crate's client is synchronous and holds a connection mutex
+        // across a blocking round trip. Saying so is what lets a consumer decide
+        // whether to await this from a runtime worker; the alternative is
+        // discovering it as unexplained latency.
+        crate::capability::TierCapability::new(
+            BackendKind::Redis,
+            crate::capability::CapabilityFlags::SHARED
+                | crate::capability::CapabilityFlags::BLOCKING_IO
+                | crate::capability::CapabilityFlags::ATOMIC_WRITE_OR_ERROR,
+            crate::capability::OperationalState::Healthy,
+            crate::capability::DurabilityClass::Delegated,
+        )
+    }
+
     async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
         let mut conn = self
             .conn

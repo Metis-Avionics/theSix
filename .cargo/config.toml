@@ -1,0 +1,35 @@
+# Build configuration for theSix.
+#
+# sccache is used as the rustc wrapper. The verification matrix builds the crate
+# under many overlapping feature combinations (default, --all-features, and each
+# backend feature on its own), so identical compilation units are produced
+# repeatedly. sccache deduplicates them across those runs and across clean
+# checkouts. To bypass locally while iterating on a hot file, where a cache hit
+# only adds overhead:
+#
+#     SCCACHE_RECACHE=none cargo check
+#
+# Note that this bypasses the *cache*, not the *binary*. Because
+# `rustc-wrapper` is set here rather than per-invocation, sccache must exist for
+# any cargo command to run at all — a checkout without it fails with
+# "could not execute process `sccache ...rustc -vV`" before compiling anything.
+# That is why CI installs it explicitly (`mozilla-actions/sccache-action`) rather
+# than relying on the runner image, and why the override for a machine without
+# sccache is a config override rather than an environment variable:
+#
+#     cargo --config 'build.rustc-wrapper=""' check
+[build]
+rustc-wrapper = "sccache"
+incremental = true
+
+# `cargo xtask <args>` is the single entry point for the gate runner.
+[alias]
+xtask = "run --quiet --package xtask --"
+
+[env]
+# Bound the cache so a long soak/property matrix cannot fill the disk.
+SCCACHE_CACHE_SIZE = "20G"
+SCCACHE_LOG = "warn"
+
+# The crate denies warnings at the crate root and CI runs clippy with
+# `-D warnings`, so warnings are already hard failures. Nothing to add here.

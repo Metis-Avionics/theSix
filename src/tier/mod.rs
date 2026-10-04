@@ -25,7 +25,7 @@ impl TierId {
         TierId::L6,
     ];
 
-    pub fn as_usize(&self) -> usize {
+    pub const fn as_usize(&self) -> usize {
         match self {
             TierId::L0 => 0,
             TierId::L1 => 1,
@@ -37,7 +37,7 @@ impl TierId {
         }
     }
 
-    pub fn from_usize(idx: usize) -> Option<Self> {
+    pub const fn from_usize(idx: usize) -> Option<Self> {
         match idx {
             0 => Some(TierId::L0),
             1 => Some(TierId::L1),
@@ -48,6 +48,60 @@ impl TierId {
             6 => Some(TierId::L6),
             _ => None,
         }
+    }
+
+    /// Whether this rung participates in the cache ladder.
+    ///
+    /// The authority rung is not a rung. Policy selection, promotion, demotion
+    /// and the fail-open fallback all ask this rather than comparing against a
+    /// literal, so adding a rung above the authority cannot silently widen any
+    /// scan.
+    #[must_use]
+    pub const fn is_cache_rung(self) -> bool {
+        self.as_usize() <= LAST_CACHE_RUNG_INDEX
+    }
+
+    /// Whether this rung is the configured authority.
+    ///
+    /// Reads the same constant the contract's `[authority.l6]` names. Authority
+    /// is a configured role, not something inferred from a tier's position — the
+    /// distinction matters because the previous code compared against
+    /// `TierId::L6` in three places by two different mechanisms, one of which
+    /// indexed the caller's tier vector and so misfired on a reordered vec.
+    #[must_use]
+    pub const fn is_authority_rung(self) -> bool {
+        self.as_usize() == AUTHORITY_RUNG_INDEX
+    }
+
+    /// The discriminant, for storage in a fixed-size record.
+    ///
+    /// The control plane stores rung ids as `u8` so a commit intent stays
+    /// allocation-free and `Copy`; that is only safe if the mapping is total.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self.as_usize() as u8
+    }
+
+    /// Inverse of [`Self::as_u8`]. Returns `None` for a byte that is not a rung.
+    #[must_use]
+    pub const fn from_index(index: u8) -> Option<Self> {
+        if (index as usize) < 7 {
+            Self::from_usize(index as usize)
+        } else {
+            None
+        }
+    }
+
+    /// Parse the `"L3"` spelling used by `TierId::Display` and by the contract.
+    ///
+    /// Exists so the contract's `last_cache_rung = "L5"` can be checked against
+    /// the code's `LAST_CACHE_TIER` rather than being a second, unverified
+    /// spelling of the same bound.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        let rest = s.strip_prefix('L')?;
+        let idx: usize = rest.parse().ok()?;
+        Self::from_usize(idx)
     }
 }
 
@@ -64,6 +118,13 @@ impl std::fmt::Display for TierId {
         }
     }
 }
+
+/// Index of the last rung in the cache ladder. Mirrors
+/// [`crate::policy::LAST_CACHE_TIER`]; the contract gate asserts the two agree.
+pub const LAST_CACHE_RUNG_INDEX: usize = 5;
+
+/// Index of the authority rung.
+pub const AUTHORITY_RUNG_INDEX: usize = 6;
 
 #[derive(Debug)]
 pub struct TierRegistry {

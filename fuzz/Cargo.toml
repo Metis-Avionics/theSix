@@ -1,0 +1,92 @@
+# Coverage-guided fuzzing for theSix.
+#
+# Excluded from the workspace on purpose:
+#
+#  * cargo-fuzz requires nightly and builds against a libFuzzer runtime, so it
+#    cannot run under the crate's MSRV of 1.98 or under any of the §16 gates.
+#  * Its dependencies (libfuzzer-sys, arbitrary) must not appear in the published
+#    manifest, so it is not a workspace member and is listed in `exclude`.
+#  * `cargo machete` and `cargo deny` look at the workspace; an excluded crate
+#    keeps its dependency graph out of both, which is the right outcome for a
+#    dev-only harness.
+#
+# The same trust boundaries are covered under 1.98 by the proptest byte
+# strategies in `tests/negative` and `tests/property`, so fuzzing is depth rather
+# than the only coverage. CI runs it as an advisory job.
+
+[package]
+name = "thesix-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+thesix = { path = ".." }
+testkit = { path = "../testkit" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+
+# Keep the corpus out of the published package and out of git's default ignores
+# confusion.
+[[bin]]
+name = "keys"
+path = "fuzz_targets/keys.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "payloads"
+path = "fuzz_targets/payloads.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "metadata"
+path = "fuzz_targets/metadata.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "backend_responses"
+path = "fuzz_targets/backend_responses.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "capabilities"
+path = "fuzz_targets/capabilities.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "generation_metadata"
+path = "fuzz_targets/generation_metadata.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "routing"
+path = "fuzz_targets/routing.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "configuration"
+path = "fuzz_targets/configuration.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "serialized_payloads"
+path = "fuzz_targets/serialized_payloads.rs"
+test = false
+doc = false
+
+[profile.release]
+debug = 1

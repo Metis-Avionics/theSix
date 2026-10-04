@@ -32,10 +32,18 @@ async fn test_tier_traversal() {
     let result = manager.get(&key, &test_ctx()).await.unwrap();
     assert_eq!(result, Some("tier-value".to_string()));
 
+    // Address the control plane the way the manager does, tenant included:
+    // reading it with a bare application key silently finds nothing, and the
+    // assertion below would then be asserting against an empty entry.
+    let ctx = test_ctx();
     let snapshot = manager
         .cachelito()
-        .acquire(b"tier-key", TierId::L0)
-        .unwrap();
+        .peek(&testkit::framed_key(&ctx, "tier-key"))
+        .expect("peek");
     assert_eq!(snapshot.state, EntryState::Ready);
-    assert!(matches!(snapshot.tier, TierId::L1));
+    assert!(
+        matches!(snapshot.tier, TierId::L1),
+        "the entry landed on {} rather than L1",
+        snapshot.tier
+    );
 }

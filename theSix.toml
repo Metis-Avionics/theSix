@@ -1,0 +1,979 @@
+# theSix — architectural contract.
+#
+# This file is the SOURCE OF TRUTH for the architecture. README.md, AGENTS.md,
+# CHANGELOG.md and code comments derive from it; none of them may restate a
+# requirement in a form that can disagree with it.
+#
+# It is machine-checked, not merely read:
+#   * `cargo xtask contract` validates structure and gate completeness.
+#   * `tests/contract` parses it and asserts each clause is bound to a real test.
+#   * `tests/contract` asserts the version matches CARGO_PKG_VERSION and the rung
+#     count matches `TierId::ALL`, which is how the previous `tier_count = 6` vs
+#     `count = 7` drift was allowed to ship.
+#
+# Anything not expressible here does not belong in the architecture.
+
+[spec]
+name = "theSix"
+version = "0.4.0"
+kind = "hpa-data-continuity-pipeline"
+status = "architectural-revision"
+
+[spec.purpose]
+description = "High-performance availability data continuity and performance pipeline across heterogeneous storage and locality boundaries."
+
+[architecture]
+ontology = "continuity"
+tier_topology = "implementation"
+consumer_backend_coupling = false
+authority_is_explicit = true
+capability_state_is_explicit = true
+# Machine-checked against `TierId::ALL.len()`. The previous `specs/` set carried
+# `tier_count = 6` and `count = 7` in two files at once and shipped; a single
+# asserted number cannot rot that way.
+rung_count = 7
+# Rungs that participate in the cache ladder. Everything at or above this is
+# excluded from policy selection, promotion, demotion and fail-open fallback.
+last_cache_rung = 5
+
+[architecture.boundary]
+consumer_depends_on = "continuity-contract"
+continuity_contract_depends_on = "policy-and-capability"
+policy_depends_on = "storage-topology"
+consumer_knows_backend_identity = false
+
+# ---------------------------------------------------------------------------
+# ACID
+# ---------------------------------------------------------------------------
+
+[acid]
+required = true
+
+[acid.atomicity]
+required = true
+partial_commit_visible = false
+cancelled_operation_may_commit_partially = false
+recovery_must_be_idempotent = true
+# Two-phase commit via a control-plane intent record. The intent holds the key
+# hash, target rung, generation and operation kind -- never a payload -- so the
+# control plane stays payload-free (cachelito.toml invariant).
+commit_protocol = "two-phase-intent"
+prepare_state = "prepared"
+read_of_uncommitted_entry = "miss"
+recovery_direction_prepare_write = "abort"
+
+# A move is NOT completed forward by recovery. This used to say
+# "complete-forward", which described the correct direction for a move and a
+# direction this crate cannot execute: finishing one means reading the source rung
+# and writing the destination, and the control plane persists only a hash of the
+# key. Aborting is not the safe fallback either -- the move removes the source
+# before it commits, so a crash in that window leaves the value only at the
+# destination, and aborting would point the control plane at an empty source.
+#
+# So the sweep reports the intent as needing an external reconciler and leaves it
+# exactly as it is. `RecoveryReport` counts those separately from `failed`,
+# because "the sweep could not do this" and "the sweep lacks the information to
+# do this" need different responses from a caller.
+#
+# Closing this properly means persisting enough identity to reconstruct the move,
+# or adding a reconciliation pass that can reach the authority rung. Neither is in
+# the tree; see bugs.toml B3.
+recovery_direction_prepare_move = "external-reconciliation"
+
+[acid.consistency]
+required = true
+invalid_state_may_be_promoted = false
+corruption_may_be_silently_accepted = false
+authority_inversion = false
+stale_generation_may_overwrite_newer_generation = false
+
+[acid.isolation]
+required = true
+intermediate_state_visibility = false
+cross_key_interference = false
+lock_guard_across_await = false
+deadlock_tolerance = false
+
+[acid.durability]
+required = true
+false_durability_claims = false
+fallback_may_claim_authority_durability = false
+committed_data_must_survive_required_failure_domain = true
+# A rung may only report `Verified` if a test drops the store and reopens it.
+# `Delegated` means the backend's own defaults are trusted without a proof.
+durability_classes = ["volatile", "delegated", "verified"]
+
+# ---------------------------------------------------------------------------
+# CIA
+# ---------------------------------------------------------------------------
+
+[cia]
+required = true
+
+[cia.confidentiality]
+required = true
+cross_tenant_access = false
+cross_key_data_exposure = false
+payload_in_error_messages = false
+payload_in_telemetry = false
+unintended_tier_exposure = false
+# Keys are as sensitive as payloads: telemetry identifies a key by a
+# non-reversible digest plus its length, never by its bytes.
+key_identity_is_non_reversible = true
+
+[cia.integrity]
+required = true
+silent_corruption = false
+silent_generation_conflict = false
+silent_stale_data_acceptance = false
+corrupt_data_promoted = false
+# FNV-1a over the entry bytes, framed as len|digest|payload. This detects
+# accidental corruption and truncation. It is explicitly NOT cryptographic and
+# makes no tamper-resistance claim: a 64-bit non-keyed digest is trivially
+# forged by an adversary who can write to the store.
+digest = "fnv1a-64"
+digest_is_cryptographic = false
+
+[cia.availability]
+required = true
+single_tier_failure_must_cascade = false
+control_plane_blocked_by_data_plane = false
+unbounded_retry = false
+unbounded_queue_growth = false
+recovery_required = true
+
+# ---------------------------------------------------------------------------
+# HPA
+# ---------------------------------------------------------------------------
+
+[hpa]
+required = true
+
+[hpa.performance]
+measure = [
+    "throughput",
+    "p50_latency",
+    "p95_latency",
+    "p99_latency",
+    "p99_9_latency",
+    "max_latency",
+    "contention",
+    "allocation_rate",
+    "fallback_rate",
+    "recovery_latency",
+]
+
+[hpa.isolation]
+hot_key_may_block_unrelated_keys = false
+hot_shard_may_block_entire_pipeline = false
+slow_backend_may_block_control_plane = false
+
+[hpa.control_plane]
+must_remain_responsive_during_data_plane_stall = true
+global_data_plane_lock = false
+
+# ---------------------------------------------------------------------------
+# CONTINUITY
+# ---------------------------------------------------------------------------
+
+[continuity]
+required = true
+backend_failure_isolation = true
+graceful_degradation = true
+reconciliation = true
+explicit_state_transitions = true
+
+[continuity.states]
+allowed = [
+    "healthy",
+    "degraded",
+    "unavailable",
+    "recovering",
+    "reconciling",
+]
+
+[continuity.recovery]
+idempotent = true
+repeatable = true
+partial_recovery_safe = true
+recovery_failure_must_be_observable = true
+
+# ---------------------------------------------------------------------------
+# AUTHORITY
+# ---------------------------------------------------------------------------
+
+[authority]
+explicit = true
+inferred_from_tier_number = false
+fallback_may_be_authoritative = false
+authority_loss_must_be_observable = true
+
+[authority.l6]
+role = "authority"
+implementation = "policy-defined"
+durability_required = true
+# The ladder bound. Every rung-scanning path -- policy selection, promotion,
+# demotion, and the fail-open fallback scan -- is bounded by this, so a
+# fallback rung can never surface authority data or be handed authority.
+last_cache_rung = "L5"
+
+# ---------------------------------------------------------------------------
+# CAPABILITIES
+# ---------------------------------------------------------------------------
+
+[capabilities]
+required = true
+operation_failure_must_not_be_primary_discovery_mechanism = true
+# An unbound rung and an unavailable rung are different facts. `tier_for` must
+# not silently substitute another rung for an unbound one.
+unbound_rung_is_substituted = false
+
+[capabilities.states]
+allowed = [
+    "unbound",
+    "unavailable",
+    "volatile",
+    "persistent",
+    "authoritative",
+    "shared",
+    "degraded",
+    "recovering",
+    "in_memory",
+]
+
+# Two orthogonal axes, because these are not mutually exclusive: a rung can be
+# persistent AND shared AND degraded. A single enum cannot say that.
+[capabilities.model]
+property_axis = "CapabilityFlags"
+state_axis = "OperationalState"
+durability_axis = "DurabilityClass"
+
+[capabilities.must_distinguish]
+unbound_from_unavailable = true
+volatile_from_persistent = true
+fallback_from_authority = true
+degraded_from_healthy = true
+recovering_from_available = true
+
+# ---------------------------------------------------------------------------
+# CONCURRENCY
+# ---------------------------------------------------------------------------
+
+[concurrency]
+required = true
+race_free = true
+deadlock_free = true
+cancel_safe = true
+lock_guard_across_await = false
+blocking_runtime_thread = false
+nested_block_on = false
+
+[concurrency.testing]
+adversarial_scheduler = true
+random_interleavings = true
+concurrent_reads = true
+concurrent_writes = true
+read_write_races = true
+promotion_eviction_races = true
+recovery_traffic_overlap = true
+cancellation_races = true
+# loom models the control-plane state machine behind the `loom-tests` feature.
+# It deliberately does NOT model tokio's Notify: loom cannot schedule tokio
+# primitives, so the lost-wakeup race is covered by a deterministic forced
+# interleaving instead. Claiming loom covers it would be a false gate.
+loom_scope = "control-plane-state-machine"
+loom_excludes = ["notify-waiters", "tokio-select"]
+
+# ---------------------------------------------------------------------------
+# NEGATIVE TESTING
+# ---------------------------------------------------------------------------
+
+[testing]
+required = true
+
+[testing.layers]
+# Layer -> cargo test target. Existing flat targets are mapped rather than
+# moved: reorganising working tests to satisfy a directory layout would be
+# churn, and the contract is about which properties are demonstrated, not where
+# the file lives.
+integration = ["integration", "hierarchy", "policy", "stampede"]
+concurrency = ["concurrency", "await_safety", "sharding", "loom"]
+capability = ["capability", "l6_authority"]
+negative = ["negative"]
+property = ["property"]
+fault_injection = ["fault_injection"]
+recovery = ["recovery"]
+durability = ["durability"]
+security = ["security"]
+performance = ["performance"]
+soak = ["soak"]
+contract = ["contract"]
+backends = ["backends", "oxigraph_backend"]
+
+[testing.negative]
+required = true
+
+cases = [
+    "backend_unavailable",
+    "backend_timeout",
+    "backend_hang",
+    "malformed_response",
+    "malformed_payload",
+    "corrupt_payload",
+    "invalid_metadata",
+    "capacity_exhaustion",
+    "cancelled_operation",
+    "duplicate_operation",
+    "stale_generation",
+    "generation_conflict",
+    "partial_write",
+    "partial_promotion",
+    "authority_unavailable",
+    "fallback_unavailable",
+    "recovery_failure",
+    "process_restart",
+    "invalid_configuration",
+]
+
+[testing.negative.requirements]
+fault_must_actually_occur = true
+post_failure_state_must_be_verified = true
+silent_failure = false
+
+# ---------------------------------------------------------------------------
+# PROPERTY TESTING
+# ---------------------------------------------------------------------------
+
+[testing.property]
+required = true
+randomized_operations = true
+randomized_keys = true
+randomized_values = true
+randomized_failures = true
+randomized_concurrency = true
+shrinking = true
+
+[testing.property.invariants]
+no_silent_data_loss = true
+no_cross_key_corruption = true
+no_authority_inversion = true
+no_invalid_state_promotion = true
+no_deadlock = true
+no_lock_across_await = true
+no_capability_misreporting = true
+no_false_durability = true
+recovery_is_idempotent = true
+
+# ---------------------------------------------------------------------------
+# FUZZING
+# ---------------------------------------------------------------------------
+
+[testing.fuzz]
+required = true
+panic_free = true
+memory_safe = true
+silent_corruption = false
+# cargo-fuzz needs nightly and a libFuzzer build, so it lives in an excluded
+# crate and cannot run under MSRV 1.98. The same trust boundaries are covered in
+# CI by the `proptest` byte strategies in `tests/negative`, which DO run under
+# 1.98. Fuzzing is depth, not the only coverage.
+requires_nightly = true
+runs_under_msrv_gates = false
+
+targets = [
+    "keys",
+    "payloads",
+    "serialized_payloads",
+    "metadata",
+    "backend_responses",
+    "capabilities",
+    "generation_metadata",
+    "routing",
+    "configuration",
+]
+
+# ---------------------------------------------------------------------------
+# FAULT INJECTION
+# ---------------------------------------------------------------------------
+
+[testing.fault_injection]
+required = true
+deterministic = true
+seedable = true
+reproducible = true
+
+faults = [
+    "latency",
+    "timeout",
+    "hang",
+    "read_failure",
+    "write_failure",
+    "metadata_failure",
+    "corruption",
+    "disconnect",
+    "capacity_exhaustion",
+    "failure_after_n_operations",
+    "cancellation",
+    "partial_write",
+]
+
+# ---------------------------------------------------------------------------
+# RECOVERY
+# ---------------------------------------------------------------------------
+
+[testing.recovery]
+required = true
+
+states = [
+    "healthy",
+    "degraded",
+    "failure",
+    "fallback",
+    "recovery",
+    "reconciliation",
+    "healthy",
+]
+
+requirements = [
+    "no_lost_committed_data",
+    "no_duplicate_logical_state",
+    "no_authority_inversion",
+    "stale_data_detectable",
+    "recovery_idempotent",
+    "recovery_failure_safe",
+    "process_restart_safe",
+]
+
+# ---------------------------------------------------------------------------
+# DURABILITY
+# ---------------------------------------------------------------------------
+
+[testing.durability]
+required = true
+
+events = [
+    "process_termination",
+    "backend_restart",
+    "authority_loss",
+    "authority_restoration",
+    "persistence_failure",
+    "incomplete_operation",
+]
+
+false_durability_claims = false
+
+# ---------------------------------------------------------------------------
+# SECURITY
+# ---------------------------------------------------------------------------
+
+[testing.security]
+required = true
+
+requirements = [
+    "tenant_isolation",
+    "key_space_isolation",
+    "payload_not_leaked_to_errors",
+    "payload_not_leaked_to_telemetry",
+    "corruption_detection",
+    "generation_conflict_detection",
+    "stale_data_detection",
+]
+
+# ---------------------------------------------------------------------------
+# OBSERVABILITY
+# ---------------------------------------------------------------------------
+
+[observability]
+required = true
+structured = true
+sensitive_payloads_excluded = true
+
+[observability.operation]
+fields = [
+    "operation",
+    "key_identity",
+    "source_tier",
+    "destination_tier",
+    "backend",
+    "generation",
+    "latency",
+    "outcome",
+    "fallback",
+    "failure_class",
+    "recovery_state",
+]
+
+# ---------------------------------------------------------------------------
+# VERIFICATION
+# ---------------------------------------------------------------------------
+
+[verification]
+verification_required = true
+anti_vacuity_required = true
+
+# Merge readiness. The expected counts live here, not in bugs.toml, so that a
+# finding cannot be removed — or its severity quietly downgraded — without editing
+# the contract. `cargo xtask run merge_readiness` fails while any blocking finding
+# is open.
+[verification.merge_readiness]
+tracker = "bugs.toml"
+# These counts are the contract's authority on how many findings should exist, and
+# they are what stops a finding being deleted to make a gate pass. Adding a
+# finding therefore requires editing this file, which is the intended friction:
+# theSix.toml holds 9 merge-blocking (all cleared) and 12 should-fix findings, of
+# which B15-B21 are open remaining work. B21 is the one to act on first: main's
+# required_status_checks rule is currently DISABLED and must be re-enabled once 0.4.0
+# lands. See AGENTS.md.
+#
+# Deliberately not tracked here: whether an open finding blocks. The gate splits on
+# each entry's `blocks_merge`, so B15-B20 are counted by the check below and do not
+# fail it. Promoting one to blocking is how that decision gets made.
+expected_blocking = 9
+expected_should_fix = 12
+
+# Commit authorship. `cargo xtask run authorship` reads every commit message in
+# the repository's history and fails on a banned trailer.
+#
+# The banned entries are git trailer *keys*, not attributions. Nothing here names
+# a person, a product or an addressee, and that is deliberate: a gate that
+# grepped for one specific attribution would have to contain that attribution, so
+# the rule would reproduce in the source the thing it exists to keep out. The
+# policy is the key, the offending value is reported only as a commit id.
+#
+# Matching is on the normalised key — lowercased, with `-`, `_` and spaces
+# removed — so `Co-Authored-By`, `co-authored-by` and `CoAuthoredBy` are one rule
+# rather than three spellings to keep in sync. Adding a human co-author is not a
+# matter of editing this list; it is not possible, by design.
+[verification.attribution]
+forbidden_trailers = ["Co-Authored-By", "Co-Author-by"]
+
+[verification.required]
+fmt = true
+check_all_targets = true
+check_all_features = true
+tests_all_targets = true
+tests_all_features = true
+doctests = true
+clippy_warnings_as_errors = true
+documentation = true
+dependency_audit = true
+dependency_hygiene = true
+package_validation = true
+
+[verification.adversarial]
+negative = true
+property = true
+fuzz = true
+concurrency = true
+fault_injection = true
+recovery = true
+durability = true
+security = true
+performance = true
+soak = true
+
+[verification.anti_vacuity]
+fault_activation_must_be_verified = true
+blocked_state_must_be_verified = true
+corruption_must_be_verified = true
+recovery_path_must_be_verified = true
+fallback_path_must_be_verified = true
+
+# ---------------------------------------------------------------------------
+# VERIFICATION GATES
+#
+# The gate list is data, not prose: `cargo xtask gates` executes exactly this,
+# in this order, and refuses to run if a gate here has no execution strategy or
+# a strategy has no gate here. That two-way check is how the contract and the
+# runner are kept from drifting apart.
+#
+# kind:
+#   tool    -- external command (fmt, clippy, deny, ...)
+#   cargo   -- cargo check/clippy/doc invocation
+#   test    -- nextest run over `targets`
+#   doctest -- cargo test --doc
+#   slow    -- #[ignore]d tests, excluded from the default pass
+#   nightly -- requires a nightly toolchain, excluded from the default pass
+#   tracker -- run by the runner itself; reads bugs.toml and decides from it
+#   authorship -- run by the runner itself; reads commit history
+# ---------------------------------------------------------------------------
+
+[verification.gate_order]
+order = [
+    "fmt",
+    "contract",
+    "authorship",
+    "xtask_unit",
+    "check",
+    "clippy",
+    "doc",
+    "unit",
+    "negative",
+    "fault_injection",
+    "property",
+    "concurrency",
+    "loom",
+    "capability",
+    "recovery",
+    "durability",
+    "security",
+    "backends",
+    "doctest",
+    "deny",
+    "machete",
+    "package",
+    "performance",
+    "soak",
+    "fuzz",
+    "merge_readiness",
+]
+
+[[verification.gate]]
+name = "fmt"
+kind = "tool"
+command = ["cargo", "fmt", "--check"]
+description = "Formatting is not negotiable; it is the cheapest gate and the one most often skipped."
+
+[[verification.gate]]
+name = "contract"
+kind = "test"
+targets = ["contract"]
+features = ["--all-features"]
+description = "Parses this file and asserts every clause is bound to a real test target."
+
+# Runs third, ahead of every compile and test gate. It costs one `git log`, and
+# it judges the change under review rather than the branch, so a violation should
+# surface in the first second rather than after the test matrix.
+[[verification.gate]]
+name = "authorship"
+kind = "authorship"
+description = "No commit in this repository's history carries a co-authorship trailer. The banned keys are declared in [verification.attribution]; the rule is on the key, so no attribution is written into this file to check for one. Reports `Unavailable`, never `Passed`, when the history cannot be read — a shallow clone would otherwise make this gate a pass over one commit."
+
+[[verification.gate]]
+name = "xtask_unit"
+kind = "cargo"
+args = ["test", "-p", "xtask", "--all-features"]
+description = "Unit tests for the gate runner itself. The runner decides what passes, so its own logic — tool probing, argv construction, and the merge-readiness check — is under test rather than trusted."
+
+[[verification.gate]]
+name = "check"
+kind = "cargo"
+args = ["check", "--workspace", "--all-targets", "--all-features"]
+description = "Compiles every target of every workspace member under every feature. `--workspace` because the gate runner and the test harness are separate crates: without it they are never compiled by this gate at all."
+
+[[verification.gate]]
+name = "clippy"
+kind = "cargo"
+args = ["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
+description = "Warnings are errors, across every workspace member. Without `--workspace` this linted only the root crate, which is how four warnings accumulated in the gate runner itself with no gate noticing."
+
+[[verification.gate]]
+name = "doc"
+kind = "cargo"
+args = ["doc", "--no-deps", "--all-features"]
+description = "Documentation must build; a broken intra-doc link is a broken promise to a consumer."
+
+[[verification.gate]]
+name = "unit"
+kind = "test"
+targets = ["integration", "hierarchy", "policy", "stampede"]
+features = ["--all-features"]
+description = "Core continuity behaviour: round-trips, TTL, generation rejection, single-flight, policy."
+
+[[verification.gate]]
+name = "negative"
+kind = "test"
+targets = ["negative"]
+features = ["--all-features"]
+description = "Every [testing.negative.cases] entry; each asserts post-failure state, not just an error."
+
+[[verification.gate]]
+name = "fault_injection"
+kind = "test"
+targets = ["fault_injection"]
+features = ["--all-features"]
+description = "All eleven faults fire at least once, proven by activation counters."
+
+[[verification.gate]]
+name = "property"
+kind = "test"
+targets = ["property"]
+features = ["--all-features"]
+description = "The nine [testing.property.invariants] over randomised operation sequences."
+
+[[verification.gate]]
+name = "concurrency"
+kind = "test"
+targets = ["concurrency", "await_safety", "sharding"]
+features = ["--all-features"]
+description = "Adversarial races with forced interleavings; asserts the data plane really was stalled."
+
+[[verification.gate]]
+name = "loom"
+kind = "test"
+targets = ["loom"]
+features = ["--features", "loom-tests"]
+env = { THESIX_LOOM = "1" }
+description = "Exhaustive interleavings of the control-plane state machine. Excludes tokio Notify."
+
+[[verification.gate]]
+name = "capability"
+kind = "test"
+targets = ["capability", "l6_authority"]
+features = ["--all-features"]
+description = "Capability honesty: no rung may claim a backend or authority it does not have."
+
+[[verification.gate]]
+name = "recovery"
+kind = "test"
+targets = ["recovery"]
+features = ["--all-features"]
+description = "Full continuity lifecycle with idempotent, repeatable recovery."
+
+[[verification.gate]]
+name = "durability"
+kind = "test"
+targets = ["durability"]
+features = ["--all-features"]
+description = "Drop-and-reopen plus authority loss/restore. Only a proven rung reports `Verified`."
+
+[[verification.gate]]
+name = "security"
+kind = "test"
+targets = ["security"]
+features = ["--all-features"]
+description = "Negative cross-tenant and cross-key access; no payload in errors or telemetry."
+
+[[verification.gate]]
+name = "backends"
+kind = "test"
+targets = ["backends", "oxigraph_backend"]
+features = ["--all-features"]
+description = "Real backends behind feature gates."
+
+[[verification.gate]]
+name = "doctest"
+kind = "doctest"
+description = "Documentation examples must compile and run."
+
+[[verification.gate]]
+name = "deny"
+kind = "tool"
+command = ["cargo", "deny", "check"]
+description = "Advisory and licence audit."
+
+[[verification.gate]]
+name = "machete"
+kind = "tool"
+command = ["cargo", "machete"]
+description = "Unused dependency detection."
+
+[[verification.gate]]
+name = "package"
+kind = "tool"
+command = ["cargo", "package", "--allow-dirty", "--no-verify"]
+description = "Packaging manifest. --no-verify skips the rebuild here; CI runs it separately with verification."
+
+[[verification.gate]]
+name = "performance"
+kind = "slow"
+targets = ["performance"]
+features = ["--all-features"]
+description = "Percentiles, shard independence, control-plane boundedness under a stalled data plane."
+
+[[verification.gate]]
+name = "soak"
+kind = "slow"
+targets = ["soak"]
+features = ["--all-features"]
+description = "Endurance: slot-table pressure, allocation growth, recovery under sustained load."
+
+[[verification.gate]]
+name = "fuzz"
+kind = "nightly"
+command = ["cargo", "+nightly", "fuzz", "build", "--fuzz-dir", "fuzz"]
+description = "Compiles all nine libFuzzer targets. Coverage-guided runs are a separate nightly CI job; not an MSRV gate."
+
+# ---------------------------------------------------------------------------
+# ENGINEERING CONSTRAINTS
+# ---------------------------------------------------------------------------
+
+[engineering]
+rust_memory_safety_required = true
+unsafe_requires_justification = true
+hidden_blocking = false
+runtime_block_on = false
+lock_across_await = false
+silent_backend_substitution = false
+fake_durability = false
+unnecessary_dependencies = false
+
+[engineering.design]
+requirements_drive_ontology = true
+ontology_drives_pipeline = true
+implementation_follows_contract = true
+tier_topology_is_replaceable = true
+
+[[verification.gate]]
+name = "merge_readiness"
+kind = "tracker"
+description = "Fails while any `blocks_merge` finding in bugs.toml is open. A finding clears only by being resolved or explicitly accepted as risk with a named owner and a written rationale. Deliberately capable of failing: a readiness check that always passes would be the defect this revision exists to remove. Runs last, because it is a statement about everything above it."
+
+# ---------------------------------------------------------------------------
+# CI coverage.
+#
+# The 26 gates above are the mandatory set. This section declares how GitHub
+# Actions executes them, because a gate that no CI job runs is a gate that only
+# the maintainer's machine verifies — and the previous revision of this workflow
+# had five of them (`fmt`, `xtask_unit`, `deny`, `machete`, `fuzz`) executing
+# nowhere, plus `deny`/`machete` shadowed by third-party actions that merely
+# resembled them.
+#
+# `check_name` is the name GitHub reports for the job, which is the workflow's
+# `name:` when it has one. `cargo xtask contract` compares it against the parsed
+# workflow rather than trusting this file: a renamed job must fail the gate, not
+# quietly stop being required.
+#
+# `aggregates_into` names the single aggregator job that branch protection
+# requires. Requiring individual jobs is not viable — `test` is a 10-leg matrix
+# reporting one check name per leg, so a required-check list built from those
+# names silently stops matching when the layer list changes.
+# ---------------------------------------------------------------------------
+
+[[verification.ci_job]]
+job = "contract"
+check_name = "Contract self-check"
+covers = ["contract"]
+
+[[verification.ci_job]]
+job = "authorship"
+check_name = "Commit authorship"
+covers = ["authorship"]
+
+[[verification.ci_job]]
+job = "fmt"
+check_name = "Format"
+covers = ["fmt"]
+
+[[verification.ci_job]]
+job = "xtask"
+check_name = "Gate runner unit tests"
+covers = ["xtask_unit"]
+
+[[verification.ci_job]]
+job = "lint"
+check_name = "Check + Clippy"
+covers = ["check", "clippy"]
+
+[[verification.ci_job]]
+job = "doc"
+check_name = "Docs"
+covers = ["doc"]
+
+[[verification.ci_job]]
+job = "test"
+check_name = "Tests (${{ matrix.layer }})"
+covers = ["unit", "negative", "fault_injection", "property", "concurrency", "capability", "recovery", "durability", "security", "backends"]
+
+[[verification.ci_job]]
+job = "doctest"
+check_name = "Doctests"
+covers = ["doctest"]
+
+[[verification.ci_job]]
+job = "loom"
+check_name = "Loom (exhaustive interleavings)"
+covers = ["loom"]
+
+[[verification.ci_job]]
+job = "perf"
+check_name = "Performance + soak"
+covers = ["performance", "soak"]
+
+[[verification.ci_job]]
+job = "audit"
+check_name = "Dependency audit"
+covers = ["deny", "machete"]
+
+[[verification.ci_job]]
+job = "package"
+check_name = "Package + publish dry run"
+covers = ["package"]
+
+[[verification.ci_job]]
+job = "fuzz"
+check_name = "Fuzz (nightly, advisory)"
+covers = ["fuzz"]
+advisory = true
+
+[[verification.ci_job]]
+job = "merge-readiness"
+check_name = "Merge readiness"
+covers = ["merge_readiness"]
+
+# Not a contract gate. It asserts the crate still carries
+# `#![forbid(unsafe_code)]`, which is a static property rather than something
+# `cargo xtask run` can execute. Declared here with empty `covers` so it is
+# visible to the coverage check instead of being an undeclared extra job.
+[[verification.ci_job]]
+job = "unsafe-guard"
+check_name = "No unsafe code"
+covers = []
+
+[[verification.ci_job]]
+job = "verify"
+check_name = "Verification (all gates)"
+covers = []
+aggregates_into = "verify"
+
+
+# ---------------------------------------------------------------------------
+# Invariants with no proving test.
+#
+# The other 89 declared invariants are bound to a proving test by
+# `testkit::coverage::INVARIANT_PROOFS`, and `tests/contract/invariant.rs` fails
+# if any declared invariant is missing from both that registry and this list. So
+# adding an invariant is no longer free: it needs a test or a waiver, and a
+# waiver is a visible sentence naming what is unverified and why.
+#
+# These six are the honest remainder of that audit. They are not "known failures"
+# — the behaviour may well hold. They are clauses the test suite does not
+# currently exercise, listed so the next reader inherits the gap instead of
+# re-deriving it.
+# ---------------------------------------------------------------------------
+
+[[verification.invariant_waiver]]
+invariant = "capabilities.must_distinguish.recovering_from_available"
+reason = """
+Recovering and Available are both representable in OperationalState and the contract requires the distinction, but no test drives a rung into Recovering and asserts a report. The state is checked for existence, never for behaviour.
+"""
+
+[[verification.invariant_waiver]]
+invariant = "cia.availability.unbounded_retry"
+reason = """
+no test counts retries. Ladder descent is bounded by LAST_CACHE_TIER, but nothing asserts a retry count, so a future retry loop could be unbounded and the gate would stay green.
+"""
+
+[[verification.invariant_waiver]]
+invariant = "cia.integrity.silent_stale_data_acceptance"
+reason = """
+nothing distinguishes silent stale acceptance from explicit stale service. test_refresh_serves_stale_on_failure asserts stale IS served on failure; no test asserts the staleness is reported to the caller rather than passed off as fresh.
+"""
+
+[[verification.invariant_waiver]]
+invariant = "concurrency.blocking_runtime_thread"
+reason = """
+no test asserts that a blocking backend call is offloaded rather than run on a runtime worker. The tiers are all in-process stubs, so there is no blocking call to catch.
+"""
+
+[[verification.invariant_waiver]]
+invariant = "concurrency.nested_block_on"
+reason = """
+no test asserts nested_block_on never happens. Nothing in the suite calls block_on from inside async context, so the invariant is unobserved rather than verified.
+"""
+
+[[verification.invariant_waiver]]
+invariant = "concurrency.testing.promotion_eviction_races"
+reason = """
+eviction is not implemented, so there is no promotion/eviction race to schedule. This is the known eviction limitation; the clause should become provable when eviction lands.
+"""

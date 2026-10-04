@@ -3,13 +3,89 @@ name: CI
 on:
   push:
     branches: [main]
+  # Deliberately unfiltered. Scoping `pull_request` to `main` means a PR based on
+  # another feature branch — every PR in a stacked series — never runs CI at all,
+  # and `continue-on-error` then reports nothing because nothing ran. This repo's
+  # PRs are stacked by design, so the filter excluded exactly the branches that
+  # needed verifying most. `secrets.GITHUB_TOKEN` is still supplied (read-only) to
+  # fork PRs, so unfiltered is safe here; a personal access token would not be.
   pull_request:
-    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   RUST_TOOLCHAIN: '1.98'
+  CARGO_TERM_COLOR: always
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Gates. Split into jobs so a failure names the invariant that broke, and so
+  # the slow matrix runs in parallel with the fast feedback.
+  #
+  # Every job below runs *contract gates* — `cargo xtask run <gate>`, never a
+  # lookalike command. An earlier revision ran `cargo-deny-action` and
+  # `cargo-machete` directly, which meant CI audited dependencies with something
+  # other than the `deny` and `machete` gates the contract declares; the two can
+  # drift, and a third-party action is not the gate.
+  #
+  # `cargo xtask contract` now checks this file against `theSix.toml` in both
+  # directions: every declared gate is covered by a job here, every job here is
+  # declared, each job's reported check name matches, and every non-advisory job
+  # is wired into the `verify` aggregator. See `[[verification.ci_job]]`.
+  # ---------------------------------------------------------------------------
+
+  contract:
+    name: Contract self-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          rustc-wrapper: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: contract
+          cache-on-failure: true
+      - name: Validate theSix.toml against the runner and the checkout
+        run: cargo xtask contract
+      - name: List resolved gates
+        run: cargo xtask list
+
+  # The `authorship` gate reads commit history, so it needs a full clone. The
+  # default checkout is depth 1, which would make this gate report a pass over the
+  # single tip commit while a banned trailer sat in every commit beneath it. The
+  # gate detects a shallow clone and reports `Unavailable` (exit 3) rather than
+  # guessing, but detecting the wrong clone is not the same as not asking for the
+  # right one — so this job requests the history it actually needs.
+  authorship:
+    name: Commit authorship
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          rustc-wrapper: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+          cache-on-failure: true
+      - name: No commit may carry a banned trailer
+        run: cargo xtask run authorship
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -19,31 +95,46 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
-      - run: cargo fmt --check
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          rustc-wrapper: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fmt
+          cache-on-failure: true
+      - run: cargo xtask run fmt
 
-  check:
-    name: Check
+  # The gate runner decides what passes, so its own logic — tool probing, argv
+  # construction, the merge-readiness check — is under test rather than trusted.
+  # This gate had no CI job at all until this revision: `xtask_unit` was in the
+  # contract's mandatory set and executed only on the maintainer's machine.
+  xtask:
+    name: Gate runner unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - run: cargo check --all-targets --all-features
-
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - run: cargo test --all-targets --all-features
-      - run: cargo test --doc --all-features
+          rustc-wrapper: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+          cache-on-failure: true
+      - run: cargo xtask run xtask_unit
 
-  clippy:
-    name: Clippy
+  lint:
+    name: Check + Clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,7 +142,25 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          rustc-wrapper: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+          cache-on-failure: true
+      - name: Install mold
+        run: sudo apt-get update && sudo apt-get install -y mold
+      # Not `cargo xtask run check -- --verbose || cargo xtask run check`. That
+      # form was here because the first command rejects `--verbose` and always
+      # failed, so the `||` fallback is what actually ran — a blanket retry that
+      # reported success on the strength of its second attempt.
+      - run: cargo xtask run check
+      - run: cargo xtask run clippy
 
   doc:
     name: Docs
@@ -61,47 +170,327 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - run: cargo doc --no-deps --all-features
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          rustc-wrapper: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+      - run: cargo xtask run doc
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
-  # TETANUS Rule 10 static-analysis gates.
-  deny:
-    name: cargo-deny
+  # The main test matrix. nextest runs each test in its own process, so a test
+  # that leaks a poisoned mutex or a wedged runtime cannot take the suite with
+  # it, and per-test timing makes a slow regression visible in the log rather
+  # than as a wall-clock surprise.
+  test:
+    name: Tests (${{ matrix.layer }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        layer: [unit, negative, fault_injection, property, concurrency, capability, recovery, durability, security, backends]
     steps:
       - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          rustc-wrapper: true
+      - uses: taiki-e/install-action@cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+          cache-on-failure: true
+      - name: Install mold
+        run: sudo apt-get update && sudo apt-get install -y mold
+      - name: Run the ${{ matrix.layer }} gate
+        run: cargo xtask run ${{ matrix.layer }}
 
-  machete:
-    name: cargo-machete (unused deps)
+  doctest:
+    name: Doctests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: bnjbvr/cargo-machete@main
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          rustc-wrapper: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: test
+      - run: cargo xtask run doctest
 
-  # Miri only runs when the crate contains unsafe code; theSix is
-  # #![forbid(unsafe_code)], so this is a no-op guard kept for the future.
-  miri:
-    name: Miri (UB detection)
+  loom:
+    name: Loom (exhaustive interleavings)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install nightly --component miri
-      - name: Miri (lib only, isolation warnings allowed)
-        run: MIRIFLAGS="-Zmiri-isolation-error=warn" cargo +nightly miri test --lib
-        env:
-          RUST_TOOLCHAIN: ""
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          rustc-wrapper: true
+      - uses: taiki-e/install-action@cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: loom
+          cache-on-failure: true
+      - run: cargo xtask run loom
 
+  perf:
+    name: Performance + soak
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          rustc-wrapper: true
+      - uses: taiki-e/install-action@cargo-nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: perf
+          cache-on-failure: true
+      - name: Criterion benchmarks
+        run: cargo bench --all-features
+      - run: cargo xtask run performance
+      - run: cargo xtask run soak
+
+  # Dependency gates run the contract's `deny` and `machete`, not a third-party
+  # action that merely resembles them. The tools are installed explicitly so the
+  # job is reproducible, and the token is gone: it was only ever needed by the
+  # `cargo-machete` action, which no longer runs here.
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          rustc-wrapper: true
+      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@cargo-machete
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+          cache-on-failure: true
+      - run: cargo xtask run deny
+      - run: cargo xtask run machete
 
   package:
-    name: Package
+    name: Package + publish dry run
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - run: cargo package --list
-      - run: cargo publish --dry-run
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          rustc-wrapper: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+      - run: cargo xtask run package
+      - name: Package builds and the contract ships
+        run: cargo package --allow-dirty
+      - name: Publish dry run
+        run: cargo publish --dry-run --allow-dirty
+
+  # Fuzzing needs nightly and libFuzzer, so it cannot run under the MSRV gates.
+  # It is a separate, non-blocking job on purpose: the same trust boundaries are
+  # covered under 1.98 by the proptest byte strategies in the `negative` layer,
+  # so a fuzz failure should not block a PR that is otherwise sound. The
+  # advisory status is declared in `theSix.toml` rather than living only here, so
+  # the contract can tell an intentional non-blocking job from an oversight.
+  fuzz:
+    name: Fuzz (nightly, advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly
+          components: llvm-tools-preview
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          rustc-wrapper: true
+      # Not `taiki-e/install-action@cargo-fuzz`: that action has no cargo-fuzz
+      # support at all -- there is no `@cargo-fuzz` tag among its 1347, and its
+      # TOOLS.md never mentions the tool. Naming it anyway does not fail. The
+      # action logs "no tool specified", installs nothing, and exits 0, so the
+      # fuzzer is silently absent and every smoke run then fails looking like a
+      # crash. Verified by reading the job log, not inferred.
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz
+          cache-on-failure: true
+      - name: Build every fuzz target (the contract's `fuzz` gate)
+        run: cargo xtask run fuzz
+      - name: Smoke-run each target
+        # Every target is run even if an earlier one crashes, so one failure does not
+        # hide the other eight. The failure is re-raised at the end: `|| true` in the
+        # loop would make this job incapable of failing, which is the defect this
+        # revision exists to remove. The job stays advisory via continue-on-error.
+        run: |
+          status=0
+          for t in $(cargo +nightly fuzz list); do
+            echo "::group::fuzz $t"
+            cargo +nightly fuzz run "$t" --fuzz-dir fuzz -- -max_total_time=20 -runs=2000 || status=1
+            echo "::endgroup::"
+          done
+          if [ "$status" -ne 0 ]; then
+            echo "::error::at least one fuzz target crashed; artifacts are under fuzz/artifacts/"
+            exit 1
+          fi
+
+  # theSix is `#![forbid(unsafe_code)]`, so miri has nothing to check. The job
+  # is kept only so a future `unsafe` block cannot land unnoticed, and it
+  # deliberately asserts that the crate still has no unsafe code rather than
+  # pretending to run a check.
+  merge-readiness:
+    name: Merge readiness
+    runs-on: ubuntu-latest
+    # Not advisory, and not continue-on-error. This job is red on purpose while
+    # any `blocks_merge` finding in bugs.toml is open — the review that produced
+    # those findings said the branch is not merge-ready, and a gate that merely
+    # reported that would be the decorative-green-pixels failure this repo exists
+    # to avoid. Fixing B1-B3 is what turns it green.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          rustc-wrapper: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+          cache-on-failure: true
+      - name: No blocking findings may be open
+        run: cargo xtask run merge_readiness
+
+  unsafe-guard:
+    name: No unsafe code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      # Pinned to a commit, not a tag. A tag can be moved; this cannot. The first
+      # attempt here used `@v0.8`, which does not exist -- the action's releases are
+      # `v0.0.x`. Nothing local could have caught that: YAML validity is not
+      # action existence, and CI refusing to resolve the ref is the only signal.
+      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+        with:
+          rustc-wrapper: true
+      - name: Assert the crate forbids unsafe
+        run: |
+          set -euo pipefail
+          grep -q 'forbid(unsafe_code)' src/lib.rs \
+            || { echo "src/lib.rs lost #![forbid(unsafe_code)]"; exit 1; }
+          if grep -rnE '\bunsafe\b' src/ --include='*.rs' \
+               | grep -v 'forbid(unsafe_code)' \
+               | grep -vE '^\S+:\s*//' ; then
+            echo "unsafe code found in src/; it requires written justification"
+            exit 1
+          fi
+          echo "no unsafe code in src/"
+
+  # The single required status check. Branch protection should require *this* job
+  # and nothing else, because a matrix job reports one check name per leg
+  # (`Tests (unit)`, `Tests (negative)`, ...) and a required-check list built from
+  # those names silently stops matching the moment the contract's layer list
+  # changes. One stable name, fed by `needs`, has no such failure mode.
+  #
+  # A new job that is not listed in `needs` would leave this green while running,
+  # so `cargo xtask contract` asserts that every non-advisory job in this file
+  # appears in the list below. The aggregator is therefore not a second thing to
+  # remember to update — it is checked.
+  verify:
+    name: Verification (all gates)
+    if: always()
+    needs:
+      - contract
+      - fmt
+      - authorship
+      - xtask
+      - lint
+      - doc
+      - test
+      - doctest
+      - loom
+      - perf
+      - audit
+      - package
+      - merge-readiness
+      - unsafe-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every non-advisory job must have succeeded
+        run: |
+          failed=0
+          for result in ${{ join(needs.*.result, ' ') }}; do
+            if [ "$result" != "success" ]; then
+              echo "::error::a required job reported '$result'"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::see the individual job logs for which gate broke"
+            exit 1
+          fi
+          echo "all required gates passed"

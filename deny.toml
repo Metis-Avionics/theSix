@@ -15,8 +15,17 @@ allow = [
     "CC0-1.0",
     "MPL-2.0",
     "BSL-1.0",
-    "0BSD",
 ]
+
+[graph]
+# Audit the graph CI actually builds.
+#
+# Without this, `cargo deny` resolves *default* features only, so the oxigraph
+# rung's dependency tree -- and the two quick-xml advisories below -- are simply
+# absent from the check, and the waivers read as stale entries rather than as
+# deliberate decisions. Auditing default features only is the same as auditing a
+# build nobody ships.
+all-features = true
 
 [advisories]
 # Fail on any known security advisory in the dependency tree.
@@ -51,6 +60,12 @@ ignore = [
 # Reject duplicate versions of the same crate where avoidable.
 multiple-versions = "warn"
 wildcards = "deny"
+# A path dependency with no version is not a wildcard dependency: it names one
+# specific crate in this repository, and cargo strips it from the published
+# manifest entirely. `testkit` and `xtask` are both dev-only and in-tree, so the
+# wildcard rule has nothing to protect against there — and flagging them would
+# mean loosening the rule for every real dependency too.
+allow-wildcard-paths = true
 
 [sources]
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]

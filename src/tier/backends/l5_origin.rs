@@ -78,6 +78,20 @@ impl<V: ByteValue> CacheTier<V> for L5OriginBackend<V> {
         BackendKind::Origin
     }
 
+    fn capability(&self) -> crate::capability::TierCapability {
+        // Origin is the backing source, so it is authoritative *and* shared. It
+        // is not a cache rung and never appears in the ladder; reporting it as
+        // authoritative is what distinguishes "the source of truth" from "the
+        // rung above L5".
+        crate::capability::TierCapability::new(
+            BackendKind::Origin,
+            crate::capability::CapabilityFlags::SHARED
+                | crate::capability::CapabilityFlags::AUTHORITATIVE,
+            crate::capability::OperationalState::Healthy,
+            crate::capability::DurabilityClass::Delegated,
+        )
+    }
+
     async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
         match (self.fetcher)(key.0) {
             Ok(Some(bytes)) => {
