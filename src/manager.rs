@@ -719,6 +719,27 @@ where
                     .observed_read(Operation::Get, &key_ref, snapshot.tier, tier.get(&key_ref))
                     .await;
                 self.record_read(snapshot.tier, &result);
+                // Revalidate across the await (B19). `peek` observed `Ready` and
+                // this read is the one unguarded window in `get`: an `abort`
+                // landing while we are parked on the rung leaves the entry
+                // `Failed` with the generation advanced, and the rung still
+                // holds the residue of the write that was abandoned. Without
+                // this the caller is handed a value the control plane has
+                // stopped describing.
+                //
+                // Only the *state* is rechecked, not the generation. A benign
+                // concurrent commit does not disown the entry -- the value is
+                // still one this cache committed -- whereas `Failed` means the
+                // value is residue of an abandoned intent and must not be
+                // served. Rechecking state keeps this consistent with the
+                // `InFlight` arm above, which also reports `Miss` once the
+                // settled entry is not `Ready`.
+                if result.is_ok()
+                    && let Ok(after) = self.cachelito.peek(key_ref.0)
+                    && !matches!(after.state, EntryState::Ready)
+                {
+                    return Err(CacheError::Miss);
+                }
                 result
             }
             EntryState::Ready => {

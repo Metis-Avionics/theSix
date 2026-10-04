@@ -283,3 +283,172 @@ async fn a_single_lost_race_is_absorbed_and_both_writers_succeed() {
         "unexpected stored value {stored:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// B19: can a caller be handed a value from a rung the control plane has
+// stopped describing?
+//
+// `get` peeks, and if it saw `Ready` it awaits the tier. B19 records that
+// nothing revalidates the peek's generation across that await, so an `abort`
+// landing in the window is invisible to the caller. `GateTier` holds the read
+// open so the abort can be placed *deterministically* inside the window rather
+// than hoped for.
+// ---------------------------------------------------------------------------
+
+/// A tier that parks in `get` until released, so a control-plane mutation can
+/// be interleaved into the exact window between peek and the tier read.
+struct GateTier {
+    inner: Arc<dyn CacheTier<String>>,
+    reached: Arc<std::sync::atomic::AtomicBool>,
+    gate: Arc<tokio::sync::Notify>,
+}
+
+impl GateTier {
+    fn wrap(inner: Arc<dyn CacheTier<String>>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            reached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            gate: Arc::new(tokio::sync::Notify::new()),
+        })
+    }
+    fn reached(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        Arc::clone(&self.reached)
+    }
+    fn gate(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.gate)
+    }
+}
+
+#[async_trait::async_trait]
+impl CacheTier<String> for GateTier {
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn backend(&self) -> thesix::BackendKind {
+        self.inner.backend()
+    }
+    fn health(&self) -> thesix::TierHealth {
+        self.inner.health()
+    }
+    fn tier_id(&self) -> thesix::TierId {
+        self.inner.tier_id()
+    }
+
+    async fn get(&self, key: &KeyRef<'_>) -> Result<Option<String>, CacheError> {
+        self.reached
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.gate.notified().await;
+        self.inner.get(key).await
+    }
+
+    async fn set(
+        &self,
+        key: &KeyRef<'_>,
+        value: String,
+        ttl: Option<std::time::Duration>,
+    ) -> Result<(), CacheError> {
+        self.inner.set(key, value, ttl).await
+    }
+    async fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError> {
+        self.inner.remove(key).await
+    }
+    async fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
+        self.inner.contains(key).await
+    }
+}
+
+/// The settling test for B19. It asserts what the caller actually observes; the
+/// *interpretation* of that observation is what decides the finding's fate, and
+/// the assertion is deliberately about observable behaviour rather than about
+/// internals so it cannot pass by accident.
+#[tokio::test]
+async fn a_read_that_overlaps_an_abort_reports_what_the_control_plane_now_says() {
+    use std::sync::atomic::Ordering::SeqCst;
+
+    let key = "overlap".to_string();
+    let ctx = test_ctx();
+    let framed = testkit::framed_key(&ctx, &key);
+
+    let gate = GateTier::wrap(Arc::new(thesix::L0Stub::<String>::new()));
+    let reached = gate.reached();
+    let release = gate.gate();
+
+    let m = manager_from_tiers(
+        DefaultPolicy,
+        vec![RecordingTier::wrap(gate)],
+        Duration::from_millis(500),
+    );
+
+    // Seed a value the parked read will be able to see.
+    // `set` resolves to L1, so seed through the same manager then read at L0.
+    m.set(&key, "seeded".to_string(), &ctx).await.expect("seed");
+
+    let reader = {
+        let m = Arc::clone(&m);
+        let k = key.clone();
+        let c = ctx.clone();
+        tokio::spawn(async move { m.get(&k, &c).await })
+    };
+
+    // Wait until the reader is parked *inside* the tier read, which is strictly
+    // after its peek observed `Ready`.
+    while !reached.load(SeqCst) {
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+
+    // Anti-vacuity: the control plane must agree the entry was readable, so the
+    // abort below is genuinely changing the entry's described state.
+    let before = m.cachelito().peek(&framed).expect("peek before abort");
+    assert!(
+        matches!(before.state, thesix::EntryState::Ready),
+        "precondition: the entry must be Ready before the abort, saw {:?}",
+        before.state
+    );
+
+    // Land an abort in the window. `abort` leaves the entry `Failed` and
+    // advances the generation (B6).
+    let token = m
+        .cachelito()
+        .prepare(&framed, None, thesix::TierId::L0, thesix::IntentKind::Write)
+        .expect("prepare an intent to abort");
+    m.cachelito()
+        .abort(&token, CacheError::PopulationFailed)
+        .expect("abort");
+
+    let during = m.cachelito().peek(&framed).expect("peek after abort");
+    assert!(
+        matches!(during.state, thesix::EntryState::Failed),
+        "precondition: the abort must have left the entry Failed, saw {:?}",
+        during.state
+    );
+    assert_ne!(
+        during.generation, before.generation,
+        "precondition: abort must advance the generation"
+    );
+
+    // Release the parked read and observe what the caller is handed.
+    release.notify_waiters();
+    let observed = reader.await.expect("reader task");
+
+    // THE SETTLEMENT. The control plane now describes this entry as `Failed`
+    // at a newer generation. If the caller still receives the value, then a
+    // value is observable from a rung the control plane has stopped describing
+    // -- exactly what B19 says is unproven.
+    if let Ok(Some(v)) = observed {
+        panic!(
+            "B19 CONFIRMED as a defect: the caller received {v:?} while the \
+             control plane describes the entry as {:?} at generation {} \
+             (was {:?} at {})",
+            during.state, during.generation, before.state, before.generation
+        );
+    }
+
+    // Post-condition: the key must never again serve a value the control plane
+    // disowns. A `Failed` entry reports `Miss` (an `Err`), matching the
+    // `InFlight` arm, so both miss shapes are acceptable and only a value is not.
+    let after = m.get(&key, &ctx).await;
+    assert!(
+        !matches!(after, Ok(Some(_))),
+        "a Failed entry must not serve a value afterwards, got {after:?}"
+    );
+}

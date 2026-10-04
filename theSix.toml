@@ -529,8 +529,8 @@ tracker = "bugs.toml"
 # Deliberately not tracked here: whether an open finding blocks. The gate splits on
 # each entry's `blocks_merge`, so B15-B20 are counted by the check below and do not
 # fail it. Promoting one to blocking is how that decision gets made.
-expected_blocking = 10
-expected_should_fix = 12
+expected_blocking = 11
+expected_should_fix = 11
 
 # Commit authorship. `cargo xtask run authorship` reads every commit message in
 # the repository's history and fails on a banned trailer.
