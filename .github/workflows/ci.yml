@@ -3,8 +3,13 @@ name: CI
 on:
   push:
     branches: [main]
+  # Deliberately unfiltered. Scoping `pull_request` to `main` means a PR based on
+  # another feature branch — every PR in a stacked series — never runs CI at all,
+  # and `continue-on-error` then reports nothing because nothing ran. This repo's
+  # PRs are stacked by design, so the filter excluded exactly the branches that
+  # needed verifying most. `secrets.GITHUB_TOKEN` is still supplied (read-only) to
+  # fork PRs, so unfiltered is safe here; a personal access token would not be.
   pull_request:
-    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -19,9 +24,16 @@ jobs:
   # Gates. Split into jobs so a failure names the invariant that broke, and so
   # the slow matrix runs in parallel with the fast feedback.
   #
-  # Every job below is a *contract gate*. `cargo xtask list` prints the same set
-  # with the contract's own descriptions; `cargo xtask contract` fails if this
-  # workflow and the contract disagree about which gates are mandatory.
+  # Every job below runs *contract gates* — `cargo xtask run <gate>`, never a
+  # lookalike command. An earlier revision ran `cargo-deny-action` and
+  # `cargo-machete` directly, which meant CI audited dependencies with something
+  # other than the `deny` and `machete` gates the contract declares; the two can
+  # drift, and a third-party action is not the gate.
+  #
+  # `cargo xtask contract` now checks this file against `theSix.toml` in both
+  # directions: every declared gate is covered by a job here, every job here is
+  # declared, each job's reported check name matches, and every non-advisory job
+  # is wired into the `verify` aggregator. See `[[verification.ci_job]]`.
   # ---------------------------------------------------------------------------
 
   contract:
@@ -50,7 +62,29 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
-      - run: cargo fmt --check
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fmt
+          cache-on-failure: true
+      - run: cargo xtask run fmt
+
+  # The gate runner decides what passes, so its own logic — tool probing, argv
+  # construction, the merge-readiness check — is under test rather than trusted.
+  # This gate had no CI job at all until this revision: `xtask_unit` was in the
+  # contract's mandatory set and executed only on the maintainer's machine.
+  xtask:
+    name: Gate runner unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+          cache-on-failure: true
+      - run: cargo xtask run xtask_unit
 
   lint:
     name: Check + Clippy
@@ -67,7 +101,11 @@ jobs:
           cache-on-failure: true
       - name: Install mold
         run: sudo apt-get update && sudo apt-get install -y mold
-      - run: cargo xtask run check -- --verbose || cargo xtask run check
+      # Not `cargo xtask run check -- --verbose || cargo xtask run check`. That
+      # form was here because the first command rejects `--verbose` and always
+      # failed, so the `||` fallback is what actually ran — a blanket retry that
+      # reported success on the strength of its second attempt.
+      - run: cargo xtask run check
       - run: cargo xtask run clippy
 
   doc:
@@ -100,7 +138,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@cargo-nextest
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
@@ -131,7 +169,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@cargo-nextest
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: loom
@@ -147,15 +185,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: taiki-e/install-action@nextest
+      - uses: taiki-e/install-action@cargo-nextest
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: perf
+          cache-on-failure: true
       - name: Criterion benchmarks
         run: cargo bench --all-features
       - run: cargo xtask run performance
       - run: cargo xtask run soak
 
+  # Dependency gates run the contract's `deny` and `machete`, not a third-party
+  # action that merely resembles them. The tools are installed explicitly so the
+  # job is reproducible, and the token is gone: it was only ever needed by the
+  # `cargo-machete` action, which no longer runs here.
   audit:
     name: Dependency audit
     runs-on: ubuntu-latest
@@ -164,13 +207,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: taiki-e/install-action@cargo-deny
+      - uses: taiki-e/install-action@cargo-machete
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: lint
-      - uses: EmbarkStudios/cargo-deny-action@v2
-      - uses: bnjbvr/cargo-machete@main
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          cache-on-failure: true
+      - run: cargo xtask run deny
+      - run: cargo xtask run machete
 
   package:
     name: Package + publish dry run
@@ -192,7 +236,9 @@ jobs:
   # Fuzzing needs nightly and libFuzzer, so it cannot run under the MSRV gates.
   # It is a separate, non-blocking job on purpose: the same trust boundaries are
   # covered under 1.98 by the proptest byte strategies in the `negative` layer,
-  # so a fuzz failure should not block a PR that is otherwise sound.
+  # so a fuzz failure should not block a PR that is otherwise sound. The
+  # advisory status is declared in `theSix.toml` rather than living only here, so
+  # the contract can tell an intentional non-blocking job from an oversight.
   fuzz:
     name: Fuzz (nightly, advisory)
     runs-on: ubuntu-latest
@@ -209,8 +255,8 @@ jobs:
         with:
           shared-key: fuzz
           cache-on-failure: true
-      - name: Build every fuzz target
-        run: cargo +nightly fuzz build
+      - name: Build every fuzz target (the contract's `fuzz` gate)
+        run: cargo xtask run fuzz
       - name: Smoke-run each target
         # Every target is run even if an earlier one crashes, so one failure does not
         # hide the other eight. The failure is re-raised at the end: `|| true` in the
@@ -245,6 +291,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint
+          cache-on-failure: true
       - name: No blocking findings may be open
         run: cargo xtask run merge_readiness
 
@@ -268,3 +318,47 @@ jobs:
             exit 1
           fi
           echo "no unsafe code in src/"
+
+  # The single required status check. Branch protection should require *this* job
+  # and nothing else, because a matrix job reports one check name per leg
+  # (`Tests (unit)`, `Tests (negative)`, ...) and a required-check list built from
+  # those names silently stops matching the moment the contract's layer list
+  # changes. One stable name, fed by `needs`, has no such failure mode.
+  #
+  # A new job that is not listed in `needs` would leave this green while running,
+  # so `cargo xtask contract` asserts that every non-advisory job in this file
+  # appears in the list below. The aggregator is therefore not a second thing to
+  # remember to update — it is checked.
+  verify:
+    name: Verification (all gates)
+    if: always()
+    needs:
+      - contract
+      - fmt
+      - xtask
+      - lint
+      - doc
+      - test
+      - doctest
+      - loom
+      - perf
+      - audit
+      - package
+      - merge-readiness
+      - unsafe-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Every non-advisory job must have succeeded
+        run: |
+          failed=0
+          for result in ${{ join(needs.*.result, ' ') }}; do
+            if [ "$result" != "success" ]; then
+              echo "::error::a required job reported '$result'"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::see the individual job logs for which gate broke"
+            exit 1
+          fi
+          echo "all required gates passed"

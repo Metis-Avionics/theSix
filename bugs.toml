@@ -636,3 +636,201 @@ without a contract change. Left undone rather than rushed.
 required_test = """
 A check that every `run:` block parses. Not added — see resolution.
 """
+
+[[bug]]
+id = "B8"
+title = "The workflow claimed `cargo xtask contract` validated it; nothing ever read the file"
+severity = "should-fix"
+status = "resolved"
+resolved_at = "second-review-remediation"
+accepted_by = "user"
+verified = true
+blocks_merge = false
+locations = [".github/workflows/ci.yml", "tests/contract/main.rs", "xtask/src/contract.rs"]
+violates = ["verification_required = true", "anti_vacuity_required = true"]
+source = "own audit of the second-review head, after an external review flagged CI as unconfirmed"
+summary = """
+`.github/workflows/ci.yml` carried this comment, above the job list:
+
+    Every job below is a *contract gate*. `cargo xtask list` prints the same set
+    with the contract's own descriptions; `cargo xtask contract` fails if this
+    workflow and the contract disagree about which gates are mandatory.
+
+No code read `.github/workflows/ci.yml`. `grep -r ci.yml` across `xtask/` and
+`tests/` returned nothing. `tests/contract` compared the contract to the crate and
+to test *registries*; `xtask/src/contract.rs` parsed `theSix.toml` alone. So the
+sentence described a cross-check that did not exist, and the workflow and the
+contract could have disagreed arbitrarily for the life of the repository without
+anything noticing.
+"""
+why_this_class_of_defect_matters_here = """
+This is the exact failure the repository was built to prevent, sitting in the file
+that enforces the prevention. It is also self-concealing: the comment asserts the
+check exists, so a reader auditing for *missing* checks finds one documented, and
+a reader trusting the documentation finds no reason to look. Every prior review
+round — including two that found real defects — passed this file because the
+defect was a claim, not a behaviour.
+"""
+resolution = """
+The claim is now implemented rather than deleted. `tests/contract/workflow.rs`
+parses `ci.yml` with `serde_yaml` and asserts four things, each of which is
+defeable on its own and so is checked in both directions:
+
+* every gate in `[verification.gate]` is covered by some `[[verification.ci_job]]`;
+* every `covers` entry names a gate that exists, so a typo cannot read as coverage;
+* every job in the workflow is declared, so an undeclared job cannot verify nothing
+  and still report green;
+* every declared `check_name` equals the name the workflow reports, so a job
+  renamed in one file and not the other fails instead of quietly ceasing to be
+  required — branch protection matches on the reported name, not the job key.
+
+`serde_yaml` is added as a dev-dependency for the same reason `toml` already was:
+a hand-rolled parser is not a check. The `on:` key is read under both its string
+and boolean spellings, because YAML 1.1 resolves it to `true` and the checker
+should not depend on which schema the parser implements.
+"""
+rationale = """
+Implemented in `tests/contract/workflow.rs` and mutation-tested: each of the four
+assertions was verified to fail against a workflow mutated to break exactly its
+property, including a job renamed in the workflow only and a job added to the
+workflow but not the contract.
+"""
+
+[[bug]]
+id = "B9"
+title = "No declared runtime invariant was bound to a proving test"
+severity = "should-fix"
+status = "resolved"
+resolved_at = "second-review-remediation"
+accepted_by = "user"
+verified = true
+blocks_merge = false
+locations = ["theSix.toml", "tests/contract/main.rs", "tests/property/main.rs"]
+violates = ["verification_required = true", "anti_vacuity_required = true"]
+source = "external review of the second-review head, named as the remaining meta-level weakness"
+summary = """
+The contract declares 95 invariant leaves across seven semantic sections. Before
+this revision, exactly one — the move recovery direction — was checked against
+runtime behaviour. Everything else was checked only for *shape*: that flags were
+set, that layers had test targets, that negative cases had cases, that property
+invariants were enabled.
+
+`every_property_invariant_is_enabled` is representative. It asserts each named
+property invariant equals `true` in the contract. It does not assert any test
+exercises it. The registry lists `no_deadlock` and `no_lock_across_await`; the
+only thing connecting them to a test is a comment above `proptest!` at
+`tests/property/main.rs:349`. So declaring a new invariant cost nothing, which is
+the over-promise the contract exists to make impossible.
+"""
+audit_result = """
+Every one of the 95 was assigned a proof or a waiver by reading the tests rather
+than by matching section names. 89 have a proving test. 6 are waived with a stated
+reason, and the six are real gaps rather than bookkeeping:
+
+* `cia.availability.unbounded_retry` — nothing counts retries. Ladder descent is
+  bounded by `LAST_CACHE_TIER`, but no test asserts a retry count.
+* `cia.integrity.silent_stale_data_acceptance` — nothing distinguishes *silent*
+  stale acceptance from explicit stale service.
+* `capabilities.must_distinguish.recovering_from_available` — the state is
+  representable and required, but no test drives a rung into `Recovering`.
+* `concurrency.blocking_runtime_thread` — every tier is an in-process stub, so
+  there is no blocking call for a test to catch.
+* `concurrency.nested_block_on` — nothing in the suite nests `block_on`, so the
+  invariant is unobserved rather than verified.
+* `concurrency.testing.promotion_eviction_races` — eviction is not implemented, so
+  there is no race to schedule. Tied to the known eviction limitation.
+"""
+extra_gap_found_by_the_audit = """
+The twenty `required = true` flags under the semantic sections were asserted by
+nothing at all. `required_verification_flags_are_all_set` checks
+`verification.required`, a different table. So `acid.consistency.required = false`
+— a section withdrawing its own guarantee — would have passed every gate. Adding
+`every_semantic_section_is_marked_required` closed it, and its floor assertion
+(`checked >= 13`) caught a miscount in the check itself during development.
+"""
+resolution = """
+Split so neither side can satisfy itself: `testkit::coverage::INVARIANT_PROOFS`
+holds invariant to `path::fn` (what the tests exercise), and
+`[[verification.invariant_waiver]]` in `theSix.toml` holds invariant to reason
+(what is admitted to be unverified). `tests/contract/invariant.rs` requires the
+union of the two to equal the declared set exactly, so adding, renaming or deleting
+an invariant all fail until the registry moves with it, and every cited test must
+resolve to a real function in a real file.
+"""
+rationale = """
+All six assertions mutation-tested. The registry is deliberately split rather than
+duplicated into the contract so the test side owns test knowledge and the contract
+side owns the admitted gaps; a self-graded registry would be the `expected_blocking`
+defect repeating one level down.
+"""
+
+[[bug]]
+id = "B10"
+title = "Five mandatory gates ran in no CI job, and CI never ran for a stacked PR at all"
+severity = "blocking"
+status = "resolved"
+resolved_at = "second-review-remediation"
+accepted_by = "user"
+verified = true
+blocks_merge = true
+locations = [".github/workflows/ci.yml", "theSix.toml", "tests/contract/workflow.rs"]
+violates = ["verification_required = true", "partial_commit_visible = false"]
+source = "own audit, prompted by an external review noting CI execution was unconfirmed"
+summary = """
+Two independent defects, both meaning that "the gates are green" was a local fact.
+
+**CI could not run for this branch.** The triggers were `push` and `pull_request`,
+both filtered to `branches: [main]`. Every PR in this repository is stacked on a
+feature branch, so the filter excluded all of them. `gh run list --branch
+feat/hpa-continuity-contract` returned nothing; the last CI activity in the
+repository was 2026-10-03, on the PR2 base. All four PR3 commits had never been
+executed by CI, which is why an external reviewer could not confirm execution and
+had to say so.
+
+**Five mandatory gates were executed nowhere.** Of the 25 gates in
+`[verification.gate]`, `fmt` ran as a raw `cargo fmt --check` rather than the gate,
+`xtask_unit` had no job at all — so the tests for the code that decides which gates
+pass ran only on the maintainer's machine — and `deny` and `machete` were shadowed
+by `cargo-deny-action` and `cargo-machete@main`, which are third-party actions that
+merely resemble the gates and can drift from them. `fuzz` built targets directly
+instead of through its gate.
+"""
+further_defects_found_while_fixing_this = """
+Three more, all from reading the file rather than trusting it:
+
+* `cargo xtask run check -- --verbose || cargo xtask run check` — the first command
+  rejects `--verbose` and *always* fails, so the `||` fallback is what actually
+  ran. A blanket retry reporting success on the strength of its second attempt,
+  present on every CI run of the `lint` job.
+* `cargo-machete@main` was a floating branch ref, as are
+  `taiki-e/install-action@nextest` and `dtolnay/rust-toolchain@stable`. On a branch
+  whose thesis is that verification cannot lie, an unpinned action is a supply-chain
+  hole. `nextest` is now pinned to `@cargo-nextest` and the floating `cargo-machete`
+  is gone with the action; `rust-toolchain@stable` remains, and the *toolchain*
+  version is pinned by `env.RUST_TOOLCHAIN`, so the residual risk is the action's
+  own code rather than the compiler version.
+* `main` had no branch protection, so all eleven `verification.required` flags were
+  decorative. Nothing enforced them at merge time.
+"""
+resolution = """
+`pull_request` is now unfiltered — safe here because the only secret used is
+`GITHUB_TOKEN`, which GitHub still supplies read-only to fork PRs. Every unwired
+gate now runs as `cargo xtask run <gate>` in the job that covers it, so CI executes
+the contract's gate rather than a lookalike. `[[verification.ci_job]]` in the
+contract declares the mapping and `tests/contract/workflow.rs` holds both ends to
+it, which is what makes C5's coverage claim checkable rather than asserted.
+
+For branch protection, requiring the individual jobs is not viable: `test` is a
+10-leg matrix reporting `Tests (unit)`, `Tests (negative)`, ... so a required-check
+list built from those names silently stops matching when the layer list changes. A
+`verify` aggregator job with `if: always()` reports one stable check name, and the
+contract test asserts every non-advisory job is in its `needs` — so a new job that
+forgot to be added fails the gate instead of running outside the aggregate.
+"""
+rationale = """
+`if: always()` is load-bearing and separately asserted. Without it a failed
+dependency makes the aggregator *skipped*, and GitHub scores a skipped required
+check as passing, so the one job branch protection requires would report success
+precisely when something broke. Verified that the trigger, the gate-coverage
+mapping and the aggregator wiring each fail when mutated.
+"""

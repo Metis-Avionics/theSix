@@ -64,6 +64,12 @@ loom = "0.7"
 # Contract parsing for tests/contract. A TOML parser is not something to
 # hand-roll; `theSix.toml` is the machine-checked source of truth.
 toml = "0.9"
+# The same argument for `.github/workflows/ci.yml`, which tests/contract now
+# reads to check the workflow against the contract. A text scan would be the
+# hand-rolled version, and a hand-rolled parser is what let the previous
+# revision's "cargo xtask contract validates this workflow" comment stand
+# against code that never opened the file.
+serde_yaml = "0.9"
 serde = { version = "1", features = ["derive"] }
 # Dev-only harness crate: fault injection, recording/probing tiers, manager
 # builders. A path-only dev-dependency, so it is stripped on publish.
