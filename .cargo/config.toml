@@ -8,6 +8,16 @@
 # only adds overhead:
 #
 #     SCCACHE_RECACHE=none cargo check
+#
+# Note that this bypasses the *cache*, not the *binary*. Because
+# `rustc-wrapper` is set here rather than per-invocation, sccache must exist for
+# any cargo command to run at all — a checkout without it fails with
+# "could not execute process `sccache ...rustc -vV`" before compiling anything.
+# That is why CI installs it explicitly (`mozilla-actions/sccache-action`) rather
+# than relying on the runner image, and why the override for a machine without
+# sccache is a config override rather than an environment variable:
+#
+#     cargo --config 'build.rustc-wrapper=""' check
 [build]
 rustc-wrapper = "sccache"
 incremental = true

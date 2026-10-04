@@ -834,3 +834,61 @@ check as passing, so the one job branch protection requires would report success
 precisely when something broke. Verified that the trigger, the gate-coverage
 mapping and the aggregator wiring each fail when mutated.
 """
+
+[[bug]]
+id = "B11"
+title = "A committed cargo config made sccache mandatory, so every CI job failed before compiling"
+severity = "blocking"
+status = "resolved"
+resolved_at = "second-review-remediation"
+accepted_by = "user"
+verified = true
+blocks_merge = true
+locations = [".cargo/config.toml", ".github/workflows/ci.yml"]
+violates = ["verification_required = true"]
+source = "first execution of CI on this branch, after B10 made CI run at all"
+summary = """
+The first CI run on this branch failed *every* job, at the `cargo xtask` step,
+with one error repeated fourteen times:
+
+    error: could not execute process `sccache .../bin/rustc -vV` (never executed)
+    Caused by: No such file or directory (os error 2)
+
+`.cargo/config.toml` sets `build.rustc-wrapper = "sccache"`, which makes sccache
+a *hard prerequisite* for any cargo invocation — not an accelerator that is used
+when present. GitHub's runner image does not ship it. So no job could run a single
+cargo command, and the failure appeared in the rust-cache action's post step as
+`cargo metadata` exiting 101, some distance from the cause.
+"""
+provenance = """
+The config was added in `38887d2`, dated 2026-10-04. The last CI run in the
+repository was 2026-10-03, on the PR2 base. So this file had never been executed
+by CI at all before B10 made CI run — the same failure mode as the original B7
+fuzz job, one level up: a verification path that could not execute, discovered
+only once something finally executed it.
+
+Worth noting because it inverts the usual expectation. CI had been *green* for
+this code locally, `cargo xtask run all` passes on a machine that happens to have
+sccache, and the committed config actively hides the dependency rather than
+declaring it. Nothing in the repository said "sccache is required to build"; the
+only evidence was a comment describing how to bypass the cache.
+"""
+resolution = """
+CI now installs sccache explicitly with `mozilla-actions/sccache-action@v0.8` in
+all fourteen jobs that invoke cargo, rather than relying on the runner image.
+Adding it per job rather than centrally is deliberate: GitHub has no shared step
+list, and a composite action would hide the dependency behind an indirection that
+reads like the runner provides it.
+
+The committed config is kept rather than removed, because local and CI should
+compile the same way and the cache is worth having on the overlapping feature
+matrix. The comment now states the actual failure mode — that the wrapper must
+exist, that CI installs it rather than inheriting it, and that the override on a
+machine without sccache is `--config 'build.rustc-wrapper=""'` rather than an
+environment variable.
+"""
+rationale = """
+Discovered only by running CI, which is the argument for B10 rather than an
+endorsement of it. The honest sequence is that fixing "CI does not run" revealed
+"CI cannot run", and both were invisible until the first was fixed.
+"""

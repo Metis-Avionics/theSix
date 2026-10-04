@@ -517,7 +517,7 @@ anti_vacuity_required = true
 # is open.
 [verification.merge_readiness]
 tracker = "bugs.toml"
-expected_blocking = 6
+expected_blocking = 7
 expected_should_fix = 4
 
 [verification.required]

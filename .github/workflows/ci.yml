@@ -44,6 +44,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mozilla-actions/sccache-action@v0.8
+        with:
+          rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: contract
@@ -62,6 +65,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt
+      - uses: mozilla-actions/sccache-action@v0.8
+        with:
+          rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: fmt
@@ -80,6 +86,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mozilla-actions/sccache-action@v0.8
+        with:
+          rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: lint
@@ -95,6 +104,9 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: clippy
+      - uses: mozilla-actions/sccache-action@v0.8
+        with:
+          rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: lint
@@ -116,6 +128,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mozilla-actions/sccache-action@v0.8
+        with:
+          rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: lint
@@ -138,6 +153,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mozilla-actions/sccache-action@v0.8
+        with:
+          rustc-wrapper: true
       - uses: taiki-e/install-action@cargo-nextest
       - uses: Swatinem/rust-cache@v2
         with:
@@ -156,6 +174,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mozilla-actions/sccache-action@v0.8
+        with:
+          rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: test
@@ -169,6 +190,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mozilla-actions/sccache-action@v0.8
+        with:
+          rustc-wrapper: true
       - uses: taiki-e/install-action@cargo-nextest
       - uses: Swatinem/rust-cache@v2
         with:
@@ -185,6 +209,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mozilla-actions/sccache-action@v0.8
+        with:
+          rustc-wrapper: true
       - uses: taiki-e/install-action@cargo-nextest
       - uses: Swatinem/rust-cache@v2
         with:
@@ -207,6 +234,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mozilla-actions/sccache-action@v0.8
+        with:
+          rustc-wrapper: true
       - uses: taiki-e/install-action@cargo-deny
       - uses: taiki-e/install-action@cargo-machete
       - uses: Swatinem/rust-cache@v2
@@ -224,6 +254,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mozilla-actions/sccache-action@v0.8
+        with:
+          rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: lint
@@ -250,6 +283,9 @@ jobs:
         with:
           toolchain: nightly
           components: llvm-tools-preview
+      - uses: mozilla-actions/sccache-action@v0.8
+        with:
+          rustc-wrapper: true
       - uses: taiki-e/install-action@cargo-fuzz
       - uses: Swatinem/rust-cache@v2
         with:
@@ -291,6 +327,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mozilla-actions/sccache-action@v0.8
+        with:
+          rustc-wrapper: true
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: lint
@@ -306,6 +345,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mozilla-actions/sccache-action@v0.8
+        with:
+          rustc-wrapper: true
       - name: Assert the crate forbids unsafe
         run: |
           set -euo pipefail
