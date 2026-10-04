@@ -1,18 +1,44 @@
 use crate::error::CacheError;
+use crate::integrity::{ContentDigest, IntegrityCheck, KeyFingerprint, Placement};
 use crate::key::KeyRef;
 use crate::pool::MemoryPool;
 
 const DEFAULT_CAPACITY: usize = 1024;
 
+/// Fixed-size storage for one rung: a pre-allocated value pool plus an
+/// open-addressed index.
+///
+/// # Integrity
+///
+/// Each slot carries two independent pieces of metadata:
+///
+/// * a [`KeyFingerprint`] over the full key bytes, so a placement collision
+///   between two distinct keys is *detected* rather than silently aliasing one
+///   onto the other, and
+/// * a [`ContentDigest`] over the value, so a damaged read is reported as
+///   `Corrupted` instead of being served.
+///
+/// Neither is cryptographic; see [`crate::integrity`] for what that does and does
+/// not claim.
 #[derive(Debug)]
 pub struct FixedTierStub<V> {
     pool: MemoryPool<V>,
     slots: Vec<Option<Slot>>,
+    placement: Placement,
+    /// Counts reads rejected by the content digest. Observable so a test can
+    /// prove the integrity check actually fired rather than assuming it.
+    corruptions_detected: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct Slot {
-    key_hash: u64,
+    /// Where to probe from. Placement only: two keys may share it harmlessly.
+    placement: u64,
+    /// Who this slot belongs to. Compared in full, so a placement collision
+    /// cannot alias two keys.
+    fingerprint: KeyFingerprint,
+    /// Digest of the stored value, checked on read.
+    digest: ContentDigest,
     pool_idx: usize,
     /// When the entry was written and its TTL. `None` TTL = never expires.
     expiry: Option<(std::time::Instant, std::time::Duration)>,
@@ -53,33 +79,84 @@ impl<V> FixedTierStub<V> {
         for _ in 0..capacity {
             slots.push(None);
         }
-        Ok(FixedTierStub { pool, slots })
+        Ok(FixedTierStub {
+            pool,
+            slots,
+            placement: Placement::Default,
+            corruptions_detected: std::sync::atomic::AtomicU64::new(0),
+        })
     }
 
-    fn hash_key(key: &KeyRef<'_>) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        hasher.finish()
+    /// The same stub, reading keys with a different placement strategy.
+    ///
+    /// Test-only in practice. Injecting `Placement::CollidingPair` is the only
+    /// way to demonstrate that two colliding keys still do not alias, which is
+    /// the difference between testing `no_cross_key_corruption` and asserting it.
+    #[must_use]
+    pub fn with_placement(mut self, placement: Placement) -> Self {
+        self.placement = placement;
+        self
+    }
+
+    /// How many reads the content digest rejected.
+    #[must_use]
+    pub fn corruptions_detected(&self) -> u64 {
+        self.corruptions_detected
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Slots this table holds.
+    ///
+    /// Read by the soak test to assert the table does not grow under load, which
+    /// is the only way a fixed-capacity claim is checkable from outside.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.slots.len()
+    }
+
+    fn placement_of(&self, key: &KeyRef<'_>) -> u64 {
+        self.placement.hash(key.0)
+    }
+
+    fn fingerprint_of(key: &KeyRef<'_>) -> KeyFingerprint {
+        KeyFingerprint::of(key.0)
     }
 
     /// Find the slot index holding `key_hash`, treating expired entries as
     /// absent. Bounded by `slots.len()` (Rule 2).
-    pub fn find_slot(&self, key_hash: u64) -> Option<usize> {
+    pub fn find_slot(&self, placement: u64, fingerprint: KeyFingerprint) -> Option<usize> {
         if self.slots.is_empty() {
             return None;
         }
-        let mut idx = (key_hash as usize) % self.slots.len();
+        let mut idx = (placement as usize) % self.slots.len();
         let mut attempts = 0;
         while attempts < self.slots.len() {
             match &self.slots[idx] {
-                Some(s) if s.key_hash == key_hash => {
+                // Full-fingerprint comparison: a slot whose placement matches but
+                // whose key does not is somebody else's entry, and stopping here
+                // would alias two keys onto one pool index.
+                Some(s) if s.placement == placement && s.fingerprint == fingerprint => {
                     if s.is_expired() {
                         return None;
                     }
                     return Some(idx);
                 }
-                None => return None,
+                // An empty slot is *not* proof of absence, and this is the second
+                // way deletion has to be handled.
+                //
+                // Open addressing resolves collisions by probing forward, so a key
+                // may sit several slots past its home. Removing an earlier key
+                // punches a hole in the middle of that probe chain. Treating the
+                // hole as "not here" orphaned everything behind it: `get` returned
+                // `None` for values still in the pool, and the next `set` inserted
+                // a second copy, leaking a pool index each time. A soak over
+                // fill/reclaim cycles ran the table out of capacity while it was
+                // only two-thirds full.
+                //
+                // So a lookup scans the whole table. Tombstones would restore the
+                // early exit, at the cost of a per-slot marker and a compaction
+                // story; the table is fixed and small, so the scan is cheaper than
+                // the bookkeeping and cannot be wrong.
                 _ => {
                     idx = (idx + 1) % self.slots.len();
                     attempts += 1;
@@ -91,16 +168,18 @@ impl<V> FixedTierStub<V> {
 
     /// Find a slot suitable for (re)writing `key_hash`: an empty slot, the
     /// existing slot for this key, or an expired slot (which we may reuse).
-    pub fn find_empty(&self, key_hash: u64) -> Option<usize> {
+    pub fn find_empty(&self, placement: u64, fingerprint: KeyFingerprint) -> Option<usize> {
         if self.slots.is_empty() {
             return None;
         }
-        let mut idx = (key_hash as usize) % self.slots.len();
+        let mut idx = (placement as usize) % self.slots.len();
         let mut attempts = 0;
         while attempts < self.slots.len() {
             match &self.slots[idx] {
                 None => return Some(idx),
-                Some(s) if s.key_hash == key_hash => return Some(idx),
+                Some(s) if s.placement == placement && s.fingerprint == fingerprint => {
+                    return Some(idx);
+                }
                 Some(s) if s.is_expired() => return Some(idx),
                 _ => {
                     idx = (idx + 1) % self.slots.len();
@@ -113,15 +192,27 @@ impl<V> FixedTierStub<V> {
 
     pub fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError>
     where
-        V: Clone,
+        V: Clone + IntegrityCheck,
     {
-        let hash = Self::hash_key(key);
-        if let Some(idx) = self.find_slot(hash)
-            && let Some(slot) = self.slots[idx]
-        {
-            return Ok(self.pool.get(slot.pool_idx).cloned());
+        let placement = self.placement_of(key);
+        let fingerprint = Self::fingerprint_of(key);
+        let Some(idx) = self.find_slot(placement, fingerprint) else {
+            return Ok(None);
+        };
+        let Some(slot) = self.slots[idx] else {
+            return Ok(None);
+        };
+        let Some(value) = self.pool.get(slot.pool_idx) else {
+            return Ok(None);
+        };
+        // The integrity gate. A mismatch means the stored bytes are not what was
+        // written, so the value is refused rather than served.
+        if value.content_digest() != slot.digest {
+            self.corruptions_detected
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(CacheError::Corrupted);
         }
-        Ok(None)
+        Ok(Some(value.clone()))
     }
 
     pub fn set(
@@ -129,9 +220,14 @@ impl<V> FixedTierStub<V> {
         key: &KeyRef<'_>,
         value: V,
         ttl: Option<std::time::Duration>,
-    ) -> Result<(), CacheError> {
-        let hash = Self::hash_key(key);
-        if let Some(idx) = self.find_empty(hash) {
+    ) -> Result<(), CacheError>
+    where
+        V: IntegrityCheck,
+    {
+        let placement = self.placement_of(key);
+        let fingerprint = Self::fingerprint_of(key);
+        let digest = value.content_digest();
+        if let Some(idx) = self.find_empty(placement, fingerprint) {
             // Reuse the slot's existing pool index when overwriting (Rule 3:
             // no new allocation needed when the slot is already populated).
             let pool_idx = match self.slots[idx] {
@@ -146,7 +242,9 @@ impl<V> FixedTierStub<V> {
                 None => self.pool.allocate(value)?,
             };
             self.slots[idx] = Some(Slot {
-                key_hash: hash,
+                placement,
+                fingerprint,
+                digest,
                 pool_idx,
                 expiry: ttl.map(|t| (std::time::Instant::now(), t)),
             });
@@ -160,8 +258,9 @@ impl<V> FixedTierStub<V> {
     }
 
     pub fn remove(&mut self, key: &KeyRef<'_>) -> Result<(), CacheError> {
-        let hash = Self::hash_key(key);
-        if let Some(idx) = self.find_slot(hash)
+        let placement = self.placement_of(key);
+        let fingerprint = Self::fingerprint_of(key);
+        if let Some(idx) = self.find_slot(placement, fingerprint)
             && let Some(slot) = self.slots[idx].take()
         {
             // Slot index is always in-range here; dealloc cannot fail.
@@ -171,7 +270,41 @@ impl<V> FixedTierStub<V> {
     }
 
     pub fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
-        let hash = Self::hash_key(key);
-        Ok(self.find_slot(hash).is_some())
+        let placement = self.placement_of(key);
+        let fingerprint = Self::fingerprint_of(key);
+        Ok(self.find_slot(placement, fingerprint).is_some())
+    }
+
+    /// Replace a stored value's bytes without updating its digest.
+    ///
+    /// The only way to produce a genuinely corrupt record: every other path
+    /// writes the value and its digest together, so a test that wants to prove
+    /// the integrity check works has to damage the store behind its back. This
+    /// models exactly that — memory that changed under the process — and nothing
+    /// else.
+    ///
+    /// Test-only by intent. It is not gated behind a feature because it is inert
+    /// unless called, and gating it would mean the corruption tests could not run
+    /// under `--all-features` without also shipping the harness.
+    pub fn corrupt_stored_value_for_test(
+        &mut self,
+        key: &KeyRef<'_>,
+        replacement: V,
+    ) -> Result<bool, CacheError>
+    where
+        V: Clone,
+    {
+        let placement = self.placement_of(key);
+        let fingerprint = Self::fingerprint_of(key);
+        let Some(idx) = self.find_slot(placement, fingerprint) else {
+            return Ok(false);
+        };
+        let Some(slot) = self.slots[idx] else {
+            return Ok(false);
+        };
+        if let Some(v) = self.pool.get_mut(slot.pool_idx) {
+            *v = replacement;
+        }
+        Ok(true)
     }
 }

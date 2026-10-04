@@ -1,35 +1,84 @@
 [handover]
-status = "pr_open"
-phase = "v1_tier_capability"
-last_updated = "2026-10-02T00:00:00+01:00"
+status = "revision_complete"
+phase = "v2_hpa_continuity_contract"
+last_updated = "2026-10-04T00:00:00+01:00"
 
 summary = """
-1.0.0: the data plane can finally host real I/O backends, and a consumer can
-find out what it has. Four defects made 0.2.3 misleading in ways its own docs
-denied, and all four are now fixed at the source rather than documented around.
+2.0.0: the architecture is now a machine-checked contract, and the crate's own
+tests found the defects that the contract's existence attracted.
 
-The trait was synchronous while every real backend is I/O, so Postgres, Neo4j,
-HelixDB, RocksDB and Oxigraph could only be reached by blocking inside a sync
-method - which deadlocks on a runtime thread. CacheTier is now async; the
-control plane deliberately stays synchronous.
+theSix.toml is the source of truth. cargo xtask executes the gates it declares,
+refuses to run a gate it does not declare, and exits 3 rather than 0 when a gate's
+tooling is absent. tests/contract asserts the crate agrees with the contract - version,
+rung count, fault taxonomy, negative cases, property invariants, and that every layer
+is bound to a real test target. The six specs/*.toml files, which contradicted each
+other and the code, are deleted.
 
-There was no way to ask what a tier was bound to. A consumer discovered it by
-issuing an operation and receiving TierUnavailable, which is indistinguishable
-between not-compiled-in, bound-but-down, and never-implemented - three
-conditions needing three different responses. BackendKind and
-CacheManager::capabilities() answer it up front, and a tier that is not bound
-now reports Unavailable instead of silently handing back L0's data.
+Writing the contract down was the useful part. Each clause demanded a mechanism that
+did not exist, and the gaps were found by the machinery built to close them:
 
-L3, L4 and L5 returned Err(TierUnavailable) on EVERY operation, so a default
-six-rung manager permanently failed on its upper three rungs, while AGENTS.md
-claimed tier stubs L0-L5 all wrap FixedTierStub. They now store values and
-report themselves as InMemoryFallback - working, but never passable off as the
-distributed or durable rung they nominally are.
+Two-phase commit was the largest addition. set was three independently-failable steps
+with no rollback, so a crash between the data write and the publish left a value in a
+tier with no control-plane record. The control plane now carries a payload-free intent
+record, the entry becomes Prepared - unreadable - and recovery resolves by kind: a
+write aborts, a move completes forward, because aborting a move would discard an
+already-committed value.
 
-L6 exists as the authority tier (Postgres + pgvector intended) and is excluded
-from the cache ladder by a named bound rather than by L5.as_usize() appearing
-in three places. put_never_writes_l6_authority and invalidate_skips_l6_authority
-are tripwired here, not only in the consuming project.
+The negative and property layers found more than the contract asked about. They found
+that a lost CAS in acquire reported the state the CAS expected, which looked claimable,
+so the losing caller became a second population owner and single-flight admitted two
+fetches for one key. A loom model found that abort overwrote a commit that had already
+won, making a committed value invisible. A soak found that open addressing did not
+survive deletion: find_slot stopped at the first empty slot, so removing a key orphaned
+everything behind it, get returned None for values still stored, and the next write
+leaked a pool index until the table ran out of capacity at two-thirds full.
+
+Every one of those had a test that passed. That is the argument for the contract and
+for the anti-vacuity instruments: test_tier_recovery called set_healthy(true), which was
+already the default, so no failure was ever injected; test_waiter_timeout had no
+waiters and an unreachable disjunct; seven tests could not fail. They have been
+rewritten, and testkit's coverage registries are now compared for equality against the
+contract, so a required case cannot be dropped without failing a gate.
+
+Tenant is now part of the key. IdentityContext.tenant existed and no line of the crate
+read it, so two tenants using the same application key shared one entry - a cross-
+tenant read the authz gates could not prevent, because by the time they ran there was
+nothing left to separate. This invalidates every existing cached key and is the one
+upgrade hazard in this release; it is called out in the changelog and the README.
+
+Authority is a configured role, and rung substitution is gone. tier(&L6) on a six-rung
+manager used to return L0's data with nothing to indicate anything was wrong, and on an
+empty rung list it panicked; a property test generated a manager with no rungs and
+found the panic. bound_tier returns None instead, and nearest_bound_rung resolves the
+policy's choice to the best bound rung at or below it - routing, not substitution.
+
+Verification: twenty mandatory gates in ~50s on a warm cache, plus deferred loom,
+performance and soak. nextest per-test processes, sccache, and clang + mold. Build
+profiles moved to debug = 0 after debuginfo filled the disk mid-matrix and produced
+nineteen failures that had nothing to do with the code.
+
+Known limitation: eviction policy. FixedTierStub reports CapacityExhausted when full
+and CacheManager degrades down the ladder, but nothing evicts. A cache whose whole
+ladder is full refuses new writes, which the soak layer asserts rather than pretends
+otherwise.
+"""
+
+pending_work = """
+- Eviction policy for fixed-capacity tiers. CapacityExhausted plus ladder degradation
+  is honest but lossy: a cache with no eviction stops accepting writes once its ladder
+  fills. Not attempted here because it is a policy choice (LRU, sampled, clock) and the
+  contract deliberately leaves policy to the consumer.
+- Durable backing for the authority rung. L6 has no in-tree implementation, so the
+  authority is currently a configured role with no binding. DurabilityClass::Verified
+  therefore has no rung that earns it yet.
+- read_repair / reconciliation. ContinuityState::Reconciling is representable and
+  reported, but nothing drives it: there is no pass that compares a rung against the
+  authority and repairs drift.
+- Atomic multi-key operations. The commit protocol is per-entry. A caller wanting
+  "these twenty keys or none" still needs to coordinate outside the crate.
+- Streaming / non-ByteValue payloads. Integrity framing covers the fixed tier stub
+  (via IntegrityCheck) and the byte-oriented backends (via an explicit frame), but a
+  payload that cannot produce a digest has no integrity story.
 """
 
 remaining = [

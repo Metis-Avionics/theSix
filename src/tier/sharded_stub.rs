@@ -31,6 +31,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 
 use crate::error::CacheError;
+use crate::integrity::IntegrityCheck;
 use crate::key::KeyRef;
 use crate::tier::fixed_tier_stub::FixedTierStub;
 
@@ -108,8 +109,17 @@ impl<V> ShardedTierStub<V> {
 
     /// Total entry capacity across all shards.
     #[must_use]
+    /// Total slots across every shard.
+    ///
+    /// Sourced from the built shards rather than from the default constant: the
+    /// previous version returned `shards.len() * DEFAULT_CAPACITY_PER_SHARD`,
+    /// which reports 1024 for a stub configured with two slots per shard. A
+    /// capacity accessor that is wrong is worse than none.
     pub fn capacity(&self) -> usize {
-        self.shards.len() * DEFAULT_CAPACITY_PER_SHARD
+        self.shards
+            .iter()
+            .map(|s| s.lock().map_or(0, |g| g.capacity()))
+            .sum()
     }
 
     fn shard_for(&self, key: &KeyRef<'_>) -> &Mutex<FixedTierStub<V>> {
@@ -121,7 +131,7 @@ impl<V> ShardedTierStub<V> {
 
     pub fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError>
     where
-        V: Clone,
+        V: Clone + IntegrityCheck,
     {
         self.shard_for(key).lock().map_err(poisoned)?.get(key)
     }
@@ -131,7 +141,10 @@ impl<V> ShardedTierStub<V> {
         key: &KeyRef<'_>,
         value: V,
         ttl: Option<std::time::Duration>,
-    ) -> Result<(), CacheError> {
+    ) -> Result<(), CacheError>
+    where
+        V: IntegrityCheck,
+    {
         self.shard_for(key)
             .lock()
             .map_err(poisoned)?

@@ -1,4 +1,5 @@
 use crate::error::CacheError;
+use crate::integrity::IntegrityCheck;
 use crate::key::KeyRef;
 use crate::tier::TierId;
 use crate::tier::sharded_stub::ShardedTierStub;
@@ -51,13 +52,27 @@ impl<V> L3Stub<V> {
 }
 
 #[async_trait::async_trait]
-impl<V: Clone + Send + Sync + 'static> CacheTier<V> for L3Stub<V> {
+impl<V: Clone + Send + Sync + 'static + IntegrityCheck> CacheTier<V> for L3Stub<V> {
     fn name(&self) -> String {
         "L3-in-memory-fallback".into()
     }
 
     fn backend(&self) -> BackendKind {
         BackendKind::InMemoryFallback
+    }
+
+    fn capability(&self) -> crate::capability::TierCapability {
+        // Deliberately claims neither SHARED nor PERSISTENT even for L4/L5,
+        // whose nominal contracts are shared and persistent respectively. The
+        // values really are process-local, so claiming otherwise would be a
+        // durability lie the contract forbids.
+        crate::capability::TierCapability::new(
+            BackendKind::InMemoryFallback,
+            crate::capability::CapabilityFlags::IN_MEMORY
+                | crate::capability::CapabilityFlags::VOLATILE,
+            crate::capability::OperationalState::Healthy,
+            crate::capability::DurabilityClass::Volatile,
+        )
     }
 
     async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {

@@ -1,0 +1,23 @@
+[package]
+name = "testkit"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+description = "Dev-only test harness for theSix: fault injection, recording and probing tiers, manager builders."
+
+[lib]
+name = "testkit"
+path = "src/lib.rs"
+
+[dependencies]
+# `faults` is enabled here so any test that depends on testkit transitively
+# gets the deterministic fault substrate, without a production `cargo build`
+# of thesix carrying it.
+thesix = { path = "..", features = ["faults"] }
+tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread"] }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

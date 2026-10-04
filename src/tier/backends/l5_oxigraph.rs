@@ -151,6 +151,19 @@ impl<V: ByteValue> CacheTier<V> for L5OxigraphBackend<V> {
         BackendKind::Oxigraph
     }
 
+    fn capability(&self) -> crate::capability::TierCapability {
+        // The in-process `Store` is not a durable store, whatever this rung is
+        // meant to become. Claiming persistence here is exactly the false
+        // durability claim the contract forbids, so it is `Volatile` until a
+        // real backend replaces it.
+        crate::capability::TierCapability::new(
+            BackendKind::Oxigraph,
+            crate::capability::CapabilityFlags::BLOCKING_IO,
+            crate::capability::OperationalState::Healthy,
+            crate::capability::DurabilityClass::Volatile,
+        )
+    }
+
     async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
         match self.find_value(key)? {
             Some(encoded) => {

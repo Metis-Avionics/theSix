@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::error::CacheError;
+use crate::integrity::IntegrityCheck;
 use crate::key::KeyRef;
 use crate::tier::TierId;
 use crate::tier::fixed_tier_stub::FixedTierStub;
@@ -35,13 +36,27 @@ impl<V> TestTier<V> {
 }
 
 #[async_trait::async_trait]
-impl<V: Clone + Send + Sync + 'static> CacheTier<V> for TestTier<V> {
+impl<V: Clone + Send + Sync + 'static + IntegrityCheck> CacheTier<V> for TestTier<V> {
     fn name(&self) -> String {
         format!("test-{:?}", self.tier_id)
     }
 
     fn backend(&self) -> BackendKind {
         BackendKind::Test
+    }
+
+    fn capability(&self) -> crate::capability::TierCapability {
+        crate::capability::TierCapability::new(
+            BackendKind::Test,
+            crate::capability::CapabilityFlags::IN_MEMORY
+                | crate::capability::CapabilityFlags::VOLATILE,
+            if self.healthy.load(std::sync::atomic::Ordering::SeqCst) {
+                crate::capability::OperationalState::Healthy
+            } else {
+                crate::capability::OperationalState::Unavailable
+            },
+            crate::capability::DurabilityClass::Volatile,
+        )
     }
 
     async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {

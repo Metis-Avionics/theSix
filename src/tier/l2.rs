@@ -1,3 +1,4 @@
+use crate::integrity::IntegrityCheck;
 use crate::tier::TierId;
 use crate::tier::sharded_stub::ShardedTierStub;
 use crate::tier::tier_trait::{BackendKind, CacheTier, TierHealth};
@@ -16,13 +17,23 @@ impl<V> L2Stub<V> {
 }
 
 #[async_trait::async_trait]
-impl<V: Clone + Send + Sync + 'static> CacheTier<V> for L2Stub<V> {
+impl<V: Clone + Send + Sync + 'static + IntegrityCheck> CacheTier<V> for L2Stub<V> {
     fn name(&self) -> String {
         "L2-local".into()
     }
 
     fn backend(&self) -> BackendKind {
         BackendKind::InMemory
+    }
+
+    fn capability(&self) -> crate::capability::TierCapability {
+        crate::capability::TierCapability::new(
+            BackendKind::InMemory,
+            crate::capability::CapabilityFlags::IN_MEMORY
+                | crate::capability::CapabilityFlags::VOLATILE,
+            crate::capability::OperationalState::Healthy,
+            crate::capability::DurabilityClass::Volatile,
+        )
     }
 
     async fn get(

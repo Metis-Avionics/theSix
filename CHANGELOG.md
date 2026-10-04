@@ -1,5 +1,143 @@
 # CHANGELOG
 
+## v2.0.0 — architectural revision
+
+The architecture is now stated as a machine-checked contract. [`theSix.toml`](./theSix.toml)
+is the source of truth; `cargo xtask` executes the verification gates it declares and
+refuses to claim success for a gate it could not run.
+
+### Breaking: this release invalidates every existing cached key
+
+`IdentityContext::tenant` is now part of the key. Previously the field existed and
+**no line of the crate read it**, so two tenants using the same application key shared
+one entry and one control-plane slot — a cross-tenant read that the authn/authz gates
+could not prevent, because by the time they ran there was nothing left to separate.
+Single-tenant deployments must expect one cold cache after upgrading.
+
+### Breaking: rung substitution removed
+
+`CacheManager::tier(id)` and `tier_for(id)` return `Option` and no longer hand back a
+different rung. Previously `tier(&TierId::L6)` on a six-rung manager returned **L0**,
+and a caller could not tell from the return value; on an empty rung list it panicked
+outright. Use `bound_tier`, `nearest_bound_rung`, or `capabilities()`.
+
+### Added
+
+- **The contract as code.** `theSix.toml` declares the invariants, the verification
+  gates, and the layer-to-target mapping. `tests/contract` asserts the crate agrees
+  with it: version, rung count, fault taxonomy, negative cases, property invariants,
+  and that every declared layer is bound to a real test target. `specs/*.toml` — six
+  files that contradicted each other and the code — is deleted.
+- **Two-phase commit with a control-plane intent.** `EntryState::Prepared`,
+  `prepare`/`commit`/`abort`, and a payload-free intent record. An uncommitted write
+  reads as a miss, so `partial_commit_visible = false` is now checkable rather than
+  asserted. Recovery resolves by kind: a write aborts, a move completes forward.
+- **Capability semantics as three orthogonal axes.** `CapabilityFlags` ×
+  `OperationalState` × `DurabilityClass`, replacing a single mutually-exclusive enum
+  that could not express "persistent *and* shared *and* degraded". All nine states the
+  contract requires are representable, including `unbound` and `authoritative`.
+- **Integrity.** `ContentDigest` over every stored value; a damaged record is reported
+  as `CacheError::Corrupted` rather than served. `KeyFingerprint` (128-bit) makes
+  placement collisions detectable, with an injectable `Placement` so a test can force
+  one and demonstrate that two keys still do not alias.
+- **Deterministic fault injection** behind a `faults` feature: eleven fault classes, a
+  seedable plan, and a `FaultLedger` that records every activation so tests can prove
+  their fault fired.
+- **Tenant-framed keys** with an explicit `0x00` separator. An oversized frame is
+  rejected, never truncated.
+- **Structured observability.** `OperationRecord` with the eleven contract fields and
+  an injectable `TelemetrySink`. No payload, and no key: a key is identified by a
+  non-reversible digest plus a length.
+- **Continuity states and recovery.** `ContinuityState`, `RecoveryDirection`,
+  `RecoveryOutcome`, `CacheManager::continuity()` and `recover()`.
+- **New test layers**: `contract`, `negative`, `property`, `fault_injection`,
+  `recovery`, `durability`, `security`, `performance`, `soak`, `loom`.
+- **`cargo xtask`**, a clap-driven gate runner that reads the contract, plus a
+  `justfile`. nextest, sccache, and `clang` + `mold` when available.
+- **Fuzzing.** Nine targets in an excluded `fuzz/` crate covering the contract's
+  trust boundaries. Advisory in CI, since it needs nightly. The gate builds every
+  target; a separate CI step smoke-runs each one and reports which target crashed
+  rather than swallowing it. Running them found two wrong assertions *in the targets
+  themselves* — a generation comparison that assumed `u64` wraps, and a framing check
+  that asserted two differently-sized frames are both accepted. Neither was a crate
+  defect, which is precisely why a target that cannot fail is worse than no target.
+
+### Fixed — correctness
+
+Each of these was a latent violation of a property the contract now states.
+
+- `StaleGeneration` returned from a population **without releasing ownership**. The
+  entry stayed `InFlight` with an owner nobody would satisfy, so every later operation
+  on that key waited out the full timeout and failed. A key could stay unusable until
+  something invalidated it.
+- `set` wrote `Generation::new(snapshot.generation + 1)` from a snapshot read *before*
+  an `.await`, so an invalidation landing in that window was silently undone.
+- `get` and `exists` called `acquire`, which **claims**. A read-only probe created a
+  slot, took ownership, and left the key wedged. One failing read made a key
+  permanently broken.
+- `wait_and_get` read the rung and the owner's error from the waiter's own pre-wait
+  snapshot, so waiters never received the owner's failure and read the wrong rung.
+- A lost CAS in `acquire` reported the state the CAS *expected*, which looked
+  claimable. The losing caller became a second population owner, and single-flight
+  admitted two fetches for one key.
+- `notify_one` stored one permit for a fan-out of 99 waiters, so 98 waited out the
+  full timeout. Paired with `Notified::enable()` and a post-registration re-read,
+  `notify_waiters` broadcasts without the lost-wakeup window.
+- `refresh` never checked ownership, so every concurrent refresh became "the owner";
+  it also swallowed every failure and returned `Ok(None)` when there was nothing stale
+  to serve. On a committed entry it silently became a no-op.
+- The fail-open fallback scanned `TierRegistry::all()`, which **includes the authority
+  rung**, and replaced the original error with a bare `PopulationFailed`.
+- `promote`/`demote` copied without removing the source and discarded the policy's tier
+  choice, so they were not policy-controlled despite claiming to be.
+- Open addressing did not survive deletion: `find_slot` stopped at the first empty
+  slot, orphaning entries behind a hole. `get` returned `None` for values still
+  stored, and the next write leaked a pool index. A soak over fill/reclaim cycles ran a
+  table out of capacity at two-thirds full.
+- `abort` overwrote a `commit` that had already won, making a committed value
+  invisible. Found by a loom model of the exact interleaving.
+- A prepared intent on a never-written key was invisible, because generation `0` was
+  overloaded as the "no intent" sentinel. An invisible intent is an unrecoverable one.
+- A failed write forced the entry to `Failed`, destroying the previously committed
+  value. Aborting now restores the state the intent interrupted.
+- `ShardedTierStub::capacity()` returned a hardcoded constant instead of the configured
+  value.
+
+### Fixed — availability and performance
+
+- `set` hard-failed when its rung was full or down. It now walks down the ladder on any
+  rung-level failure and retries a lost commit race, so a full rung is a routing
+  decision rather than a caller-visible error.
+- Data-plane reads were unbounded. A hung rung could pin a caller's task forever; every
+  tier access now runs under the manager's wait bound, which is what makes
+  "the control plane stays responsive while the data plane is stalled" true rather
+  than partial.
+- A failed population produced **no** telemetry record, so the failure rate and
+  fallback rate the contract asks for were unmeasurable.
+- Concurrent recovery sweeps reported more recoveries than there were intents, because
+  aborting is idempotent and did not report what it actually did.
+
+### Changed
+
+- `Cargo.toml` uses `debug = 0` and `opt-level = 1` for dependencies. Debuginfo was
+  15GB of a 98GB disk and the gate runner ran out of space mid-matrix, reporting
+  nineteen failures that had nothing to do with the code.
+- `BackendKind::is_native()` is replaced by `is_implemented()`. The old predicate
+  answered `true` for `Moka`, `RocksDb`, `Postgres`, `Neo4j` and `Helix` — five backends
+  the crate does not contain.
+- The L3–L5 in-memory defaults claim neither `SHARED` nor `PERSISTENT`, including L4,
+  whose nominal contract is persistent.
+- `cargo deny` runs with `all-features = true`, so it audits the graph CI actually
+  builds rather than the default-feature one.
+
+### Verification
+
+Twenty mandatory gates execute in ~50s on a warm cache, plus deferred `loom`,
+`performance` and `soak` gates. Seven tests that could not fail have been rewritten,
+among them `test_tier_recovery` (which called `set_healthy(true)` — already the
+default, so no failure was ever injected) and `test_strict_policy_denies_anonymous_writes`
+(which never issued an anonymous write).
+
 ## v1.0.0 — 2026-10-02
 
 ### Added

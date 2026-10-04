@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 97d9528ae16cda0907daff24d1c3b98ec861e9789973103ada9ac4e54ed1f60d # shrinks to pairs = [("a", "a", "a"), ("a", "a", "b"), ("a", "a", "a"), ("a", "a", "a"), ("a", "a", "a")]
+cc eb2c35999e40eb69955a66015535d3787a1821e69bd390c2c974bfd3e986bb21 # shrinks to bound = [], writes = ["a"]
+cc 5419b3923d32a43de3140829cd11ddee4602d5f1953f98c8e6275dfc5335b1ae # shrinks to keys = ["j", "j"], rounds = 1
+cc 5e3a67f126b88646049e2398a1a93a0699bc539e0ba695e897605e919fd4b336 # shrinks to ops = [Set("w", "a"), Fetch("w", "b")]
+cc d736623ec858396151c31ae696e5e82b4115a398a6c8aacabaf3c4acf6a69733 # shrinks to keys = ["u", "u"], rounds = 1

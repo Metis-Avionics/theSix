@@ -1,177 +1,188 @@
 # AGENTS.md — theSix
 
-## Project
+Derived from [`theSix.toml`](./theSix.toml), which is the source of truth. If
+this file and the contract disagree, the contract wins and
+`cargo xtask contract` is the check that should have caught it.
 
-Rust library for policy-driven six-tier cache orchestration. Crate name: `thesix`.
+## What this crate is
 
-## Build & Test
+A six-tier cache whose *architectural* abstraction is the **continuity
+contract** between consumers and heterogeneous storage. L0–L6 are
+replaceable infrastructure; the contract is not.
+
+```text
+Consumer -> continuity/policy plane -> heterogeneous storage topology
+```
+
+Consumers never name a rung and never see a backend type.
+
+## Build & test
+
+```bash
+just                # every mandatory gate, in contract order (~50s warm)
+just quick          # fmt + contract + check + fast layers
+just list           # what runs and why
+just plan           # print every gate's argv without running it
+just perf           # percentile / boundedness gates
+just soak           # endurance gates
+just loom           # exhaustive control-plane interleavings
+just <gate>         # any single gate by name
+```
+
+`cargo xtask` is the entry point. It exits `3` for "could not verify" so an
+unavailable tool is never mistaken for a passing gate.
+
+Individual commands:
 
 ```bash
 cargo build
-cargo test                    # all tests (29 integration + doctests)
-cargo test --all-targets --all-features
-cargo test --test integration  # single test file
-cargo test test_single_flight  # single test by name pattern
-```
-
-Benchmarks (requires `--features=bench` or dev-deps already included):
-```bash
-cargo bench
-```
-
-## Quality Gates (must all pass before considering complete)
-
-```bash
-cargo fmt --check
-cargo check --all-targets --all-features
-cargo test --all-targets --all-features
+cargo nextest run --all-features              # all tests
+cargo nextest run --all-features --test negative
 cargo clippy --all-targets --all-features -- -D warnings
-cargo doc --no-deps
-cargo package --list
-cargo publish --dry-run
-cargo deny check              # needs deny.toml (present)
-cargo machete                 # unused-dependency scan
 ```
 
-**Order matters**: fmt → check → clippy → test → doc → package → publish-dry-run.
+## Gates (the contract is authoritative)
 
-## Architecture (critical)
-
-**Control plane vs data plane** — this is the core design constraint:
-- `Cachelito` (control plane): tracks state only — entry state, generation, tier, population ownership, tier health. **Never stores application payloads.**
-- `CacheTier` implementations (data plane): store/retrieve actual values.
-- `CacheManager` sits between: enforces auth, delegates tier selection to policy, coordinates via Cachelito.
-
-**No control guard may cross `.await` or I/O.** Cachelito's `acquire()` returns a `ControlSnapshot` with `Arc<Notify>` — wait on the notify, not on a shard guard. The control plane is a pre-allocated sharded slot map (no DashMap; TETANUS Rule 3).
-
-## Module Layout
-
-```
-src/
-├── lib.rs              # crate root, re-exports, documentation
-├── manager.rs          # CacheManager (public API)
-├── control/mod.rs      # → cachelito.rs (NOT src/control.rs)
-├── control/cachelito.rs # Cachelito control plane
-├── policy.rs           # CachePolicy trait, Default+Strict policies, CacheOperation, precedence ladder
-├── tier/mod.rs         # TierId, TierRegistry (NOT src/tier.rs)
-├── tier/trait.rs       # CacheTier trait, TierHealth (aliased as tier_trait)
-├── tier/l0.rs – l5.rs  # Tier stubs (fixed-capacity, Fallible with_capacity)
-├── tier/test.rs        # TestTier (health-controllable for failure tests)
-├── tier/fixed_tier_stub.rs # FixedTierStub (slot map + TTL) backing L0-L2/TestTier
-├── tier/backends/      # ByteValue codec + L3RedisBackend / L4SledBackend / L5OriginBackend
-├── entry.rs            # Generation, EntryState, CacheEntry
-├── error.rs            # CacheError enum (Copy)
-├── identity.rs         # IdentityContext + CacheContext builder
-├── key.rs              # Key trait + KeyRef borrowed key view
-└── pool.rs             # MemoryPool fixed-capacity allocator
+```bash
+cargo xtask contract        # validate theSix.toml against the runner + checkout
+cargo xtask gates           # the mandatory pass
+cargo xtask run <name>      # one gate
+cargo xtask deferred        # what is excluded, and why
+cargo xtask layers          # test-target -> layer mapping
+cargo xtask toolchain       # which accelerations are active
+cargo bench --all-features  # criterion benchmarks
 ```
 
-**Note**: `src/control.rs` and `src/tier.rs` do NOT exist — modules are in `mod.rs` and subdirectories. `src/metrics.rs` also does not exist. This line previously claimed it was "listed in README"; it was not, so that cross-reference was itself the rot.
+Order matters: fmt → contract → check → clippy → doc → tests → doctest →
+deny → machete → package. `loom`, `performance`, `soak` and `fuzz` are deferred.
 
-## Key Types
+## Architecture
 
-- `CacheManager<K, V, P>` — generic over key type `K`, value type `V`, and policy type `P`. All three must be specified.
-- `Cachelito` — no generic parameters. Use `Cachelito::new()` or `with_shards(n)`.
-- `TierRegistry` — tracks all 6 tiers. `TierId::L0` through `TierId::L5`.
-- `ControlSnapshot` — returned by `Cachelito::acquire()`. Contains state copy + `Arc<Notify>` for waiting. **Do not hold across await.**
+### Control plane — `src/control/cachelito.rs`
 
-## Auth Model
+A pre-allocated sharded slot map holding entry state, generation, population
+ownership and a **commit intent**. No `DashMap` (TETANUS Rule 3): everything is
+allocated at init.
 
-- `CacheManager::check_auth()` enforces `IdentityContext::is_authenticated()`; unauthenticated -> `CacheError::Unauthenticated` (pre-policy).
-- Authorization is policy-driven: `PolicyDecision.authorized` gate applied to ALL mutating ops (set/invalidate/remove/promote/demote/refresh) + reads.
-- Identity is supplied per-request via `CacheContext`; `DefaultPolicy` is permissive, `StrictPolicy` denies anonymous writes.
-- `CacheError::Unauthenticated` and `CacheError::Unauthorized` are distinct error variants.
+* Every method is **synchronous** and returns an owned `ControlSnapshot`. That is
+  what makes "no guard across `.await`" structural rather than a convention.
+* `peek` observes without claiming. `acquire` claims. Using `acquire` for a
+  read-only operation wedges the entry — that was a real bug in `get` and
+  `exists`.
+* `prepare` / `commit` / `abort` are the two-phase commit. The intent holds a key
+  hash, a target rung, a generation and a kind — **never a payload**.
+* `abort` restores the state the intent interrupted, and declines if a `commit`
+  already won.
+* `bump_generation` does the read-modify-write under the shard lock. A caller
+  must not compute `snapshot.generation + 1` itself.
 
-## Public API Surface
+### Data plane — `src/tier/`
 
-`CacheManager` methods, all taking `&CacheContext` (identity + TTL builder):
-`get`, `get_or_fetch`, `set`, `invalidate`, `remove`, `exists`, `refresh`, `promote`, `demote`.
+`CacheTier` is `async` (`#[async_trait]`, boxed futures for dyn-compatibility)
+because real backends are I/O. Implementations store and retrieve; they decide
+nothing.
 
-**Breaking change (v0.2.0)**: every operation signature changed from `(&self, key, ...)` to `(&self, key, ctx: &CacheContext, ...)`. Build the context once per request:
-`CacheContext::new(IdentityContext::new(principal, roles, tenant))` or `CacheContext::anonymous()`.
+* Every value carries a `ContentDigest`; a mismatch is `CacheError::Corrupted`.
+* Slots are identified by a 128-bit `KeyFingerprint` over the full key, so a
+  placement collision cannot alias two keys. `Placement` is injectable so a test
+  can force the collision and demonstrate the property.
+* `find_slot` scans the whole table rather than stopping at a hole: open
+  addressing plus deletion orphans entries otherwise.
+* `capability()` is a **default method** that reports pessimistically. A tier
+  that can do better overrides it.
 
-Policies: `DefaultPolicy` (permissive baseline) and `StrictPolicy` (denies anonymous writes). Implement `CachePolicy` for custom authz.
+### Manager — `src/manager.rs`
 
-**Admin/test-only** (not part of the data-plane API):
-- `CacheManager::tier(&TierId)` — returns `Arc<dyn CacheTier<V>>` for test/admin access
-- `CacheManager::capabilities()` — what each rung is actually bound to
-- `CacheManager::has_tier(&TierId)` — distinguishes "bound" from "substituted" (`tier_for` returns L0 for an unbound id)
-- `CacheManager::cachelito()` — returns `&Cachelito` for test access
-- `CacheManager::with_timeout(policy, cachelito, registry, tiers, pool, duration)` — custom wait timeout
+`CacheManager<K, V, P>` enforces authentication, delegates tier selection to
+policy, and coordinates through `Cachelito`.
 
-## Real Backends (feature-gated)
+* `bound_tier(id) -> Option<..>` is the only rung accessor. There is no
+  substitution: an unbound rung returns `None`, never another rung's tier.
+* `nearest_bound_rung(wanted)` resolves a *policy choice* to the best bound rung
+  at or below it. That is routing, not substitution.
+* `set` walks down the ladder on any rung-level failure (full, unavailable,
+  timed out, corrupt) and retries a lost commit race. It returns an error only
+  when every rung below refuses.
+* `wait_for_population` registers with `Notified::enable()` **before** deciding
+  to wait, and re-reads afterwards. `notify` is `notify_waiters`; the two halves
+  pair to close the lost-wakeup window without stranding other waiters.
+* A `PopulationGuard` releases the claim on `Drop`, so cancellation cannot wedge
+  a key.
 
-In addition to the in-memory tiers, real backends exist behind features and require `V: ByteValue`:
-- `L3RedisBackend` (`feature = "redis"`) — distributed, sync connection
-- `L4SledBackend` (`feature = "sled"`) — persistent, embedded sled; stores TTL prefix + lazy eviction
-- `L5OriginBackend` — origin-fallback via pluggable `OriginFetcher`/`OriginWriter` callbacks
-- `L5OxigraphBackend` (`feature = "oxigraph"`) — RDF/SPO; one quad per entry, so entries are SPARQL-queryable. Built with `default-features = false` on purpose: oxigraph's default feature is `rocksdb`
+### Policy — `src/policy.rs`
 
-`moka` remains removed as a dead feature; reintroduce when implemented. The core `CacheTier<V>` trait is **async** as of 1.0 (`#[async_trait]`) and still `Clone + Send + Sync + 'static`. Every real backend is I/O, so a sync trait could only reach one by blocking inside a sync method, which deadlocks on a runtime thread.
+`cache_ladder()` is the single iteration source for every rung scan. The
+fail-open fallback, promotion and demotion are all bounded by
+`LAST_CACHE_TIER`, so a fallback can never surface authority data.
 
-### What is deliberately NOT here
+### Capability / authority / continuity
 
-Postgres/pgvector, Neo4j and HelixDB are **not** implemented, and `rocksdb` is not a feature. Each of the first three needs a live service to verify, and a tier that cannot be run is a liability in a cache library. RocksDB would compile RocksDB's C++ and pull cmake/clang and bindgen into a stock-toolchain crate, turning every `--all-features` CI run into a native compile. `L4SledBackend` remains the persistent rung.
+* `src/capability.rs` — `CapabilityFlags` × `OperationalState` ×
+  `DurabilityClass`. Three axes because the properties are not mutually
+  exclusive.
+* Authority is a **configured role** (`CacheManager::authority_tier`), stamped
+  onto the capability report rather than inferred from a tier number.
+* `src/continuity.rs` — `ContinuityState`, `RecoveryDirection`,
+  `RecoveryOutcome`. A `Write` intent aborts on recovery; a `Move` completes
+  forward.
+* `src/integrity.rs` — digests and fingerprints. The digest is explicitly
+  **non-cryptographic**: it detects accidental corruption, not tampering.
+* `src/telemetry.rs` — `OperationRecord` with the eleven contract fields. No
+  payload; keys appear only as a `KeyIdentity` digest plus a length.
 
-## Tier Stubs
+### Keys and tenants
 
-Stubs (L0-L2, TestTier) wrap a sharded fixed-capacity slot map; L3-L5 wrap the same
-thing as **fallbacks**. `new()` is infallible (panics only on startup pool-alloc
-failure — sanctioned init mode); `with_capacity(n)` is fallible and returns
-`Result` (rejects capacity 0).
+`frame_tenant_key` folds the tenant into the key with an explicit `0x00`
+separator. Concatenation would make tenant `ab` + key `c` indistinguishable from
+tenant `a` + key `bc`. An oversized frame is **rejected, not truncated**.
 
-**L3/L4/L5 are fallbacks, not implementations of their tiers' contracts.** They
-store values, so the ladder works out of the box, and they report
-`BackendKind::InMemoryFallback` so they can never read as the distributed or
-durable rung they nominally are. `BackendKind::is_native()` is false for a
-fallback for exactly this reason. This doc previously claimed stubs L0-L5 all
-wrap `FixedTierStub` while the code had L3/L4/L5 return
-`Err(TierUnavailable)` on every operation.
+`IdentityContext::tenant` used to be read by zero lines of the crate; it is now
+part of the key. **This invalidates every existing cached key** — see the 2.0.0
+release notes.
 
-`L6` is the authority tier (Postgres + pgvector intended) and has no in-memory
-stub on purpose: an in-process L6 would be exactly the misrepresentation the
-capability surface exists to prevent.
+## Test layers
 
-Storage is sharded across independently locked, pre-allocated tables keyed by a
-hash of the key — the same pattern `Cachelito` uses. One `Mutex` per tier
-serialised all access to L0. `DashMap` is rejected: it allocates after init
-(TETANUS Rule 3) and its caller-chosen guard lifetime deadlocks a shard when
-held across an `.await`, which the now-async tiers make possible.
+| Layer | Target | Demonstrates |
+|---|---|---|
+| contract | `tests/contract` | The TOML is load-bearing |
+| unit | `integration` `hierarchy` `policy` `stampede` | Core behaviour |
+| negative | `negative` | 19 failure modes, each by resulting state |
+| fault_injection | `fault_injection` | 11 faults, each proven to fire |
+| property | `property` | 9 invariants, randomised with shrinking |
+| concurrency | `concurrency` `await_safety` `sharding` `loom` | Adversarial races |
+| capability | `capability` `l6_authority` | No false claims |
+| recovery | `recovery` | Idempotent, repeatable recovery |
+| durability | `durability` | Only proven claims are `Verified` |
+| security | `security` | No cross-tenant/key access; no payload leaks |
+| performance | `performance` | Percentiles, shard independence, boundedness |
+| soak | `soak` | Endurance, capacity, isolation at volume |
+| backends | `backends` `oxigraph_backend` | Real backends |
 
-## Test Patterns
+`testkit` is a dev-only crate holding the harness: `FaultyTier` with its
+`FaultLedger`, `RecordingTier`, `HangingTier`, `framed_key`, and the coverage
+registries. Use it rather than duplicating a manager builder.
 
-Integration tests share a `make_manager()` helper pattern. Stampede tests use `make_manager_with_timeout()` with short durations (100ms–2s) to trigger timeout paths.
+### Anti-vacuity — non-negotiable
 
-`TestTier` (in `src/tier/test.rs`) has `set_healthy(bool)` for simulating tier failure in `test_tier_failure` and `test_tier_recovery`.
+* A test that injects a fault asserts the **ledger** recorded it.
+* A test that claims a stall asserts `HangingTier::reached() > 0`.
+* A test that reaches for the control plane uses `testkit::framed_key`; a raw
+  application key silently addresses nothing.
+* A test that seeds an entry must `commit` it. A merely `prepare`d entry reads as
+  `Prepared` and never routes to a rung, so injected read faults will not fire.
+* `testkit::coverage` registries are compared for **equality** against the
+  contract, so dropping a required case fails `cargo xtask contract`.
 
-## Crate Features
+## Repository config
 
-Optional backend features `redis`, `sled` and `oxigraph` are implemented (see Real
-Backends). `moka` was removed as a dead feature. The default feature build is
-in-memory tiers only: L0-L2 in-memory, L3-L5 in-memory fallbacks, L6 unbound.
-
-`CacheManager::capabilities()` returns what every rung is actually bound to,
-including `BackendKind::Unavailable` for rungs that are not bound. Prefer it to
-inferring a backend from an operation's error.
-
-## CI
-
-`.github/workflows/ci.yml` runs on push/PR to `main` (Rust 1.98). Jobs: fmt, check, test (incl. doctest), clippy `-D warnings`, doc, package + publish-dry-run, plus TETANUS static-analysis gates: cargo-deny, cargo-machete, miri (no-op; `#![forbid(unsafe_code)]`).
-
-## Important Constraints
-
-1. Application code MUST NOT select cache tiers directly
-2. Cachelito MUST NOT store payload data
-3. No control guard across `.await` or I/O
-4. No global lock around cache hierarchy
-5. Single-flight: only one population per key at a time
-6. Generation-based invalidation: stale results rejected
-7. Tier failure isolation via circuit breaker (5 consecutive failures = circuit open); registry health updated from real tier outcomes
-8. `CacheError` is the single error type for all failures (structured, not strings)
-
-## Repository Config
-
-- Edition: **2024**
-- Rust toolchain / MSRV: **1.98**
-- No `kilo.json` at repo root (Kilo config is in `.kilo/` directory)
-- `living.toml` tracks handover/session/changelog state
+* Edition **2024**, MSRV **1.98**. `#![deny(warnings)]` and
+  `#![forbid(unsafe_code)]` at the crate root.
+* Build profiles use `debug = 0` and `opt-level = 1` for dependencies: the gate
+  matrix ran out of disk with debuginfo on (18GB of artifacts).
+* `.cargo/config.toml` sets sccache; the gate runner adds `clang` + `mold` when
+  both are present.
+* `loom-tests` is a cargo **feature**, not `--cfg loom`: rustflags are part of
+  the sccache key, so switching them invalidates every dependency build.
+* `fuzz/` is an excluded workspace: it needs nightly and libFuzzer, so it cannot
+  run under the MSRV gates. CI runs it as an advisory job.
+* `living.toml` tracks handover state.

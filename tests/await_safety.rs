@@ -213,9 +213,14 @@ async fn the_watchdog_detects_a_blocked_control_plane() {
     let lock = Arc::new(std::sync::Mutex::new(()));
     let held = lock.clone();
 
+    // Five seconds, not thirty. Dropping a `spawn_blocking` handle does not abort
+    // the task, so the thread runs to completion and tokio's blocking pool cannot
+    // shut down until it does — a 30s sleep here added 30s to the gate's wall
+    // clock for no extra coverage. It must comfortably outlive the 2s timeout
+    // below, or the lock would be released before the assertion.
     let parked = tokio::task::spawn_blocking(move || {
         let _guard = held.lock();
-        std::thread::sleep(Duration::from_secs(30));
+        std::thread::sleep(Duration::from_secs(5));
     });
     tokio::time::sleep(Duration::from_millis(50)).await;
 

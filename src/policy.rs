@@ -166,6 +166,32 @@ pub struct DefaultPolicy;
 /// rather than an accident of `L5.as_usize()` appearing in three places.
 pub const LAST_CACHE_TIER: crate::tier::TierId = crate::tier::TierId::L5;
 
+/// Every rung the cache ladder may select, in ladder order.
+///
+/// This is the single iteration source for every path that scans rungs:
+/// policy selection, promotion, demotion, and the fail-open fallback scan. The
+/// previous fallback iterated `TierRegistry::all()`, which includes the
+/// authority rung — so a fallback could surface authority data, and on a
+/// six-rung manager `tier_for(L6)` substituted L0, meaning the scan could return
+/// L0's bytes labelled as a lower rung's.
+///
+/// Returning a `const` array rather than a `Vec` keeps this allocation-free,
+/// which matters because the fallback runs on the population failure path.
+pub const fn cache_ladder() -> [crate::tier::TierId; 6] {
+    let _ = LAST_CACHE_TIER;
+    [
+        crate::tier::TierId::L0,
+        crate::tier::TierId::L1,
+        crate::tier::TierId::L2,
+        crate::tier::TierId::L3,
+        crate::tier::TierId::L4,
+        crate::tier::TierId::L5,
+    ]
+}
+
+/// The authority rung, named once so no call site infers it from a tier number.
+pub const AUTHORITY_TIER: crate::tier::TierId = crate::tier::TierId::L6;
+
 /// Decision precedence, per `specs/policy.toml`. Lower number = applied first.
 pub mod precedence {
     pub const EXPLICIT_POLICY: u8 = 1;

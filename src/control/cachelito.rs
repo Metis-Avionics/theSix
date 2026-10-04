@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Notify;
 
-use crate::entry::{EntryState, Generation};
+use crate::continuity::{RecoveryDirection, RecoveryOutcome};
+use crate::entry::{CommitIntent, CommitToken, EntryState, Generation, IntentKind, TierIdLite};
 use crate::error::CacheError;
 use crate::tier::TierId;
 use crate::tier::tier_trait::TierHealth;
@@ -20,6 +21,7 @@ pub enum EntryStateAtomic {
     Stale = 2,
     InFlight = 3,
     Failed = 4,
+    Prepared = 5,
 }
 
 impl TryFrom<u8> for EntryStateAtomic {
@@ -31,19 +33,21 @@ impl TryFrom<u8> for EntryStateAtomic {
             2 => Ok(EntryStateAtomic::Stale),
             3 => Ok(EntryStateAtomic::InFlight),
             4 => Ok(EntryStateAtomic::Failed),
+            5 => Ok(EntryStateAtomic::Prepared),
             _ => Err(()),
         }
     }
 }
 
 impl From<EntryState> for EntryStateAtomic {
-    fn from(s: EntryState) -> Self {
-        match s {
-            EntryState::Absent => EntryStateAtomic::Absent,
-            EntryState::Ready => EntryStateAtomic::Ready,
-            EntryState::Stale => EntryStateAtomic::Stale,
-            EntryState::InFlight => EntryStateAtomic::InFlight,
-            EntryState::Failed => EntryStateAtomic::Failed,
+    fn from(state: EntryState) -> Self {
+        match state {
+            EntryState::Absent => Self::Absent,
+            EntryState::Ready => Self::Ready,
+            EntryState::Stale => Self::Stale,
+            EntryState::InFlight => Self::InFlight,
+            EntryState::Prepared => Self::Prepared,
+            EntryState::Failed => Self::Failed,
         }
     }
 }
@@ -55,6 +59,7 @@ impl From<EntryStateAtomic> for EntryState {
             EntryStateAtomic::Ready => EntryState::Ready,
             EntryStateAtomic::Stale => EntryState::Stale,
             EntryStateAtomic::InFlight => EntryState::InFlight,
+            EntryStateAtomic::Prepared => EntryState::Prepared,
             EntryStateAtomic::Failed => EntryState::Failed,
         }
     }
@@ -75,6 +80,29 @@ pub struct ControlEntry {
     /// waiting callers receive the owner's failure (stampede.toml
     /// `waiters_receive_population_error`). 0 = none.
     last_error: std::sync::atomic::AtomicU8,
+    /// Whether a commit intent is outstanding.
+    ///
+    /// A separate flag rather than overloading `intent_generation == 0`: an
+    /// intent prepared on a never-written key legitimately has generation 0, so
+    /// using 0 as the sentinel made exactly those intents invisible — and an
+    /// invisible intent is an unrecoverable one.
+    intent_present: std::sync::atomic::AtomicBool,
+    /// The generation the outstanding intent was prepared for.
+    intent_generation: std::sync::atomic::AtomicU64,
+    /// `IntentKind::as_u8` while an intent is outstanding, else 0.
+    intent_kind: std::sync::atomic::AtomicU8,
+    /// Index of the rung the intent targets, else 0.
+    intent_tier: std::sync::atomic::AtomicU8,
+    /// When the intent was recorded, for the recovery sweep.
+    intent_since_nanos: std::sync::atomic::AtomicU64,
+    /// The state the entry was in when the intent was recorded.
+    ///
+    /// `abort` restores this rather than forcing `Failed`. A failed write to a
+    /// key that already had a committed value must leave that value readable:
+    /// the write was rejected, so nothing about the previously committed state
+    /// changed, and forcing `Failed` threw away a good value because a later
+    /// write did not land.
+    intent_prev_state: std::sync::atomic::AtomicU8,
     key_hash: u64,
     notify: Arc<Notify>,
 }
@@ -89,6 +117,12 @@ impl ControlEntry {
             population_timestamp: std::sync::atomic::AtomicU64::new(0),
             expiration_nanos: std::sync::atomic::AtomicU64::new(0),
             last_error: std::sync::atomic::AtomicU8::new(0),
+            intent_present: std::sync::atomic::AtomicBool::new(false),
+            intent_generation: std::sync::atomic::AtomicU64::new(0),
+            intent_kind: std::sync::atomic::AtomicU8::new(0),
+            intent_tier: std::sync::atomic::AtomicU8::new(0),
+            intent_since_nanos: std::sync::atomic::AtomicU64::new(0),
+            intent_prev_state: std::sync::atomic::AtomicU8::new(EntryStateAtomic::Absent as u8),
             key_hash,
             notify: Arc::new(Notify::new()),
         }
@@ -181,6 +215,21 @@ impl ControlEntry {
             .store(nanos, std::sync::atomic::Ordering::Release);
     }
 
+    /// Wake every waiter currently registered for this entry.
+    ///
+    /// `notify_waiters`, not `notify_one`. A single-flight population has *many*
+    /// waiters — the 100-caller burst test has 99 — and `notify_one` stores one
+    /// permit, so 98 of them waited out the full timeout and the test took five
+    /// seconds to report a fetch that had already succeeded.
+    ///
+    /// `notify_waiters` does not store a permit, so a waiter that has not yet
+    /// registered would miss the wakeup. That window is closed on the *waiting*
+    /// side rather than here: `Notified::enable()` registers the future before
+    /// the waiter decides whether to wait, and the waiter then re-reads the
+    /// control plane. So the two halves pair up:
+    ///
+    /// * not yet registered → the re-read sees the finished state and returns;
+    /// * registered → `notify_waiters` reaches it.
     pub fn notify(&self) {
         self.notify.notify_waiters();
     }
@@ -191,6 +240,75 @@ impl ControlEntry {
 
     pub fn key_hash(&self) -> u64 {
         self.key_hash
+    }
+
+    /// The state an outstanding intent interrupted.
+    pub fn intent_prev_state(&self) -> EntryState {
+        EntryState::from(
+            EntryStateAtomic::try_from(
+                self.intent_prev_state
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
+            .unwrap_or(EntryStateAtomic::Absent),
+        )
+    }
+
+    pub fn set_intent_prev_state(&self, state: EntryState) {
+        self.intent_prev_state.store(
+            EntryStateAtomic::from(state) as u8,
+            std::sync::atomic::Ordering::Release,
+        );
+    }
+
+    /// Record a commit intent. Payload-free by construction: a key hash, a
+    /// target rung, a generation and a kind. Nothing here can reconstruct a
+    /// value, so a crash cannot leak one through the control plane.
+    pub fn set_intent(&self, intent: &CommitIntent) {
+        self.intent_present
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.intent_generation
+            .store(intent.generation.0, std::sync::atomic::Ordering::Release);
+        self.intent_kind
+            .store(intent.kind.as_u8(), std::sync::atomic::Ordering::Release);
+        self.intent_tier
+            .store(intent.target_tier.0, std::sync::atomic::Ordering::Release);
+        self.intent_since_nanos
+            .store(intent.started_nanos, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn intent(&self) -> Option<CommitIntent> {
+        if !self
+            .intent_present
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return None;
+        }
+        let generation = self
+            .intent_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        let kind =
+            IntentKind::from_u8(self.intent_kind.load(std::sync::atomic::Ordering::Acquire))?;
+        Some(CommitIntent {
+            kind,
+            target_tier: TierIdLite::new(
+                self.intent_tier.load(std::sync::atomic::Ordering::Acquire),
+            ),
+            generation: Generation::new(generation),
+            started_nanos: self
+                .intent_since_nanos
+                .load(std::sync::atomic::Ordering::Acquire),
+        })
+    }
+
+    pub fn clear_intent(&self) {
+        self.intent_present
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.intent_kind
+            .store(0, std::sync::atomic::Ordering::Release);
+        self.intent_generation
+            .store(0, std::sync::atomic::Ordering::Release);
+        self.intent_since_nanos
+            .store(0, std::sync::atomic::Ordering::Release);
     }
 
     /// Record a TTL for the entry, marking when it was armed. `0` clears it.
@@ -270,6 +388,9 @@ pub struct ControlSnapshot {
     pub expired: bool,
     /// Terminal population error recorded by `fail`, if any.
     pub last_error: Option<CacheError>,
+    /// An outstanding commit intent, if any. Present only while the entry is
+    /// `Prepared`.
+    pub intent: Option<CommitIntent>,
     pub notify: Arc<Notify>,
 }
 
@@ -403,6 +524,7 @@ impl Cachelito {
             ttl: entry.ttl(),
             expired: entry.is_expired(),
             last_error: entry.last_error(),
+            intent: entry.intent(),
             notify: entry.notify_clone(),
         }
     }
@@ -450,16 +572,24 @@ impl Cachelito {
                         true,
                         Some(Instant::now()),
                     ))
-                } else if let Err(raw_err) = result {
-                    let observed_state = EntryState::from(
-                        EntryStateAtomic::try_from(raw_err).unwrap_or(EntryStateAtomic::Absent),
-                    );
+                } else if let Err(observed) = result {
+                    // The CAS lost: another caller claimed this entry between our
+                    // read and our write. Report what the entry actually is *now*,
+                    // not the value the CAS returned.
+                    //
+                    // The CAS's error value is the state it expected to replace,
+                    // which is `Absent` — the state we read. Reporting that
+                    // produced a snapshot that looked claimable, so the losing
+                    // caller went on to become a second population owner and
+                    // single-flight admitted two fetches for one key. Re-reading
+                    // under the same guard is what makes the loser a waiter.
+                    let _ = observed;
                     Ok(Self::snapshot_of(
                         entry,
-                        observed_state,
-                        current_gen,
-                        current_tier,
-                        false,
+                        entry.state(),
+                        entry.generation(),
+                        entry.tier(),
+                        entry.is_population_owner(),
                         None,
                     ))
                 } else {
@@ -473,6 +603,18 @@ impl Cachelito {
                     ))
                 }
             }
+            // A prepared write owns the entry until it commits or aborts.
+            // Reporting it as claimable here would let a second writer prepare
+            // on top of an uncommitted one, which is precisely the interleaving
+            // the two-phase protocol exists to prevent.
+            EntryState::Prepared => Ok(Self::snapshot_of(
+                entry,
+                EntryState::Prepared,
+                current_gen,
+                current_tier,
+                false,
+                None,
+            )),
             EntryState::InFlight => Ok(Self::snapshot_of(
                 entry,
                 EntryState::InFlight,
@@ -635,6 +777,325 @@ impl Cachelito {
 
     pub fn update_tier_health(&self, _key: &[u8], _health: TierHealth) -> Result<(), CacheError> {
         Ok(())
+    }
+
+    /// Observe an entry without claiming it.
+    ///
+    /// `acquire` mutates: it creates the slot, transitions `Absent -> InFlight`,
+    /// bumps the generation and takes population ownership. That is right for an
+    /// operation that may populate and wrong for a read-only probe — which is
+    /// exactly what `exists` used to do, leaving every key it was asked about
+    /// wedged in `InFlight` with an owner that would never publish.
+    ///
+    /// `peek` answers the same question with no side effect, and does not create
+    /// a slot for a key that has never been written.
+    pub fn peek(&self, key: &[u8]) -> Result<ControlSnapshot, CacheError> {
+        let key_hash = Self::compute_key_hash(key);
+        let shard_idx = self.shard_for(key);
+        let shard = &self.shards[shard_idx];
+        #[allow(clippy::significant_drop_tightening)]
+        let guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
+
+        let Some(entry) = guard.find_entry(key_hash) else {
+            // Never written. Report a synthetic Absent so callers need no Option
+            // branch, and do not allocate a slot for it.
+            return Ok(ControlSnapshot {
+                state: EntryState::Absent,
+                generation: Generation::new(0),
+                tier: TierId::L0,
+                population_owner: false,
+                population_timestamp: None,
+                ttl: None,
+                expired: false,
+                last_error: None,
+                intent: None,
+                notify: Arc::new(Notify::new()),
+            });
+        };
+
+        Ok(Self::snapshot_of(
+            entry,
+            entry.state(),
+            entry.generation(),
+            entry.tier(),
+            entry.is_population_owner(),
+            entry.population_timestamp(),
+        ))
+    }
+
+    /// Advance the generation by exactly one, under the shard lock.
+    ///
+    /// The previous manager-side pattern was `set_generation(snapshot.gen + 1)`
+    /// where `snapshot` had been read *before* an `.await`. An invalidation
+    /// landing in that window bumped the generation, and the store then wrote
+    /// back the pre-await value — silently undoing the invalidation. Doing the
+    /// read-modify-write under the guard makes it indivisible, so a concurrent
+    /// bump is composed with rather than overwritten.
+    pub fn bump_generation(&self, key: &[u8]) -> Result<Generation, CacheError> {
+        let key_hash = Self::compute_key_hash(key);
+        let shard_idx = self.shard_for(key);
+        let shard = &self.shards[shard_idx];
+        let mut guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
+        let entry = guard
+            .find_or_create_entry(key_hash)
+            .map_err(|_| CacheError::ConfigurationError)?;
+        let next = entry.increment_generation();
+        entry.notify();
+        Ok(next)
+    }
+
+    /// Record a commit intent and move the entry to `Prepared`.
+    ///
+    /// The write half of two-phase commit. After it returns the entry is
+    /// `Prepared`: reads see a miss, another writer is refused rather than
+    /// allowed to interleave, and a crash leaves a payload-free record that
+    /// recovery can resolve.
+    /// `expected_generation` is `Some` when the caller read the entry and wants
+    /// the prepare to fail if it has moved since, and `None` when the caller is
+    /// starting an operation from scratch. It is an `Option` rather than
+    /// "generation 0 means any" because 0 is a real generation — the one a
+    /// never-written key has — and overloading it makes "expect generation 0"
+    /// silently mean "expect nothing".
+    pub fn prepare(
+        &self,
+        key: &[u8],
+        expected_generation: Option<Generation>,
+        target_tier: TierId,
+        kind: IntentKind,
+    ) -> Result<CommitToken, CacheError> {
+        let key_hash = Self::compute_key_hash(key);
+        let shard_idx = self.shard_for(key);
+        let shard = &self.shards[shard_idx];
+        let mut guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
+        let entry = guard
+            .find_or_create_entry(key_hash)
+            .map_err(|_| CacheError::ConfigurationError)?;
+
+        let current = entry.generation();
+        // The entry must not have moved since the caller read it, or the data
+        // step is about to write a value derived from a superseded decision.
+        if let Some(expected) = expected_generation
+            && expected.0 != current.0
+        {
+            return Err(CacheError::StaleGeneration);
+        }
+
+        let intent = CommitIntent {
+            kind,
+            target_tier: TierIdLite::new(target_tier.as_u8()),
+            generation: current,
+            started_nanos: Self::now_nanos(),
+        };
+        entry.set_intent_prev_state(entry.state());
+        entry.set_intent(&intent);
+        entry.set_state(EntryState::Prepared);
+        entry.set_population_owner(true);
+
+        Ok(CommitToken {
+            key_hash,
+            generation: current,
+            kind,
+            target_tier: intent.target_tier,
+        })
+    }
+
+    /// Commit a prepared intent: the value becomes visible.
+    ///
+    /// Verifies the generation is still the one the intent was prepared for, and
+    /// that the entry is still `Prepared`. Two racing writers can both prepare,
+    /// but only one commits; the loser gets `StaleGeneration` and cannot make its
+    /// value visible. Committing an entry recovery already aborted is rejected
+    /// rather than resurrecting a resolved intent.
+    pub fn commit(
+        &self,
+        token: &CommitToken,
+        ttl: Option<std::time::Duration>,
+    ) -> Result<(), CacheError> {
+        let shard_idx = self.shard_for_index(token.key_hash);
+        let shard = &self.shards[shard_idx];
+        let guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
+        let Some(entry) = guard.find_entry(token.key_hash) else {
+            return Err(CacheError::Miss);
+        };
+
+        if token.expired_by(entry.generation()) || entry.state() != EntryState::Prepared {
+            return Err(CacheError::StaleGeneration);
+        }
+
+        entry.set_state(EntryState::Ready);
+        if let Some(tier) = TierId::from_index(token.target_tier.0) {
+            entry.set_tier(tier);
+        }
+        entry.set_ttl(ttl);
+        entry.set_intent_prev_state(EntryState::Ready);
+        entry.set_population_owner(false);
+        entry.clear_intent();
+        // Re-arm so TTL is measured from commit time, not from prepare time.
+        entry.set_population_timestamp(Some(Instant::now()));
+        entry.set_last_error(None);
+        entry.notify();
+        Ok(())
+    }
+
+    /// Abandon a prepared intent, leaving the entry claimable again.
+    ///
+    /// This is what recovery does to a `Write` intent: the payload may or may not
+    /// have reached the tier, and either way the value is reproducible, so the
+    /// honest resolution is to make the entry look untouched and let the next
+    /// read repopulate. Advancing the generation invalidates anything that did
+    /// land, so a slow writer holding an older token cannot commit it later.
+    ///
+    /// Idempotent — aborting an already-aborted entry succeeds — which is what
+    /// makes repeated recovery safe.
+    pub fn abort(&self, token: &CommitToken, error: CacheError) -> Result<(), CacheError> {
+        let shard_idx = self.shard_for_index(token.key_hash);
+        let shard = &self.shards[shard_idx];
+        #[allow(clippy::significant_drop_tightening)]
+        let guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
+        let Some(entry) = guard.find_entry(token.key_hash) else {
+            // Already gone. Recovery is idempotent, so this is a success.
+            return Ok(());
+        };
+
+        // A commit that already won must not be undone.
+        //
+        // `abort` and `commit` can interleave: the committer's CAS from
+        // `Prepared` can land microseconds before this runs. Restoring the
+        // pre-intent state then would overwrite `Ready` with `Absent` and make a
+        // successfully committed value invisible. A loom model of exactly this
+        // interleaving found it.
+        //
+        // So: only touch an entry that is still `Prepared`. Anything else has
+        // already moved on, and the correct action for a stale abort is none.
+        if entry.state() != EntryState::Prepared {
+            return Ok(());
+        }
+
+        // Restore the interrupted state rather than forcing `Failed`.
+        //
+        // Nothing about the previously committed value changed: the write was
+        // rejected before it could replace anything. Forcing `Failed` made a
+        // failed write to a populated key render that key unreadable, which is
+        // data loss caused by an error that should have been a no-op.
+        //
+        // The generation is deliberately *not* advanced. It is what makes a
+        // second `commit` with the same token fail, but `commit` also requires
+        // the entry to still be `Prepared`, and this abort has just made it not
+        // `Prepared`. So the double-committed token is still rejected, without
+        // invalidating a good value.
+        let restored = entry.intent_prev_state();
+        entry.set_state(restored);
+        entry.set_population_owner(false);
+        entry.clear_intent();
+        entry.set_last_error(Some(error));
+        entry.notify();
+        Ok(())
+    }
+
+    /// Every outstanding intent older than `older_than_nanos`.
+    ///
+    /// The recovery sweep. Returns key hashes because the control plane only ever
+    /// stores hashes; resolving an intent needs the key, which only the owning
+    /// `CacheManager` still has.
+    pub fn stale_intents(&self, older_than_nanos: u64) -> Vec<(u64, CommitIntent)> {
+        let cutoff = Self::now_nanos().saturating_sub(older_than_nanos);
+        let mut out = Vec::new();
+        for shard in &self.shards {
+            let Ok(guard) = shard.lock() else { continue };
+            for slot in guard.entries.iter().flatten() {
+                let Some(intent) = slot.intent() else {
+                    continue;
+                };
+                if intent.started_nanos <= cutoff {
+                    out.push((slot.key_hash(), intent));
+                }
+            }
+        }
+        out
+    }
+
+    /// Abort an intent by key hash, for a recovery sweep that has no key bytes.
+    ///
+    /// The recovery sweep finds intents by hash, because the control plane
+    /// deliberately stores only hashes. Aborting needs nothing but the hash —
+    /// it clears the claim, advances the generation and invalidates anything
+    /// that landed — so the common case does not need the key at all.
+    ///
+    /// The earlier version of this took a key slice and the sweep passed an empty
+    /// one, which hashed to the wrong slot and aborted nothing. That failure was
+    /// silent: recovery reported success and left the intent outstanding.
+    pub fn abort_intent_by_hash(
+        &self,
+        key_hash: u64,
+        error: CacheError,
+    ) -> Result<bool, CacheError> {
+        let shard_idx = self.shard_for_index(key_hash);
+        let shard = &self.shards[shard_idx];
+        #[allow(clippy::significant_drop_tightening)]
+        let guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
+        let Some(entry) = guard.find_entry(key_hash) else {
+            return Ok(false);
+        };
+        // Report whether an intent was actually cleared.
+        //
+        // Aborting stays idempotent — a second sweep must be a no-op, not an
+        // error — but returning `Ok(())` unconditionally made two concurrent
+        // sweeps both count the same intent, so a recovery pass reported 28
+        // recoveries for 16 intents. A count that overstates what happened is
+        // worse than no count: it makes the sweep look effective when it may not
+        // have been.
+        if entry.intent().is_none() {
+            return Ok(false);
+        }
+        // Same rule as `abort`: never overwrite a commit that already landed.
+        if entry.state() != EntryState::Prepared {
+            return Ok(false);
+        }
+        let restored = entry.intent_prev_state();
+        entry.set_state(restored);
+        entry.set_population_owner(false);
+        entry.clear_intent();
+        entry.set_last_error(Some(error));
+        entry.notify();
+        Ok(true)
+    }
+
+    /// Resolve an intent discovered by [`Self::stale_intents`], given the key.
+    ///
+    /// Returns what recovery did so the outcome is reportable.
+    /// `recovery_failure_must_be_observable` is a contract clause, and a
+    /// recovery pass that reports nothing is how a silently-diverged entry
+    /// survives a restart.
+    pub fn resolve_intent(
+        &self,
+        key: &[u8],
+        intent: CommitIntent,
+        direction: RecoveryDirection,
+    ) -> Result<RecoveryOutcome, CacheError> {
+        let token = CommitToken {
+            key_hash: Self::compute_key_hash(key),
+            generation: intent.generation,
+            kind: intent.kind,
+            target_tier: intent.target_tier,
+        };
+        match direction {
+            RecoveryDirection::Abort => {
+                self.abort(&token, CacheError::UncommittedIntent)?;
+                Ok(RecoveryOutcome::Aborted { kind: intent.kind })
+            }
+            RecoveryDirection::CompleteForward => {
+                self.commit(&token, None)?;
+                Ok(RecoveryOutcome::Completed { kind: intent.kind })
+            }
+        }
+    }
+
+    fn shard_for_index(&self, key_hash: u64) -> usize {
+        (key_hash as usize) % self.shard_count
+    }
+
+    fn now_nanos() -> u64 {
+        ControlEntry::instant_to_nanos(Instant::now())
     }
 }
 

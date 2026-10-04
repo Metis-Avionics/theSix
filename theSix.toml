@@ -1,0 +1,742 @@
+# theSix — architectural contract.
+#
+# This file is the SOURCE OF TRUTH for the architecture. README.md, AGENTS.md,
+# CHANGELOG.md and code comments derive from it; none of them may restate a
+# requirement in a form that can disagree with it.
+#
+# It is machine-checked, not merely read:
+#   * `cargo xtask contract` validates structure and gate completeness.
+#   * `tests/contract` parses it and asserts each clause is bound to a real test.
+#   * `tests/contract` asserts the version matches CARGO_PKG_VERSION and the rung
+#     count matches `TierId::ALL`, which is how the previous `tier_count = 6` vs
+#     `count = 7` drift was allowed to ship.
+#
+# Anything not expressible here does not belong in the architecture.
+
+[spec]
+name = "theSix"
+version = "2.0.0"
+kind = "hpa-data-continuity-pipeline"
+status = "architectural-revision"
+
+[spec.purpose]
+description = "High-performance availability data continuity and performance pipeline across heterogeneous storage and locality boundaries."
+
+[architecture]
+ontology = "continuity"
+tier_topology = "implementation"
+consumer_backend_coupling = false
+authority_is_explicit = true
+capability_state_is_explicit = true
+# Machine-checked against `TierId::ALL.len()`. The previous `specs/` set carried
+# `tier_count = 6` and `count = 7` in two files at once and shipped; a single
+# asserted number cannot rot that way.
+rung_count = 7
+# Rungs that participate in the cache ladder. Everything at or above this is
+# excluded from policy selection, promotion, demotion and fail-open fallback.
+last_cache_rung = 5
+
+[architecture.boundary]
+consumer_depends_on = "continuity-contract"
+continuity_contract_depends_on = "policy-and-capability"
+policy_depends_on = "storage-topology"
+consumer_knows_backend_identity = false
+
+# ---------------------------------------------------------------------------
+# ACID
+# ---------------------------------------------------------------------------
+
+[acid]
+required = true
+
+[acid.atomicity]
+required = true
+partial_commit_visible = false
+cancelled_operation_may_commit_partially = false
+recovery_must_be_idempotent = true
+# Two-phase commit via a control-plane intent record. The intent holds the key
+# hash, target rung, generation and operation kind -- never a payload -- so the
+# control plane stays payload-free (cachelito.toml invariant).
+commit_protocol = "two-phase-intent"
+prepare_state = "prepared"
+read_of_uncommitted_entry = "miss"
+recovery_direction_prepare_write = "abort"
+recovery_direction_prepare_move = "complete-forward"
+
+[acid.consistency]
+required = true
+invalid_state_may_be_promoted = false
+corruption_may_be_silently_accepted = false
+authority_inversion = false
+stale_generation_may_overwrite_newer_generation = false
+
+[acid.isolation]
+required = true
+intermediate_state_visibility = false
+cross_key_interference = false
+lock_guard_across_await = false
+deadlock_tolerance = false
+
+[acid.durability]
+required = true
+false_durability_claims = false
+fallback_may_claim_authority_durability = false
+committed_data_must_survive_required_failure_domain = true
+# A rung may only report `Verified` if a test drops the store and reopens it.
+# `Delegated` means the backend's own defaults are trusted without a proof.
+durability_classes = ["volatile", "delegated", "verified"]
+
+# ---------------------------------------------------------------------------
+# CIA
+# ---------------------------------------------------------------------------
+
+[cia]
+required = true
+
+[cia.confidentiality]
+required = true
+cross_tenant_access = false
+cross_key_data_exposure = false
+payload_in_error_messages = false
+payload_in_telemetry = false
+unintended_tier_exposure = false
+# Keys are as sensitive as payloads: telemetry identifies a key by a
+# non-reversible digest plus its length, never by its bytes.
+key_identity_is_non_reversible = true
+
+[cia.integrity]
+required = true
+silent_corruption = false
+silent_generation_conflict = false
+silent_stale_data_acceptance = false
+corrupt_data_promoted = false
+# FNV-1a over the entry bytes, framed as len|digest|payload. This detects
+# accidental corruption and truncation. It is explicitly NOT cryptographic and
+# makes no tamper-resistance claim: a 64-bit non-keyed digest is trivially
+# forged by an adversary who can write to the store.
+digest = "fnv1a-64"
+digest_is_cryptographic = false
+
+[cia.availability]
+required = true
+single_tier_failure_must_cascade = false
+control_plane_blocked_by_data_plane = false
+unbounded_retry = false
+unbounded_queue_growth = false
+recovery_required = true
+
+# ---------------------------------------------------------------------------
+# HPA
+# ---------------------------------------------------------------------------
+
+[hpa]
+required = true
+
+[hpa.performance]
+measure = [
+    "throughput",
+    "p50_latency",
+    "p95_latency",
+    "p99_latency",
+    "p99_9_latency",
+    "max_latency",
+    "contention",
+    "allocation_rate",
+    "fallback_rate",
+    "recovery_latency",
+]
+
+[hpa.isolation]
+hot_key_may_block_unrelated_keys = false
+hot_shard_may_block_entire_pipeline = false
+slow_backend_may_block_control_plane = false
+
+[hpa.control_plane]
+must_remain_responsive_during_data_plane_stall = true
+global_data_plane_lock = false
+
+# ---------------------------------------------------------------------------
+# CONTINUITY
+# ---------------------------------------------------------------------------
+
+[continuity]
+required = true
+backend_failure_isolation = true
+graceful_degradation = true
+reconciliation = true
+explicit_state_transitions = true
+
+[continuity.states]
+allowed = [
+    "healthy",
+    "degraded",
+    "unavailable",
+    "recovering",
+    "reconciling",
+]
+
+[continuity.recovery]
+idempotent = true
+repeatable = true
+partial_recovery_safe = true
+recovery_failure_must_be_observable = true
+
+# ---------------------------------------------------------------------------
+# AUTHORITY
+# ---------------------------------------------------------------------------
+
+[authority]
+explicit = true
+inferred_from_tier_number = false
+fallback_may_be_authoritative = false
+authority_loss_must_be_observable = true
+
+[authority.l6]
+role = "authority"
+implementation = "policy-defined"
+durability_required = true
+# The ladder bound. Every rung-scanning path -- policy selection, promotion,
+# demotion, and the fail-open fallback scan -- is bounded by this, so a
+# fallback rung can never surface authority data or be handed authority.
+last_cache_rung = "L5"
+
+# ---------------------------------------------------------------------------
+# CAPABILITIES
+# ---------------------------------------------------------------------------
+
+[capabilities]
+required = true
+operation_failure_must_not_be_primary_discovery_mechanism = true
+# An unbound rung and an unavailable rung are different facts. `tier_for` must
+# not silently substitute another rung for an unbound one.
+unbound_rung_is_substituted = false
+
+[capabilities.states]
+allowed = [
+    "unbound",
+    "unavailable",
+    "volatile",
+    "persistent",
+    "authoritative",
+    "shared",
+    "degraded",
+    "recovering",
+    "in_memory",
+]
+
+# Two orthogonal axes, because these are not mutually exclusive: a rung can be
+# persistent AND shared AND degraded. A single enum cannot say that.
+[capabilities.model]
+property_axis = "CapabilityFlags"
+state_axis = "OperationalState"
+durability_axis = "DurabilityClass"
+
+[capabilities.must_distinguish]
+unbound_from_unavailable = true
+volatile_from_persistent = true
+fallback_from_authority = true
+degraded_from_healthy = true
+recovering_from_available = true
+
+# ---------------------------------------------------------------------------
+# CONCURRENCY
+# ---------------------------------------------------------------------------
+
+[concurrency]
+required = true
+race_free = true
+deadlock_free = true
+cancel_safe = true
+lock_guard_across_await = false
+blocking_runtime_thread = false
+nested_block_on = false
+
+[concurrency.testing]
+adversarial_scheduler = true
+random_interleavings = true
+concurrent_reads = true
+concurrent_writes = true
+read_write_races = true
+promotion_eviction_races = true
+recovery_traffic_overlap = true
+cancellation_races = true
+# loom models the control-plane state machine behind the `loom-tests` feature.
+# It deliberately does NOT model tokio's Notify: loom cannot schedule tokio
+# primitives, so the lost-wakeup race is covered by a deterministic forced
+# interleaving instead. Claiming loom covers it would be a false gate.
+loom_scope = "control-plane-state-machine"
+loom_excludes = ["notify-waiters", "tokio-select"]
+
+# ---------------------------------------------------------------------------
+# NEGATIVE TESTING
+# ---------------------------------------------------------------------------
+
+[testing]
+required = true
+
+[testing.layers]
+# Layer -> cargo test target. Existing flat targets are mapped rather than
+# moved: reorganising working tests to satisfy a directory layout would be
+# churn, and the contract is about which properties are demonstrated, not where
+# the file lives.
+integration = ["integration", "hierarchy", "policy", "stampede"]
+concurrency = ["concurrency", "await_safety", "sharding", "loom"]
+capability = ["capability", "l6_authority"]
+negative = ["negative"]
+property = ["property"]
+fault_injection = ["fault_injection"]
+recovery = ["recovery"]
+durability = ["durability"]
+security = ["security"]
+performance = ["performance"]
+soak = ["soak"]
+contract = ["contract"]
+backends = ["backends", "oxigraph_backend"]
+
+[testing.negative]
+required = true
+
+cases = [
+    "backend_unavailable",
+    "backend_timeout",
+    "backend_hang",
+    "malformed_response",
+    "malformed_payload",
+    "corrupt_payload",
+    "invalid_metadata",
+    "capacity_exhaustion",
+    "cancelled_operation",
+    "duplicate_operation",
+    "stale_generation",
+    "generation_conflict",
+    "partial_write",
+    "partial_promotion",
+    "authority_unavailable",
+    "fallback_unavailable",
+    "recovery_failure",
+    "process_restart",
+    "invalid_configuration",
+]
+
+[testing.negative.requirements]
+fault_must_actually_occur = true
+post_failure_state_must_be_verified = true
+silent_failure = false
+
+# ---------------------------------------------------------------------------
+# PROPERTY TESTING
+# ---------------------------------------------------------------------------
+
+[testing.property]
+required = true
+randomized_operations = true
+randomized_keys = true
+randomized_values = true
+randomized_failures = true
+randomized_concurrency = true
+shrinking = true
+
+[testing.property.invariants]
+no_silent_data_loss = true
+no_cross_key_corruption = true
+no_authority_inversion = true
+no_invalid_state_promotion = true
+no_deadlock = true
+no_lock_across_await = true
+no_capability_misreporting = true
+no_false_durability = true
+recovery_is_idempotent = true
+
+# ---------------------------------------------------------------------------
+# FUZZING
+# ---------------------------------------------------------------------------
+
+[testing.fuzz]
+required = true
+panic_free = true
+memory_safe = true
+silent_corruption = false
+# cargo-fuzz needs nightly and a libFuzzer build, so it lives in an excluded
+# crate and cannot run under MSRV 1.98. The same trust boundaries are covered in
+# CI by the `proptest` byte strategies in `tests/negative`, which DO run under
+# 1.98. Fuzzing is depth, not the only coverage.
+requires_nightly = true
+runs_under_msrv_gates = false
+
+targets = [
+    "keys",
+    "payloads",
+    "serialized_payloads",
+    "metadata",
+    "backend_responses",
+    "capabilities",
+    "generation_metadata",
+    "routing",
+    "configuration",
+]
+
+# ---------------------------------------------------------------------------
+# FAULT INJECTION
+# ---------------------------------------------------------------------------
+
+[testing.fault_injection]
+required = true
+deterministic = true
+seedable = true
+reproducible = true
+
+faults = [
+    "latency",
+    "timeout",
+    "hang",
+    "read_failure",
+    "write_failure",
+    "metadata_failure",
+    "corruption",
+    "disconnect",
+    "capacity_exhaustion",
+    "failure_after_n_operations",
+    "cancellation",
+]
+
+# ---------------------------------------------------------------------------
+# RECOVERY
+# ---------------------------------------------------------------------------
+
+[testing.recovery]
+required = true
+
+states = [
+    "healthy",
+    "degraded",
+    "failure",
+    "fallback",
+    "recovery",
+    "reconciliation",
+    "healthy",
+]
+
+requirements = [
+    "no_lost_committed_data",
+    "no_duplicate_logical_state",
+    "no_authority_inversion",
+    "stale_data_detectable",
+    "recovery_idempotent",
+    "recovery_failure_safe",
+    "process_restart_safe",
+]
+
+# ---------------------------------------------------------------------------
+# DURABILITY
+# ---------------------------------------------------------------------------
+
+[testing.durability]
+required = true
+
+events = [
+    "process_termination",
+    "backend_restart",
+    "authority_loss",
+    "authority_restoration",
+    "persistence_failure",
+    "incomplete_operation",
+]
+
+false_durability_claims = false
+
+# ---------------------------------------------------------------------------
+# SECURITY
+# ---------------------------------------------------------------------------
+
+[testing.security]
+required = true
+
+requirements = [
+    "tenant_isolation",
+    "key_space_isolation",
+    "payload_not_leaked_to_errors",
+    "payload_not_leaked_to_telemetry",
+    "corruption_detection",
+    "generation_conflict_detection",
+    "stale_data_detection",
+]
+
+# ---------------------------------------------------------------------------
+# OBSERVABILITY
+# ---------------------------------------------------------------------------
+
+[observability]
+required = true
+structured = true
+sensitive_payloads_excluded = true
+
+[observability.operation]
+fields = [
+    "operation",
+    "key_identity",
+    "source_tier",
+    "destination_tier",
+    "backend",
+    "generation",
+    "latency",
+    "outcome",
+    "fallback",
+    "failure_class",
+    "recovery_state",
+]
+
+# ---------------------------------------------------------------------------
+# VERIFICATION
+# ---------------------------------------------------------------------------
+
+[verification]
+verification_required = true
+anti_vacuity_required = true
+
+[verification.required]
+fmt = true
+check_all_targets = true
+check_all_features = true
+tests_all_targets = true
+tests_all_features = true
+doctests = true
+clippy_warnings_as_errors = true
+documentation = true
+dependency_audit = true
+dependency_hygiene = true
+package_validation = true
+
+[verification.adversarial]
+negative = true
+property = true
+fuzz = true
+concurrency = true
+fault_injection = true
+recovery = true
+durability = true
+security = true
+performance = true
+soak = true
+
+[verification.anti_vacuity]
+fault_activation_must_be_verified = true
+blocked_state_must_be_verified = true
+corruption_must_be_verified = true
+recovery_path_must_be_verified = true
+fallback_path_must_be_verified = true
+
+# ---------------------------------------------------------------------------
+# VERIFICATION GATES
+#
+# The gate list is data, not prose: `cargo xtask gates` executes exactly this,
+# in this order, and refuses to run if a gate here has no execution strategy or
+# a strategy has no gate here. That two-way check is how the contract and the
+# runner are kept from drifting apart.
+#
+# kind:
+#   tool    -- external command (fmt, clippy, deny, ...)
+#   cargo   -- cargo check/clippy/doc invocation
+#   test    -- nextest run over `targets`
+#   doctest -- cargo test --doc
+#   slow    -- #[ignore]d tests, excluded from the default pass
+#   nightly -- requires a nightly toolchain, excluded from the default pass
+# ---------------------------------------------------------------------------
+
+[verification.gate_order]
+order = [
+    "fmt",
+    "contract",
+    "check",
+    "clippy",
+    "doc",
+    "unit",
+    "negative",
+    "fault_injection",
+    "property",
+    "concurrency",
+    "loom",
+    "capability",
+    "recovery",
+    "durability",
+    "security",
+    "backends",
+    "doctest",
+    "deny",
+    "machete",
+    "package",
+    "performance",
+    "soak",
+    "fuzz",
+]
+
+[[verification.gate]]
+name = "fmt"
+kind = "tool"
+command = ["cargo", "fmt", "--check"]
+description = "Formatting is not negotiable; it is the cheapest gate and the one most often skipped."
+
+[[verification.gate]]
+name = "contract"
+kind = "test"
+targets = ["contract"]
+features = ["--all-features"]
+description = "Parses this file and asserts every clause is bound to a real test target."
+
+[[verification.gate]]
+name = "check"
+kind = "cargo"
+args = ["check", "--all-targets", "--all-features"]
+description = "Compiles every target under every feature."
+
+[[verification.gate]]
+name = "clippy"
+kind = "cargo"
+args = ["clippy", "--all-targets", "--all-features", "--", "-D", "warnings"]
+description = "Warnings are errors. The crate also sets `#![deny(warnings)]` at the root."
+
+[[verification.gate]]
+name = "doc"
+kind = "cargo"
+args = ["doc", "--no-deps", "--all-features"]
+description = "Documentation must build; a broken intra-doc link is a broken promise to a consumer."
+
+[[verification.gate]]
+name = "unit"
+kind = "test"
+targets = ["integration", "hierarchy", "policy", "stampede"]
+features = ["--all-features"]
+description = "Core continuity behaviour: round-trips, TTL, generation rejection, single-flight, policy."
+
+[[verification.gate]]
+name = "negative"
+kind = "test"
+targets = ["negative"]
+features = ["--all-features"]
+description = "Every [testing.negative.cases] entry; each asserts post-failure state, not just an error."
+
+[[verification.gate]]
+name = "fault_injection"
+kind = "test"
+targets = ["fault_injection"]
+features = ["--all-features"]
+description = "All eleven faults fire at least once, proven by activation counters."
+
+[[verification.gate]]
+name = "property"
+kind = "test"
+targets = ["property"]
+features = ["--all-features"]
+description = "The nine [testing.property.invariants] over randomised operation sequences."
+
+[[verification.gate]]
+name = "concurrency"
+kind = "test"
+targets = ["concurrency", "await_safety", "sharding"]
+features = ["--all-features"]
+description = "Adversarial races with forced interleavings; asserts the data plane really was stalled."
+
+[[verification.gate]]
+name = "loom"
+kind = "test"
+targets = ["loom"]
+features = ["--features", "loom-tests"]
+env = { THESIX_LOOM = "1" }
+description = "Exhaustive interleavings of the control-plane state machine. Excludes tokio Notify."
+
+[[verification.gate]]
+name = "capability"
+kind = "test"
+targets = ["capability", "l6_authority"]
+features = ["--all-features"]
+description = "Capability honesty: no rung may claim a backend or authority it does not have."
+
+[[verification.gate]]
+name = "recovery"
+kind = "test"
+targets = ["recovery"]
+features = ["--all-features"]
+description = "Full continuity lifecycle with idempotent, repeatable recovery."
+
+[[verification.gate]]
+name = "durability"
+kind = "test"
+targets = ["durability"]
+features = ["--all-features"]
+description = "Drop-and-reopen plus authority loss/restore. Only a proven rung reports `Verified`."
+
+[[verification.gate]]
+name = "security"
+kind = "test"
+targets = ["security"]
+features = ["--all-features"]
+description = "Negative cross-tenant and cross-key access; no payload in errors or telemetry."
+
+[[verification.gate]]
+name = "backends"
+kind = "test"
+targets = ["backends", "oxigraph_backend"]
+features = ["--all-features"]
+description = "Real backends behind feature gates."
+
+[[verification.gate]]
+name = "doctest"
+kind = "doctest"
+description = "Documentation examples must compile and run."
+
+[[verification.gate]]
+name = "deny"
+kind = "tool"
+command = ["cargo", "deny", "check"]
+description = "Advisory and licence audit."
+
+[[verification.gate]]
+name = "machete"
+kind = "tool"
+command = ["cargo", "machete"]
+description = "Unused dependency detection."
+
+[[verification.gate]]
+name = "package"
+kind = "tool"
+command = ["cargo", "package", "--allow-dirty", "--no-verify"]
+description = "Packaging manifest. --no-verify skips the rebuild here; CI runs it separately with verification."
+
+[[verification.gate]]
+name = "performance"
+kind = "slow"
+targets = ["performance"]
+features = ["--all-features"]
+description = "Percentiles, shard independence, control-plane boundedness under a stalled data plane."
+
+[[verification.gate]]
+name = "soak"
+kind = "slow"
+targets = ["soak"]
+features = ["--all-features"]
+description = "Endurance: slot-table pressure, allocation growth, recovery under sustained load."
+
+[[verification.gate]]
+name = "fuzz"
+kind = "nightly"
+command = ["cargo", "+nightly", "fuzz", "build", "--fuzz-dir", "fuzz"]
+description = "Compiles all nine libFuzzer targets. Coverage-guided runs are a separate nightly CI job; not an MSRV gate."
+
+# ---------------------------------------------------------------------------
+# ENGINEERING CONSTRAINTS
+# ---------------------------------------------------------------------------
+
+[engineering]
+rust_memory_safety_required = true
+unsafe_requires_justification = true
+hidden_blocking = false
+runtime_block_on = false
+lock_across_await = false
+silent_backend_substitution = false
+fake_durability = false
+unnecessary_dependencies = false
+
+[engineering.design]
+requirements_drive_ontology = true
+ontology_drives_pipeline = true
+implementation_follows_contract = true
+tier_topology_is_replaceable = true

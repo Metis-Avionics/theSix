@@ -1,23 +1,34 @@
+[workspace]
+members = ["xtask", "testkit"]
+exclude = ["fuzz"]
+
 [package]
 name = "thesix"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2024"
 rust-version = "1.98"
-description = "Policy-driven six-tier cache orchestration for Rust"
+description = "Policy-driven six-tier cache orchestration with an explicit HPA data-continuity contract"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/Metis-Avionics/theSix"
-homepage = "https://github.com/Metis-Avionics/theSix"
+# `theSix.toml` is deliberately NOT excluded: the contract is the source of
+# truth for the architecture, it is machine-checked by `tests/contract` via
+# `include_str!`, and shipping it means a consumer can read the guarantees the
+# crate is actually held to rather than a prose summary of them.
 exclude = [
     ".kilo/**",
-    "specs/**",
+    ".cargo/**",
     "target/**",
-    "*.lock",
+    "xtask/**",
+    "fuzz/**",
+    ".config/**",
     ".gitignore",
     ".github/**",
+    "justfile",
     "living.toml",
     "AGENTS.md",
     "deny.toml",
+    "test.txt",
 ]
 
 keywords = [
@@ -25,7 +36,7 @@ keywords = [
     "caching",
     "concurrency",
     "async",
-    "systems"
+    "systems",
 ]
 
 categories = [
@@ -38,21 +49,38 @@ categories = [
 tokio = { version = "1", features = ["sync", "time", "macros", "rt-multi-thread"] }
 thiserror = "2"
 async-trait = "0.1"
-# default-features = false is load-bearing: oxigraph defaults to `rocksdb`, which
-# would drag the C++ toolchain back in for a backend whose whole point is
-# avoiding that. Without it the store is in-process.
-oxigraph = { version = "0.5", default-features = false, optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 criterion = "0.5"
 polars = { version = "0.55.2", default-features = false, features = ["lazy", "strings", "temporal", "fmt"] }
+# Property tests and structured byte-level fuzzing of the trust boundaries.
+proptest = "1"
+# Adversarial scheduling for the control-plane state machine. A plain dev-dep
+# rather than an optional one, because cargo forbids optional dev-dependencies
+# and making it a normal optional dependency would ship loom in the published
+# crate's manifest. The `loom-tests` feature below is a cfg toggle only.
+loom = "0.7"
+# Contract parsing for tests/contract. A TOML parser is not something to
+# hand-roll; `theSix.toml` is the machine-checked source of truth.
+toml = "0.9"
+serde = { version = "1", features = ["derive"] }
+# Dev-only harness crate: fault injection, recording/probing tiers, manager
+# builders. A path-only dev-dependency, so it is stripped on publish.
+testkit = { path = "testkit" }
 
 [features]
 default = []
-oxigraph = ["dep:oxigraph"]
 redis = ["dep:redis"]
 sled = ["dep:sled"]
+oxigraph = ["dep:oxigraph"]
+faults = []
+# Compiles the loom-backed model checks. A feature toggle rather than
+# `--cfg loom`: rustflags are part of the sccache cache key, so switching them
+# would invalidate every dependency build (polars alone is minutes), whereas a
+# feature reuses the existing cache. The models also self-skip unless
+# THESIX_LOOM=1, so a bare `--all-features` run compiles them and skips them.
+loom-tests = []
 
 [dependencies.redis]
 version = "0.24"
@@ -61,3 +89,50 @@ optional = true
 [dependencies.sled]
 version = "0.34"
 optional = true
+
+# default-features = false is load-bearing: oxigraph's default feature is
+# rocksdb, which compiles RocksDB's C++ and drags cmake/clang/bindgen into a
+# stock-toolchain crate, turning every --all-features run into a native build.
+[dependencies.oxigraph]
+version = "0.5"
+default-features = false
+optional = true
+
+[[bench]]
+name = "cache_operations"
+harness = false
+
+# ---------------------------------------------------------------------------
+# Build profiles.
+#
+# Tuned for a verification matrix rather than for debugging. The gate suite runs
+# the crate under several feature combinations, and dependencies — not this
+# crate — dominate both build time and artifact size.
+#
+#  * `debug = 0` everywhere. Debuginfo was 15GB of a 98GB disk; the gate runner
+#    ran out of space mid-matrix and reported nineteen failures that had nothing
+#    to do with the code. Panic backtraces still carry function names because
+#    `panic = "unwind"` and the symbol table survives.
+#  * `opt-level = 1` for dependencies. They are optimised once and reused across
+#    every gate; the test suite is dominated by their runtime, not this crate's.
+#  * `split-debuginfo` off, since there is no debuginfo to split.
+# ---------------------------------------------------------------------------
+
+[profile.dev]
+debug = 0
+incremental = true
+
+[profile.dev.package."*"]
+opt-level = 1
+debug = 0
+
+[profile.test]
+debug = 0
+
+[profile.bench]
+debug = 0
+
+[profile.release]
+debug = 0
+lto = "thin"
+codegen-units = 1
