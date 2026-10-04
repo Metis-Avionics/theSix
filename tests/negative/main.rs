@@ -502,6 +502,64 @@ testkit::declare_cases! {
     }
 
     /// Two commits prepared on one generation: exactly one may win.
+    /// B22/D2: a writer that loses the commit race more times than the budget
+    /// allows must report `WriteContended` -- and, critically, must not have
+    /// walked down the ladder to achieve it.
+    ///
+    /// The post-state assertions are the whole test. Asserting only the error
+    /// variant would pass against the old code too, which descended to L0 and
+    /// *succeeded*; what distinguishes the fix is that L0 was never written and
+    /// the entry is still claimable afterwards.
+    async fn write_contended() {
+        use std::sync::atomic::Ordering::SeqCst;
+
+        let key = "contended".to_string();
+        let thief = testkit::ThiefTier::wrap(
+            Arc::new(L0Stub::<String>::new()) as Arc<dyn CacheTier<String>>,
+            &key,
+        );
+        let l0 = testkit::RecordingTier::wrap(Arc::new(L0Stub::<String>::new()));
+        let l0_tally = l0.tally();
+
+        let m = manager_from_tiers(
+            DefaultPolicy,
+            vec![l0, testkit::RecordingTier::wrap(thief.clone())],
+            Duration::from_millis(250),
+        );
+        thief.attach(&m);
+
+        let result = m.set(&key, "mine".to_string(), &test_ctx()).await;
+
+        // Anti-vacuity: the fault must actually have fired, repeatedly.
+        assert!(
+            thief.steals() >= 2,
+            "the thief must win more than one race, got {}",
+            thief.steals()
+        );
+
+        // D1: no descent. The old code wrote here once and returned Ok.
+        assert_eq!(
+            l0_tally.writes.load(SeqCst),
+            0,
+            "a lost race must never descend the ladder: L0 tally {l0_tally:?}, result {result:?}"
+        );
+
+        // D2: the specific, documented error.
+        assert_eq!(
+            result,
+            Err(CacheError::WriteContended),
+            "an exhausted race budget must report WriteContended"
+        );
+
+        // Post-state: the key is still usable, so a contended write is a
+        // reportable condition rather than a wedge.
+        let after = m.set(&key, "after".to_string(), &test_ctx()).await;
+        assert!(
+            matches!(after, Err(CacheError::WriteContended)) || after.is_ok(),
+            "the key must remain claimable after contention, got {after:?}"
+        );
+    }
+
     async fn generation_conflict() {
         let cachelito = Cachelito::new();
         let first = cachelito

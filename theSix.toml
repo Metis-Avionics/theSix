@@ -325,6 +325,7 @@ cases = [
     "cancelled_operation",
     "duplicate_operation",
     "stale_generation",
+    "write_contended",
     "generation_conflict",
     "partial_write",
     "partial_promotion",
@@ -528,8 +529,8 @@ tracker = "bugs.toml"
 # Deliberately not tracked here: whether an open finding blocks. The gate splits on
 # each entry's `blocks_merge`, so B15-B20 are counted by the check below and do not
 # fail it. Promoting one to blocking is how that decision gets made.
-expected_blocking = 9
-expected_should_fix = 12
+expected_blocking = 11
+expected_should_fix = 11
 
 # Commit authorship. `cargo xtask run authorship` reads every commit message in
 # the repository's history and fails on a banned trailer.
@@ -802,6 +803,11 @@ description = "Compiles all nine libFuzzer targets. Coverage-guided runs are a s
 rust_memory_safety_required = true
 unsafe_requires_justification = true
 hidden_blocking = false
+# Every third-party action must be pinned by commit SHA. A tag is a mutable
+# pointer: whoever controls the tag can repoint it at new code that then runs
+# with this repository's credentials. Pinned by SHA, the code that ran is the
+# code that was reviewed.
+ci_actions_sha_pinned = true
 runtime_block_on = false
 lock_across_await = false
 silent_backend_substitution = false

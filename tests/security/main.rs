@@ -197,6 +197,32 @@ async fn errors_carry_no_payload_or_key() {
     {
         rendered.push_str(&outcome.to_string());
     }
+    // B22: the contention error must be exactly as payload-free as the rest.
+    // Rendering the variant by hand would prove almost nothing, so this drives
+    // a *real* one through a thief that wins every race, then inspects what a
+    // caller would actually receive.
+    let ckey = format!("orders/{secret}");
+    let thief = testkit::ThiefTier::wrap(
+        Arc::new(thesix::L0Stub::<String>::new()) as Arc<dyn thesix::CacheTier<String>>,
+        &ckey,
+    );
+    let cm = testkit::manager_from_tiers(
+        DefaultPolicy,
+        vec![
+            testkit::RecordingTier::wrap(Arc::new(thesix::L0Stub::<String>::new())),
+            testkit::RecordingTier::wrap(thief.clone()),
+        ],
+        Duration::from_millis(250),
+    );
+    thief.attach(&cm);
+    let contended = cm.set(&ckey, secret.to_string(), &test_ctx()).await;
+    assert_eq!(
+        contended,
+        Err(CacheError::WriteContended),
+        "the security layer must observe the real contention error"
+    );
+    rendered.push_str(&CacheError::WriteContended.to_string());
+
     assert!(!rendered.is_empty(), "no error was produced to inspect");
     assert!(
         !rendered.contains(secret),

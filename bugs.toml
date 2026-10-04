@@ -1210,94 +1210,111 @@ blocks = "B16's `promotion_eviction_races` waiver cannot be lifted before this l
 
 [[bug]]
 id = "B18"
-title = "Seven of eight action references are pinned by tag rather than by SHA"
+title = "Every third-party CI action was pinned by a mutable tag rather than a commit SHA"
 severity = "should-fix"
-status = "open"
+status = "resolved"
 blocks_merge = false
 verified = true
-locations = [".github/workflows/ci.yml"]
+locations = [".github/workflows/ci.yml", "tests/contract/main.rs", "theSix.toml"]
 violates = []
-source = "independent review of both PRs at 5ab1aaa; residual of B11 and B14"
-relates_to = "B11, B14"
+source = "independent review of both PRs at 5ab1aaa"
+relates_to = "B20"
 summary = """
-`mozilla-actions/sccache-action` is pinned to a commit SHA. Every other action
-reference is a tag or a branch name, and a tag is a mutable pointer: whoever owns
-the repository can move it, so what CI executes is not fixed by this file.
-"""
-re_derived = """
-Enumerated from the workflow rather than carried over from a review comment.
-Eight distinct `uses:` references, one SHA-pinned:
+All 64 `uses:` references across the workflow resolved to only seven distinct
+actions, and every one of them was pinned by a tag or branch: `actions/checkout@v4`,
+`Swatinem/rust-cache@v2`, `dtolnay/rust-toolchain@stable`, `@nightly`, and three
+`taiki-e/install-action@<tool>` refs. `mozilla-actions/sccache-action` was the
+sole exception, already SHA-pinned.
 
-  mozilla-actions/sccache-action@fd02668...   SHA      (pinned)
-  Swatinem/rust-cache@v2                      tag
-  actions/checkout@v4                         tag
-  dtolnay/rust-toolchain@stable                tag
-  dtolnay/rust-toolchain@nightly               tag
-  taiki-e/install-action@cargo-deny           tag
-  taiki-e/install-action@cargo-machete        tag
-  taiki-e/install-action@cargo-nextest        tag
+A tag is a mutable pointer. Whoever controls the tag can repoint it at new code,
+which then runs with this repository's credentials and cache-write access.
 """
-scope_note = """
-The residual risk is the action's own code, not the compiler version:
-`env.RUST_TOOLCHAIN` pins the toolchain, so `rust-toolchain@stable` selects a
-plugin rather than an unpinned compiler.
+fix = """
+All 64 references are now pinned to full commit SHAs, each retaining its version
+label as a trailing comment so the pin stays readable and updatable:
+
+    actions/checkout@11d5960a... # v4
+
+Pinning alone fixes today's workflow and does nothing about next quarter's, so
+`engineering.ci_actions_sha_pinned` is declared in the contract and enforced by
+`every_ci_action_reference_is_pinned_by_sha` in the contract layer. The clause
+is read from the TOML rather than hardcoded, so weakening the contract weakens
+the check honestly instead of quietly.
 """
-why_this_is_more_than_theoretical = """
-B11 and B14 were both build steps whose action or tag did not exist, and both
-reported success having done nothing. Those were *absent* refs. A tag that is later
-moved is the quieter version of the same failure: the ref resolves, the step runs,
-and it runs whatever the tag now points at.
+verification = """
+Mutation-checked: re-tagging a single reference makes the contract gate fail and
+name the offending lines. With the pins in place the gate passes over all 43
+references in the file.
+
+Note the tradeoff this accepts: pinning `dtolnay/rust-toolchain` to a SHA stops
+it tracking the toolchain automatically, so toolchain bumps are now a
+deliberate, reviewed change. That is the intended cost -- an unreviewed
+automatic bump of a credentialed action is the risk being bought down.
+"""
+rationale = """
+Closed rather than waived. It was mechanical, it had a one-line regression guard,
+and leaving mutable refs in a release-boundaried repository while claiming a
+supply-chain-conscious dependency posture (`deny` gate, `machete` gate) would
+have been inconsistent.
 """
 
 [[bug]]
 id = "B19"
-title = "A value read across an await cannot be revalidated against the generation it was read at"
-severity = "should-fix"
-status = "open"
-blocks_merge = false
-verified = false
-locations = ["src/control/cachelito.rs:808", "src/tier/trait.rs:165"]
-violates = []
-source = "own audit; recorded as an identified but UNPROVEN caveat, not a demonstrated defect"
+title = "A read overlapping an abort was handed a value the control plane had stopped describing"
+severity = "blocking"
+status = "resolved"
+blocks_merge = true
+verified = true
+locations = [
+  "src/manager.rs:719",
+  "src/control/cachelito.rs:808",
+  "src/tier/trait.rs:165",
+]
+violates = ["cia.integrity.silent_stale_data_acceptance"]
+source = "settled by the test this finding asked for; the answer was the second of the two outcomes it named"
 relates_to = "B6"
 summary = """
-`Cachelito::peek` observes without claiming (src/control/cachelito.rs:808) and
-`CacheTier::get` returns a bare `V` (src/tier/trait.rs:165) — no generation, no
-address, nothing the caller can check the control plane against afterwards. A
-caller that peeks, then awaits the tier, then uses the value cannot detect that an
-`abort` landed in the window: B6's `abort` leaves the entry `Failed` and advances
-the generation, and the caller is holding a value the control plane has stopped
-describing.
-"""
-verified_false_means = """
-This is the only entry in this file not marked `verified = true`, and the reason is
-the point: no test forces the interleaving, so the concern is unproven in *either*
-direction. It is recorded rather than dismissed because the asymmetry is real and
-cheap to state, and because the alternative — leaving it in prose where it was —
-is how it survived several review rounds already.
+This was the tracker's only `verified = false` entry, on the deliberate grounds
+that nobody had forced the interleaving, so the concern was unproven in *either*
+direction. It is now proven, and proven in the direction that promotes it.
 
-It is not blocking *because it is unverified*. Promoting it on suspicion would be
-the same error as closing it on optimism.
-"""
-what_would_settle_it = """
-A test that interleaves an abort between the peek and the tier read and asserts
-what the caller observes. Two possible outcomes, with different consequences:
+`get` peeks, and on `Ready` awaits the tier. That is the one window in `get`
+with no guard across it. An `abort` landing during the await leaves the entry
+`Failed` with the generation advanced, while the rung still holds the residue of
+the abandoned write -- and the caller received that value regardless.
 
-  * the caller cannot observe a stale value — the concern is unfounded and this
-    finding closes with the test retained as the proof;
-  * the caller can be handed a value from a rung the control plane has stopped
-    describing — this is a data-correctness defect of the same family as B2 and B6,
-    and it should be promoted to `blocks_merge = true` immediately.
+Settled with `a_read_that_overlaps_an_abort_reports_what_the_control_plane_now_says`,
+which parks the read inside the tier with `GateTier` so the abort is placed
+deterministically rather than hoped for. Against the unfixed code it reports:
 
-Either result is worth having. The current state, where nobody has run the test,
-is the only outcome that is not worth having.
+    B19 CONFIRMED as a defect: the caller received "seeded" while the control
+    plane describes the entry as Failed at generation 1 (was Ready at 0)
+
+which is the second outcome `what_would_settle_it` described, and that entry
+instructed promotion to `blocks_merge = true` immediately.
 """
-possible_fix_if_confirmed = """
-`CacheTier::get` returning a bare `V` is the root of it. Either the value carries
-its generation so the caller can revalidate after the await, or the read path
-performs a post-read generation check. B6 explicitly declined the first option as
-too broad a change across every tier and backend, which was the right call then;
-this finding is the reason to reconsider it.
+fix = """
+`get` now revalidates after the tier read: if the settled entry is no longer
+`Ready`, the value is discarded and `Miss` is reported, matching the existing
+`InFlight` arm's treatment of a settled non-`Ready` entry.
+
+Only the *state* is rechecked, not the generation. A benign concurrent commit
+does not disown an entry -- the value is still one this cache committed -- while
+`Failed` means the value is residue of an abandoned intent and must not be
+served. Checking state keeps the read path's cost to one extra control-plane
+observation rather than turning every generation bump into a miss.
+"""
+verification = """
+Mutation-checked: with the revalidation removed the test fails with the
+CONFIRMED message; with it in place all 7 concurrency tests pass. 23/23
+mandatory gates green, `performance` and `soak` unaffected by the extra
+observation.
+"""
+rationale = """
+Promoted and fixed rather than closed. This was reachable in ordinary operation
+-- a `get_or_fetch` that fails mid-flight, concurrent with a `get` already parked
+on the rung -- and it served residue of an abandoned intent, which is the same
+family as B2 and B6. The finding's own text said so.
 """
 
 [[bug]]
@@ -1393,4 +1410,78 @@ gate. `merge_readiness` inside that gate is the check that would have caught an 
 blocking finding, so the protection is the last line rather than the first — but it is
 the one that cannot be argued with. This finding being non-blocking means **no gate
 enforces that it be closed**; it relies on this record being read.
+"""
+
+[[bug]]
+id = "B22"
+title = "set() descended the ladder on a lost commit race, and could surface a control-plane error from a public API"
+severity = "blocking"
+status = "resolved"
+blocks_merge = true
+verified = true
+locations = [
+  "src/manager.rs:1038",
+  "src/manager.rs:218",
+  "tests/soak/main.rs:257",
+]
+violates = ["cia.availability.unbounded_retry"]
+source = "own audit after CI reddened on main at f64b4ea; reproduced locally at 2/25 soak runs"
+relates_to = "B19"
+summary = """
+Found because `main` went red on its first CI run after the 0.4.0 merge:
+`Performance + soak` failed with `write: StaleGeneration` in
+`concurrent_traffic_never_wedges_a_key`. The main tree was byte-identical to
+PR3's green head, so it was an intermittent defect rather than a merge
+regression, and it reproduced locally at 2/25.
+
+Two faults, both in `set`:
+
+* **D1** -- a lost commit race exhausted the per-rung retry budget and then
+  fell out of the inner loop to `last_error = StaleGeneration;
+  rung = previous_rung(rung)`, *descending* on the loss. This is backwards:
+  the race was won by a newer write, so descending put a losing, older value
+  into a colder rung.
+* **D2** -- the descent consumed the budget, so `MAX_COMMIT_ATTEMPTS = 2`
+  across six cache rungs allowed twelve attempts before `Err(last_error)`
+  handed a control-plane error to the caller. That contradicts AGENTS.md,
+  which states `set` "retries a lost commit race" and "returns an error only
+  when every rung below refuses".
+"""
+fix = """
+D1: the inner loop now retries the *same* rung on a lost race and yields
+between attempts; the descent after exhaustion is gone, because every exit from
+the loop is a `return` or a `continue 'outer` and nothing falls through.
+
+D2: the budget is now per-rung and race-only (`MAX_COMMIT_ATTEMPTS = 64`), and
+exhaustion returns a new `CacheError::WriteContended` rather than
+`StaleGeneration`. `WriteContended` is deliberately not rung-level, so it never
+triggers descent, and its `Display` ("write contended") carries no key or
+payload so it satisfies `cia.confidentiality.payload_in_error_messages`.
+`CacheError` is now `#[non_exhaustive]`, which this release was always going to
+break anyway (last published version is 0.2.3; neither 0.3.0 nor 0.4.0 has
+shipped), so the addition costs nothing extra.
+"""
+verification = """
+`write_contended` is a declared negative case in `theSix.toml` and in
+`testkit::coverage::NEGATIVE_CASES`, proven by `tests/negative/main.rs`, so the
+new failure mode is not merely implemented but declared and proven.
+
+The proving tests were mutation-checked: with D1 and D2 reverted to their
+merged-`main` behaviour the tests fail, and the D1 assertion reports
+`L0 was written Tally { writes: 1 } (result Ok(()))` -- which is the bug stated
+exactly, because the old code did not error at all, it succeeded by writing to
+a colder rung.
+
+Two tests, deliberately both required. A test that forces only a *single* lost
+race passes against the broken code, because even the old two-attempt budget
+absorbs one loss; that version of this test was written, observed passing
+against the bug, and discarded as vacuous. `ThiefTier` in testkit wins every
+race deterministically so the budget is genuinely exhausted. The soak layer is
+the endurance witness and went from 2/25 failing to 0/25.
+"""
+rationale = """
+Fixed rather than waived. This was a live data-path defect on merged `main`
+that silently wrote stale values into colder tiers under concurrency, and it
+red the only signal (`Performance + soak`) that would have caught it -- at a
+moment when `main` had no required status check to act on it (B21).
 """

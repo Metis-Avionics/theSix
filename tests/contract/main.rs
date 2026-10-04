@@ -851,3 +851,64 @@ fn the_policy_names_keys_not_attributions() {
 mod workflow;
 
 mod invariant;
+
+/// Every third-party action in CI must be pinned by commit SHA, because the
+/// contract declares it (`engineering.ci_actions_sha_pinned`).
+///
+/// This is the enforcement half of B18. Pinning the refs once fixes today's
+/// workflow and does nothing about next quarter's, and a mutable tag is exactly
+/// the kind of quiet regression that survives review: the diff that introduces
+/// it looks like a version bump.
+///
+/// The declared clause is read from the contract rather than hardcoded, so
+/// weakening the contract weakens the check honestly instead of silently.
+#[test]
+fn every_ci_action_reference_is_pinned_by_sha() {
+    let contract = std::fs::read_to_string("theSix.toml").expect("contract is readable");
+    let declared = contract
+        .lines()
+        .find(|l| l.starts_with("ci_actions_sha_pinned"))
+        .and_then(|l| l.split_once('='))
+        .map(|(_, v)| v.trim())
+        .unwrap_or_else(|| panic!("theSix.toml declares no ci_actions_sha_pinned"));
+    assert_eq!(
+        declared, "true",
+        "this test only knows how to enforce the clause when it is true"
+    );
+
+    let mut checked = 0usize;
+    let mut offenders = Vec::new();
+    for entry in std::fs::read_dir(".github/workflows").expect("workflows dir is readable") {
+        let path = entry.expect("dir entry").path();
+        let text = std::fs::read_to_string(&path).expect("workflow is readable");
+        for (n, line) in text.lines().enumerate() {
+            let Some(rest) = line.trim().strip_prefix("- uses:") else {
+                continue;
+            };
+            let rest = rest.split('#').next().unwrap_or("").trim();
+            checked += 1;
+            let Some((action, reference)) = rest.rsplit_once('@') else {
+                offenders.push(format!("{}:{}: unparseable {rest}", path.display(), n + 1));
+                continue;
+            };
+            // 40 hex characters is a full commit SHA. A tag (`v4`), a branch
+            // (`stable`) or a short SHA are all mutable pointers.
+            let pinned = reference.len() == 40 && reference.chars().all(|c| c.is_ascii_hexdigit());
+            if !pinned {
+                offenders.push(format!(
+                    "{}:{}: {action}@{reference} is not pinned by SHA",
+                    path.display(),
+                    n + 1
+                ));
+            }
+        }
+    }
+
+    assert!(checked > 0, "no action references were found to check");
+    assert!(
+        offenders.is_empty(),
+        "ci actions must be pinned by SHA; {} of {checked} are not:\n  {}",
+        offenders.len(),
+        offenders.join("\n  ")
+    );
+}
