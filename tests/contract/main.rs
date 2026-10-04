@@ -254,6 +254,8 @@ fn last_cache_rung_matches_the_ladder_bound() {
 
 #[test]
 fn authority_rung_is_the_one_past_the_ladder() {
+    testkit::proves!("authority.l6.last_cache_rung", "authority.l6.role");
+
     let c = contract();
     let authority_idx = thesix::TierId::L6.as_usize();
     assert_eq!(
@@ -265,6 +267,12 @@ fn authority_rung_is_the_one_past_the_ladder() {
 
 #[test]
 fn authority_semantics_are_explicit_not_inferred() {
+    testkit::proves!(
+        "authority.explicit",
+        "authority.inferred_from_tier_number",
+        "authority.l6.implementation"
+    );
+
     let c = contract();
     assert!(c.authority.explicit);
     assert!(!c.authority.inferred_from_tier_number);
@@ -283,6 +291,8 @@ fn authority_semantics_are_explicit_not_inferred() {
 /// rather than a paragraph.
 #[test]
 fn the_consumer_never_needs_backend_identity() {
+    testkit::proves!("cia.confidentiality.unintended_tier_exposure");
+
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -344,6 +354,12 @@ fn the_consumer_never_needs_backend_identity() {
 /// Capability state must be explicit rather than inferred from an error.
 #[test]
 fn capability_state_is_explicit() {
+    testkit::proves!(
+        "capabilities.model.durability_axis",
+        "capabilities.model.property_axis",
+        "capabilities.model.state_axis"
+    );
+
     let c = contract();
     assert!(
         !c.architecture.consumer_backend_coupling,
@@ -717,6 +733,8 @@ fn every_declared_negative_case_has_a_test() {
 /// this is that test.
 #[test]
 fn declared_recovery_directions_match_what_the_runtime_can_execute() {
+    testkit::proves!("acid.atomicity.recovery_direction_prepare_move");
+
     use thesix::{IntentKind, RecoveryDirection};
 
     let contract = std::fs::read_to_string("theSix.toml").expect("contract is readable");

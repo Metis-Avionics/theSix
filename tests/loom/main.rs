@@ -252,6 +252,12 @@ fn a_stale_token_never_commits() {
 
 #[test]
 fn concurrent_commit_and_abort_leave_a_settled_state() {
+    testkit::proves!(
+        "acid.atomicity.commit_protocol",
+        "concurrency.race_free",
+        "concurrency.testing.adversarial_scheduler"
+    );
+
     require_loom!();
     loom::model(|| {
         let entry = Arc::new(ModelEntry::new());
@@ -290,6 +296,8 @@ fn concurrent_commit_and_abort_leave_a_settled_state() {
 
 #[test]
 fn the_shard_lock_serialises_independent_keys_correctly() {
+    testkit::proves!("concurrency.testing.loom_scope");
+
     require_loom!();
     loom::model(|| {
         // A stand-in for the shard map: one mutex over several entries, mirroring

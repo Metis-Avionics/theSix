@@ -159,6 +159,8 @@ async fn a_failing_rung_walks_the_lifecycle() {
 /// A rung that goes unavailable must not take the others with it.
 #[tokio::test]
 async fn one_failing_rung_does_not_cascade() {
+    testkit::proves!("cia.availability.single_tier_failure_must_cascade");
+
     let bad = FaultyTier::<String>::with_plan(
         Arc::new(L0Stub::<String>::new()) as Arc<dyn CacheTier<String>>,
         thesix::FaultPlan::new(),
@@ -208,6 +210,11 @@ async fn one_failing_rung_does_not_cascade() {
 /// rung. The value is not lost: the next read misses and repopulates.
 #[tokio::test]
 async fn an_aborted_prepared_write_is_not_left_readable() {
+    testkit::proves!(
+        "acid.atomicity.cancelled_operation_may_commit_partially",
+        "acid.atomicity.recovery_direction_prepare_write"
+    );
+
     let cachelito = thesix::Cachelito::new();
 
     // Establish a committed value.
@@ -296,6 +303,12 @@ async fn a_proven_clean_abort_restores_the_committed_value() {
 /// Recovery is idempotent: a second pass finds nothing and reports nothing.
 #[tokio::test]
 async fn recovery_is_idempotent() {
+    testkit::proves!(
+        "acid.atomicity.recovery_must_be_idempotent",
+        "continuity.recovery.idempotent",
+        "continuity.recovery.repeatable"
+    );
+
     let m = mgr();
     let ctx = test_ctx();
     for key in ["a", "b", "c"] {
@@ -332,6 +345,8 @@ async fn recovery_is_idempotent() {
 /// Concurrent recovery passes must not double-resolve.
 #[tokio::test]
 async fn concurrent_recovery_is_safe() {
+    testkit::proves!("continuity.recovery.partial_recovery_safe");
+
     let m = mgr();
     let ctx = test_ctx();
     for i in 0..16 {
@@ -420,6 +435,8 @@ async fn a_prepared_move_completes_forward() {
 /// not tell whether to retry, escalate, or call an operator.
 #[tokio::test]
 async fn an_unresolvable_move_is_reported_separately_from_a_failure() {
+    testkit::proves!("continuity.reconciliation");
+
     let m = mgr();
     let ctx = test_ctx();
     let framed = testkit::framed_key(&ctx, "m");
@@ -556,6 +573,8 @@ async fn recovery_does_not_resurrect_removed_entries() {
 /// The outcome type must distinguish the two recovery directions.
 #[test]
 fn recovery_outcomes_are_distinguishable() {
+    testkit::proves!("continuity.recovery.recovery_failure_must_be_observable");
+
     let aborted = RecoveryOutcome::Aborted {
         kind: IntentKind::Write,
     };
@@ -574,6 +593,8 @@ fn recovery_outcomes_are_distinguishable() {
 /// Every `EntryState` the machine can be in must be classified.
 #[test]
 fn entry_states_classify_into_the_machine() {
+    testkit::proves!("continuity.explicit_state_transitions");
+
     // `Prepared` must never read as committed, and must never be claimable — those
     // two properties are what make `partial_commit_visible = false` hold.
     assert!(!EntryState::Prepared.is_readable());
@@ -627,6 +648,8 @@ async fn an_unbound_rung_is_not_reported_healthy() {
 /// Continuity must be observable while traffic is running.
 #[tokio::test]
 async fn continuity_is_observable_under_traffic() {
+    testkit::proves!("concurrency.testing.recovery_traffic_overlap");
+
     let (tiers, _) = testkit::record_all(testkit::default_tiers::<String>());
     let m = testkit::manager_from_parts(
         DefaultPolicy,
@@ -669,6 +692,8 @@ fn an_intent_on_a_fresh_key_is_visible() {
 /// And the recovery sweep must find it.
 #[tokio::test]
 async fn the_sweep_finds_a_generation_zero_intent() {
+    testkit::proves!("cia.availability.recovery_required");
+
     let m = mgr();
     m.cachelito()
         .prepare(b"zero", None, TierId::L1, IntentKind::Write)
@@ -682,6 +707,12 @@ async fn the_sweep_finds_a_generation_zero_intent() {
 /// A `Prepared` entry must not be readable by anyone, including through `get`.
 #[tokio::test]
 async fn a_prepared_entry_is_invisible_to_readers() {
+    testkit::proves!(
+        "acid.atomicity.prepare_state",
+        "acid.atomicity.read_of_uncommitted_entry",
+        "acid.isolation.intermediate_state_visibility"
+    );
+
     let m = mgr();
     m.cachelito()
         .prepare(
@@ -725,6 +756,8 @@ async fn a_prepared_entry_is_invisible_to_readers() {
 /// cleared the flags but left the entry unreadable would pass the former.
 #[tokio::test]
 async fn a_cancelled_set_releases_its_commit_intent() {
+    testkit::proves!("concurrency.cancel_safe");
+
     use testkit::HangingTier;
 
     let pool = thesix::MemoryPool::new(64).expect("pool");
@@ -814,6 +847,8 @@ async fn a_cancelled_set_releases_its_commit_intent() {
 /// regression test has to drive.
 #[tokio::test]
 async fn a_cancelled_write_does_not_wedge_the_population_path() {
+    testkit::proves!("concurrency.testing.cancellation_races");
+
     use thesix::fault::{FaultClass, FaultPlan, OpKind};
 
     let faulty = FaultyTier::wrap(Arc::new(L0Stub::new()));

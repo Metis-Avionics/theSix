@@ -740,9 +740,156 @@ pub fn missing_locators(root: &std::path::Path, registry: &[(&str, &str)]) -> Ve
             .any(|l| l.trim_start().starts_with(&needle) || l.contains(&needle))
         {
             missing.push(format!("{name}: {locator} names no function"));
+            continue;
+        }
+
+        // Existence is not citation. B20's whole point: a row may name a real
+        // function that has nothing to do with the clause, and the locator
+        // resolves, so the gate passes on an empty claim.
+        //
+        // The check is that the cited function declares the clause itself, via
+        // `proves!`. Putting the label in the test means a mis-citation fails:
+        // the wrongly cited test's own list does not contain this clause.
+        //
+        // The body is located rather than the whole file, so a label in a
+        // *different* test in the same file cannot satisfy this row.
+        if !declares_clause(function_span(&source, &needle), name) {
+            missing.push(format!(
+                "{name}: {locator} does not declare `proves!(\"{name}\")`. \
+                 The locator resolves, so this row would otherwise assert the clause \
+                 on the strength of an unrelated test."
+            ));
         }
     }
     missing
+}
+
+/// The text belonging to the function whose signature line contains `needle`.
+///
+/// Delimited by line, not by matching braces. A brace scanner has to understand
+/// char literals, lifetimes, raw and byte strings, and braces inside comments --
+/// and a first attempt at one failed on exactly that, reporting a body it could
+/// not close for a function that closes perfectly well. The rule here is
+/// coarser and cannot fail that way: everything from the signature line up to the
+/// next line that starts another function.
+///
+/// That is sufficient because `proves!` is always injected as a function's first
+/// statement, before any nested item could appear. The failure mode is a missed
+/// declaration, which fails the gate loudly, rather than a wrong span, which
+/// would pass quietly.
+fn function_span<'a>(source: &'a str, needle: &str) -> &'a str {
+    let Some(at) = source.find(needle) else {
+        return "";
+    };
+    let rest = &source[at..];
+    let mut end = rest.len();
+    // A byte offset accumulated by hand. `enumerate()` would supply an item
+    // index, which is not a byte offset -- and using one here truncated the span
+    // to sixteen characters, so every declaration looked absent.
+    let mut offset = 0usize;
+    for line in rest.split_inclusive('\n') {
+        let at_line_start = offset == 0;
+        offset += line.len();
+        if at_line_start {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        let starts_fn = [
+            "fn ",
+            "async fn ",
+            "pub fn ",
+            "pub async fn ",
+            "unsafe fn ",
+            "pub(crate) fn ",
+        ]
+        .iter()
+        .any(|p| trimmed.starts_with(p));
+        if starts_fn {
+            end = offset;
+            break;
+        }
+    }
+    &rest[..end]
+}
+
+/// Whether `span` declares `clause` through `proves!` as a statement.
+///
+/// The opener must be the first thing on a trimmed line, which is what separates a
+/// declaration from a comment naming one: `// proves!("clause")` contains the same
+/// bytes and satisfied an earlier substring version of this check. That was not
+/// hypothetical -- it is mutation 3 in B20's verification, and the gate passed with
+/// the declaration commented out.
+///
+/// The arguments may span lines, because `cargo fmt` wraps the call whenever a test
+/// proves several clauses, and a single-line parser then found an empty argument
+/// list and reported every such row as undeclared. Comment lines *inside* the
+/// argument list are skipped for the same reason as the opener.
+fn declares_clause(span: &str, clause: &str) -> bool {
+    let mut collecting = false;
+    for line in span.lines() {
+        let trimmed = line.trim_start();
+        if !collecting {
+            if let Some(rest) = trimmed
+                .strip_prefix("testkit::proves!(")
+                .or_else(|| trimmed.strip_prefix("proves!("))
+            {
+                collecting = true;
+                if string_literals(rest).iter().any(|l| l == clause) {
+                    return true;
+                }
+                if rest.contains(')') {
+                    collecting = false;
+                }
+            }
+            continue;
+        }
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        if string_literals(trimmed).iter().any(|l| l == clause) {
+            return true;
+        }
+        if trimmed.contains(')') {
+            collecting = false;
+        }
+    }
+    false
+}
+
+/// The string literals in `args`, up to the closing paren of the call.
+///
+/// Whole literals only, so a declared `a.b.c` cannot satisfy a claim on `a.b`.
+fn string_literals(args: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = args.chars();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            if c == ')' {
+                break;
+            }
+            continue;
+        }
+        let mut value = String::new();
+        let mut closed = false;
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => {
+                    closed = true;
+                    break;
+                }
+                '\\' => {
+                    if let Some(escaped) = chars.next() {
+                        value.push(escaped);
+                    }
+                }
+                other => value.push(other),
+            }
+        }
+        if closed {
+            out.push(value);
+        }
+    }
+    out
 }
 
 /// Declared case names that no proof registry claims.

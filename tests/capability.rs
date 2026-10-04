@@ -48,6 +48,8 @@ fn capabilities_cover_every_rung() {
 /// pass by everything being reported unbound.
 #[test]
 fn default_build_reports_fallbacks_not_rich_backends() {
+    testkit::proves!("capabilities.must_distinguish.fallback_from_authority");
+
     let c = caps::<String>();
     for id in [TierId::L0, TierId::L1, TierId::L2] {
         let cap = c[&id];
@@ -83,6 +85,8 @@ fn default_build_reports_fallbacks_not_rich_backends() {
 /// If this ever flips, a consumer starts assuming restart survival it has not got.
 #[test]
 fn the_persistent_rung_does_not_claim_persistence_by_default() {
+    testkit::proves!("capabilities.must_distinguish.volatile_from_persistent");
+
     let c = caps::<String>();
     assert!(!c[&TierId::L4].flags.contains(CapabilityFlags::PERSISTENT));
     assert!(!c[&TierId::L4].survives_restart());
@@ -93,6 +97,8 @@ fn the_persistent_rung_does_not_claim_persistence_by_default() {
 /// `tier_for(&L6)` silently return L0's data.
 #[test]
 fn unbound_is_reported_as_unbound_not_unavailable() {
+    testkit::proves!("capabilities.must_distinguish.unbound_from_unavailable");
+
     let c = caps::<String>();
     let l6 = c[&TierId::L6];
     assert_eq!(l6.state, OperationalState::Unbound);
@@ -149,6 +155,11 @@ fn backend_classification_matches_implementation() {
 /// Before, the only way to find out was to receive `TierUnavailable`.
 #[test]
 fn operational_state_is_queryable_without_an_operation() {
+    testkit::proves!(
+        "capabilities.must_distinguish.degraded_from_healthy",
+        "capabilities.operation_failure_must_not_be_primary_discovery_mechanism"
+    );
+
     let c = caps::<String>();
     // L3 in the default build is a working fallback, so it serves.
     assert!(c[&TierId::L3].state.is_serving());
@@ -159,6 +170,8 @@ fn operational_state_is_queryable_without_an_operation() {
 /// default build nothing is verified, so the class must not appear at all.
 #[test]
 fn nothing_claims_verified_durability_without_a_restart_test() {
+    testkit::proves!("authority.l6.durability_required");
+
     let c = caps::<String>();
     for (id, cap) in &c {
         assert_ne!(
@@ -173,6 +186,8 @@ fn nothing_claims_verified_durability_without_a_restart_test() {
 /// would be the authority-inversion the contract forbids.
 #[test]
 fn only_the_authority_rung_claims_authority() {
+    testkit::proves!("authority.fallback_may_be_authoritative");
+
     let c = caps::<String>();
     for id in TierId::ALL {
         assert_eq!(
@@ -284,6 +299,8 @@ async fn reported_fallbacks_actually_store() {
 /// is reporting a system nobody can use.
 #[tokio::test]
 async fn the_ladder_works_end_to_end_with_only_fallbacks() {
+    testkit::proves!("continuity.graceful_degradation");
+
     let tiers = default_tiers::<String>();
     let (tiers, _tallies) = record_all(tiers);
     let m = manager_from_tiers(
@@ -303,6 +320,8 @@ async fn the_ladder_works_end_to_end_with_only_fallbacks() {
 /// must be exactly what a process-local cache claims.
 #[test]
 fn l0_reports_exactly_in_memory_and_volatile() {
+    testkit::proves!("acid.durability.fallback_may_claim_authority_durability");
+
     let l0: Arc<dyn CacheTier<String>> = Arc::new(L0Stub::new());
     let cap = l0.capability();
     assert_eq!(
@@ -330,6 +349,8 @@ fn l0_reports_exactly_in_memory_and_volatile() {
 /// report that never mentioned it.
 #[tokio::test]
 async fn recovering_is_reported_as_recovering_and_distinguished_from_available() {
+    testkit::proves!("capabilities.must_distinguish.recovering_from_available");
+
     let mut tiers = default_tiers::<String>();
     let wrapped = StatedTier::wrap(tiers[2].clone(), OperationalState::Recovering);
     tiers[2] = wrapped;

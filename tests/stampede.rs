@@ -136,6 +136,8 @@ async fn test_waiter_timeout() {
 
 #[tokio::test]
 async fn test_stale_generation_rejection() {
+    testkit::proves!("cia.integrity.silent_generation_conflict");
+
     let cachelito = Cachelito::new();
     let key_bytes = b"stale-key".to_vec();
 

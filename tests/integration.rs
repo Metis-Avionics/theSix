@@ -233,6 +233,8 @@ async fn test_ttl_lazy_expiry() {
 /// reports `Fresh`, and the two are not the same value to a caller.
 #[tokio::test]
 async fn stale_service_is_reported_rather_than_silent() {
+    testkit::proves!("cia.integrity.silent_stale_data_acceptance");
+
     let manager = make_manager(DefaultPolicy);
     let key = "freshness".to_string();
 

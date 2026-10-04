@@ -73,6 +73,8 @@ fn durability_and_authority_are_separate_axes() {
 #[cfg(feature = "sled")]
 #[tokio::test]
 async fn a_committed_value_survives_a_restart() {
+    testkit::proves!("acid.durability.committed_data_must_survive_required_failure_domain");
+
     use thesix::L4SledBackend;
 
     let dir = std::env::temp_dir().join(format!("thesix-durability-{}", std::process::id()));
@@ -125,6 +127,8 @@ async fn a_committed_value_survives_a_restart() {
 #[cfg(not(feature = "sled"))]
 #[tokio::test]
 async fn a_committed_value_survives_a_restart() {
+    testkit::proves!("acid.durability.committed_data_must_survive_required_failure_domain");
+
     eprintln!(
         "substituted: no restart-durable backend compiled in; \
          run with --features sled for the drop-and-reopen case"
@@ -135,6 +139,8 @@ async fn a_committed_value_survives_a_restart() {
 /// Authority loss must be observable, not silent.
 #[test]
 fn authority_loss_is_observable() {
+    testkit::proves!("authority.authority_loss_must_be_observable");
+
     let m = make_manager_with_timeout::<String>(thesix::DefaultPolicy, Duration::from_millis(100));
     let caps = m.capabilities();
     let l6 = caps[&TierId::L6];

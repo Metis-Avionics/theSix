@@ -1443,37 +1443,95 @@ family as B2 and B6. The finding's own text said so.
 id = "B20"
 title = "The proof registries prove a test is named and exists, not that it exercises the clause"
 severity = "should-fix"
-status = "open"
+status = "resolved"
 blocks_merge = false
 verified = true
-locations = ["testkit/src/coverage.rs", "tests/contract/invariant.rs", "tests/contract/main.rs"]
+locations = [
+  "testkit/src/coverage.rs:missing_locators",
+  "testkit/src/coverage.rs:declares_clause",
+  "testkit/src/lib.rs:proves",
+  "tests/contract/invariant.rs",
+]
 violates = []
 source = "independent review of both PRs at 5ab1aaa; stated by this repository's own documentation"
-relates_to = "B9"
+relates_to = "B9, B16"
 summary = """
-Three registries bind declared names to proving tests: `INVARIANT_PROOFS` (95
-leaves), `PROPERTY_CASE_PROOFS` (9) and `FAULT_CASE_PROOFS` (12). `missing_locators`
-resolves each `path::fn` and checks that a function of that name is defined in that
-file. It does not check that the function is a test, and it does not check that the
-test exercises the clause it is cited for. A row pointing at a real but irrelevant
-function satisfies the gate.
+Three registries bind declared names to proving tests: `INVARIANT_PROOFS` (94
+rows), `PROPERTY_CASE_PROOFS` (9) and `FAULT_CASE_PROOFS` (12). `missing_locators`
+resolved each `path::fn` and checked a function of that name was defined in that
+file. It did not check that the function was a test, and it did not check that the
+test exercised the clause it was cited for. A row pointing at a real but
+irrelevant function satisfied the gate.
 """
 what_is_and_is_not_closed = """
-Closed: a declared clause cannot exist without something responsible for it, and a
-test cannot be renamed out of a citation. The locator match is word-bounded after
-mutation testing showed the substring form let `no_authority_inversion_RENAMED`
-satisfy a claim on `no_authority_inversion`.
+Closed by the required fix: a locator that resolves but does not declare the clause
+now fails, so citing the wrong test cannot pass quietly.
 
-Not closed: semantic sufficiency. The word-bounded match stops the cheapest
-defeat — renaming a test aside — and does nothing about pointing a row at the
-wrong test, which is the same class of defect as B8's comment describing a check
-that did not exist.
+Closed earlier: a declared clause cannot exist without something responsible for
+it, and a test cannot be renamed out of a citation. The locator match is
+word-bounded after mutation testing showed the substring form let
+`no_authority_inversion_RENAMED` satisfy a claim on `no_authority_inversion`.
 """
 required_fix = """
 Per-row fault-ledger assertion, which is the instrument the fault layer already
 uses: each row asserts that the thing it injects actually happened, so a citation
 to an irrelevant test fails rather than passing quietly. A stricter string match
 cannot close this and should not be mistaken for progress toward closing it.
+"""
+fix = """
+The label moved into the test. Every proving test now declares what it proves:
+
+    testkit::proves!("clause.a", "clause.b");
+
+which expands to a `const _` binding, so it is real code the compiler checks
+rather than a comment a reader has to trust. The gate then requires the cited
+function's *own* declaration to contain the cited clause. A mis-citation fails,
+because the wrongly cited test's list does not contain that clause -- the registry
+says which test it expects, the test says what it proves, and the two must agree.
+
+75 functions annotated across all three registries, mechanically from the registry
+itself so no row could be skipped by hand.
+
+The span is delimited by line rather than by matching braces. A brace scanner has
+to understand char literals, lifetimes, raw and byte strings, and braces in
+comments; a first attempt failed on exactly that and reported a body it could not
+close for a function that closes perfectly well.
+"""
+verification = """
+Four mutations, each of which a substring implementation would have passed:
+
+* M1 -- repoint a row at a real, unrelated test: caught.
+* M2 -- repoint it at a different test in the same file that discusses the same
+  behaviour: caught, because the span is per-function.
+* M3 -- replace the declaration with a comment naming the clause. **This one was
+  not caught at first.** `// proves!("clause")` contains the same bytes as the
+  declaration, so the substring check passed with the declaration commented out.
+  `declares_clause` is now anchored to the start of a trimmed line, and skips
+  comment lines inside the argument list.
+* M4 -- rename one clause inside a multi-clause declaration: caught, because
+  literals are compared whole, so `a.b` cannot match a declared `a.b.c`.
+
+Two implementation faults were found by the gate itself rather than by reading:
+
+* `enumerate()` supplies an item index, not a byte offset. Used as one it truncated
+  every span to sixteen characters, so all 115 rows looked undeclared and the
+  failure looked like a missing-annotation problem. The Python model of the same
+  logic tracked bytes and passed, which is what identified the discrepancy.
+* After that fix, 38 rows still failed because `cargo fmt` wraps the `proves!`
+  call when a test proves several clauses, and the single-line parser read an empty
+  argument list. Not a data problem: a formatting interaction.
+
+A `git checkout` of `tests/integration.rs` during M3 also wiped that file's
+annotations, which the re-annotation pass had to restore. Worth recording because
+the restored state was verified by re-running the gate rather than assumed.
+"""
+rationale = """
+Fixed, because the required fix is available in the same shape as an instrument
+the crate already trusts. What remains irreducible is a test that asserts the wrong
+thing while declaring the right clause: a declaration is a claim by the test about
+itself, so it can be wrong in the same way any test can be wrong. That is what the
+mutations above bound -- not truth, but the ability of a reviewer to catch a false
+claim mechanically rather than by reading 76 tests.
 """
 
 [[bug]]

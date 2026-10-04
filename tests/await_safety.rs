@@ -106,6 +106,13 @@ fn test_ctx() -> CacheContext {
 /// block on the same mutex and this test would time out rather than fail.
 #[tokio::test]
 async fn control_plane_stays_responsive_while_a_tier_awaits() {
+    testkit::proves!(
+        "acid.isolation.lock_guard_across_await",
+        "cia.availability.control_plane_blocked_by_data_plane",
+        "concurrency.lock_guard_across_await",
+        "hpa.control_plane.must_remain_responsive_during_data_plane_stall"
+    );
+
     let manager = manager_with_hanging_tiers();
 
     // Seed the entry so the control plane marks it Ready on L0. A fresh key
@@ -167,6 +174,8 @@ async fn control_plane_stays_responsive_while_a_tier_awaits() {
 /// the coarse-lock symptom the in-memory shards exist to avoid.
 #[tokio::test]
 async fn a_parked_tier_does_not_block_other_keys() {
+    testkit::proves!("hpa.control_plane.global_data_plane_lock");
+
     let manager = manager_with_hanging_tiers();
 
     manager
@@ -257,6 +266,8 @@ async fn the_watchdog_detects_a_blocked_control_plane() {
 /// backed by a mechanism that is known to fail loudly.
 #[test]
 fn nested_block_on_is_absent_from_the_crate_and_would_be_caught() {
+    testkit::proves!("concurrency.nested_block_on");
+
     // Half one: no `block_on` anywhere in the library.
     let mut offenders = Vec::new();
     for entry in

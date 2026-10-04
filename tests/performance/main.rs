@@ -170,6 +170,8 @@ fn control_plane_stays_bounded_while_a_rung_is_wedged() {
 #[test]
 #[ignore = "performance gate; run via `cargo xtask run performance`"]
 fn a_hot_key_does_not_starve_cold_keys() {
+    testkit::proves!("hpa.isolation.hot_key_may_block_unrelated_keys");
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -227,6 +229,8 @@ fn a_hot_key_does_not_starve_cold_keys() {
 #[test]
 #[ignore = "performance gate; run via `cargo xtask run performance`"]
 fn distinct_shards_do_not_serialise() {
+    testkit::proves!("hpa.isolation.hot_shard_may_block_entire_pipeline");
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()

@@ -41,6 +41,8 @@ async fn tenants_do_not_share_entries() {
 /// Bob writing the same key must not overwrite alice's.
 #[tokio::test]
 async fn one_tenant_cannot_overwrite_another() {
+    testkit::proves!("cia.confidentiality.cross_tenant_access");
+
     let m = mgr();
     let key = "collision".to_string();
 
@@ -126,6 +128,8 @@ async fn tenant_framing_is_unambiguous() {
 /// Distinct keys within one tenant must not interfere.
 #[tokio::test]
 async fn keys_within_a_tenant_are_isolated() {
+    testkit::proves!("cia.confidentiality.cross_key_data_exposure");
+
     let m = mgr();
     let ctx = test_ctx();
     for i in 0..64 {
@@ -176,6 +180,8 @@ async fn the_control_plane_partitions_by_tenant() {
 /// No error's `Display` may contain a payload or a key.
 #[tokio::test]
 async fn errors_carry_no_payload_or_key() {
+    testkit::proves!("cia.confidentiality.payload_in_error_messages");
+
     let m = mgr();
     let secret = "s3cret-order-9912";
     let key = format!("orders/{secret}");
@@ -237,6 +243,8 @@ async fn errors_carry_no_payload_or_key() {
 /// Telemetry must identify a key without revealing it, and never carry a value.
 #[tokio::test]
 async fn telemetry_carries_no_payload_and_no_key() {
+    testkit::proves!("cia.confidentiality.payload_in_telemetry");
+
     let ring = Arc::new(RingTelemetry::new(64));
     let sink: Arc<dyn thesix::TelemetrySink> = ring.clone();
     let m = testkit::manager_with_telemetry::<String>(sink, Duration::from_secs(2));
@@ -329,6 +337,8 @@ async fn telemetry_records_every_required_field() {
 /// `KeyIdentity` must be a digest, not an encoding.
 #[test]
 fn key_identity_is_not_reversible_by_construction() {
+    testkit::proves!("cia.confidentiality.key_identity_is_non_reversible");
+
     let key = b"users/42/profile";
     let id = KeyIdentity::of(key);
     let rendered = id.to_string();
@@ -356,6 +366,8 @@ fn key_identity_is_not_reversible_by_construction() {
 /// stack rather than only at the stub.
 #[tokio::test]
 async fn a_corrupt_value_is_never_served() {
+    testkit::proves!("cia.integrity.silent_corruption");
+
     let stub = Arc::new(std::sync::Mutex::new(
         thesix::FixedTierStub::<String>::with_capacity(8).expect("stub"),
     ));
@@ -448,6 +460,8 @@ fn total_collision_does_not_alias() {
 /// later writer.
 #[tokio::test]
 async fn a_stale_generation_is_rejected() {
+    testkit::proves!("acid.consistency.stale_generation_may_overwrite_newer_generation");
+
     let cachelito = Cachelito::new();
     let t1 = cachelito
         .prepare(b"gen", None, TierId::L1, thesix::IntentKind::Write)

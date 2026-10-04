@@ -418,6 +418,8 @@ fn the_default_ladder_survives_a_key_flood() {
 #[test]
 #[ignore = "soak gate; run via `cargo xtask run soak`"]
 fn sustained_traffic_with_faults_keeps_serving() {
+    testkit::proves!("cia.availability.unbounded_queue_growth");
+
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

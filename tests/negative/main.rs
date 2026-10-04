@@ -1016,6 +1016,8 @@ fn tenant_contexts_are_distinct() {
 /// unbounded without touching the others.
 #[tokio::test]
 async fn retry_counts_are_bounded_and_observed() {
+    testkit::proves!("cia.availability.unbounded_retry");
+
     use std::sync::atomic::Ordering::SeqCst;
 
     // (1) Every rung refuses a write. The ladder is descended once, so each rung
