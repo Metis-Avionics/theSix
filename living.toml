@@ -138,6 +138,19 @@ ladder, but nothing evicts, so a cache whose whole ladder is full refuses new wr
 Move recovery, as above: a swept move intent stays Prepared forever, which wedges the
 population path for that key with no automatic remedy. Both are named in
 pending_work rather than worked around.
+Six declared invariants have no proving test and are waived with reasons in
+[[verification.invariant_waiver]]: unbounded_retry, silent_stale_data_acceptance,
+recovering_from_available, blocking_runtime_thread, nested_block_on, and
+promotion_eviction_races. Two of those cannot be tested without something the crate
+does not have - a blocking backend, and eviction.
+The invariant registry proves a test is named and exists, not that it exercises the
+clause. That residual limit is a review judgement, and it is the same one
+testkit::declare_cases! documents.
+CI cannot check its own action refs. Three build steps referenced a tag or a binary
+that did not exist and reported success having done nothing - sccache, cargo-fuzz, and
+a guessed sccache-action@v0.8. Only executing CI found them, and no local gate can,
+because a ref that cannot be resolved is indistinguishable from one that can until
+something tries to run it.
 """
 
 pending_work = """
@@ -154,16 +167,34 @@ pending_work = """
         the source intact and a crash after it leaves only an unreachable duplicate.
         Needs a test that pins the reorder, and a decision on whether `CommitIntent`
         may reference key material at all.
-- `xtask` has no lint over `.github/workflows`, so a malformed `run:` block is
-  caught only when CI runs it — and `continue-on-error` will report it as an
-  allowed advisory failure rather than a red job. A YAML parser is the missing
-  piece; the check itself is small. This is how B7 survived.
-- The gate-coverage gap is only partly closed. tests/contract now compares one declared
-  invariant to runtime behaviour. `cancel_safe`, `partial_commit_visible` and
-  `cancelled_operation_may_commit_partially` are declared true and are now true, but
-  nothing structurally requires a *new* runtime invariant to come with a proving test,
-  so the next over-promise will pass a green gate again. See `[gate_coverage_gap]` in
-  bugs.toml.
+- CI now runs for every PR, and `tests/contract` parses `.github/workflows/ci.yml`
+  to hold the workflow and the contract to each other in both directions, including
+  a `bash -n` lint over every `run:` block. What it does not do is resolve the
+  action refs: three separate build steps referenced a tag or a binary that did not
+  exist (B11's sccache, B14's cargo-fuzz, and a guessed `sccache-action@v0.8`), each
+  reporting success while doing nothing. Only executing CI found them. A ref that
+  cannot be resolved is invisible to every local gate, and the nearest local
+  approximation — grepping for the tool in the file — would pass on all three.
+- The `sccache-action`, `cargo-deny-action` removal and `rust-toolchain@stable` refs
+  are pinned variously by SHA and by version tag. SHA-pinning every action is the
+  consistent end state; the SHAs resolve the same way this one did, it has just not
+  been done for all of them.
+- The gate-coverage gap is now closed *mechanically*, and the residual limit is a
+  judgement rather than a hole. All 95 declared invariants across the seven semantic
+  sections are bound to a proving test in `testkit::coverage::INVARIANT_PROOFS` (89) or
+  waived with a stated reason in `[[verification.invariant_waiver]]` (6), and
+  `tests/contract/invariant.rs` requires the union to equal the declared set exactly.
+  Adding, renaming or deleting an invariant now fails until the registry moves with it.
+  The limit: this proves a test is *named and exists*, not that it proves the invariant,
+  so naming a test that ignores the clause still satisfies the gate. Six clauses are
+  waived for exactly this reason and are listed with their reasons rather than hidden.
+- The six waived invariants are the honest remainder of that audit and are the next
+  thing worth closing: `unbounded_retry` (nothing counts retries), `silent_stale_data_
+  acceptance` (nothing distinguishes silent from explicit stale service),
+  `recovering_from_available` (the state exists, no test drives a rung into it),
+  `blocking_runtime_thread` and `nested_block_on` (nothing in the suite can catch
+  either, since every tier is an in-process stub), and `promotion_eviction_races`
+  (blocked on eviction not existing).
 - Extend the non-vacuity discipline past bugs.toml. `bugs.toml` is enforced by a gate;
   the contract's own prose clauses, the `decisions` list below, and the `remaining`
   list are not. Nothing fails when one of them goes stale.
@@ -198,6 +229,11 @@ remaining = [
 ]
 
 decisions = [
+    "Branch protection requires ONE check, `Verification (all gates)`, rather than the individual jobs. `test` is a 10-leg matrix reporting `Tests (unit)`-style names, so a required-check list built from job names silently stops matching when the layer list changes. One aggregator with `if: always()` has no such failure mode, and tests/contract asserts every non-advisory job is in its `needs` so a new job cannot quietly run outside the aggregate. `if: always()` is load-bearing and separately asserted: without it a failed dependency makes the aggregator skipped, and GitHub scores a skipped required check as passing",
+    "Invariant proofs live in testkit and invariant waivers live in theSix.toml. Duplicating the pairs into both files would recreate the self-graded-tracker defect one level down: the test side owns what its tests cover, the contract side owns what is admitted to be unverified, and tests/contract requires the union of the two to equal the declared set exactly",
+    "`check` and `clippy` take --workspace. Both previously linted only the root package, so the gate runner and test harness were never covered, and four warnings had accumulated in xtask with no gate noticing. A gate that claims to cover the repository should ask the tool to cover the repository",
+    "sccache stays in the committed .cargo/config.toml and CI installs it explicitly, rather than removing the wrapper. Local and CI should compile the same way, and the cache is worth having on the overlapping feature matrix. What changed is that the dependency is now declared in the file that needs it and in every job that uses it, instead of being inherited invisibly from a developer machine",
+    "The six waived invariants are listed rather than quietly given proofs. Naming a test that does not exercise the clause would satisfy the gate and is exactly the over-promise this contract exists to prevent, so a visible waiver with a reason is the honest artefact",
     "CacheTier is async via #[async_trait], not native AFIT: the trait is held as Arc<dyn CacheTier<V>> and AFIT is not dyn-compatible",
     "The control plane stays SYNCHRONOUS. Cachelito is a pre-allocated sharded slot map whose acquire() returns an owned ControlSnapshot, so no shard guard is alive across an await. tests/await_safety.rs proves it rather than asserting it, and a companion test proves the watchdog would notice a block",
     "DashMap rejected for the control plane and for tier storage: it allocates after init (Rule 3) and its caller-chosen guard lifetime deadlocks a shard when held across an await - which is precisely the pattern the async trait makes possible",
@@ -219,9 +255,9 @@ decisions = [
 blockers = []
 
 [handover.next_agent]
-focus = "Merge the v2 revision (PR from feat/hpa-continuity-contract) once review lands. No open blocking findings: bugs.toml is green. The substantive remaining work is the two contract-change items in pending_work - move recovery, and the gate-coverage gap."
+focus = "PR3 needs re-review: the external approval was of 99d1c70, and the head is now far past it with the verification architecture rebuilt (C1-C6). CI is green end to end for the first time in this repo's history, including the fuzz smoke-run, and main is protected so merge requires the aggregated gate. No open blocking findings across 9 tracked. Remaining substantive work is in pending_work: move recovery (a contract change), the six waived invariants, eviction, and SHA-pinning the remaining action refs."
 tasks = [
-    "Do NOT treat the green gate run as evidence about runtime invariants. tests/contract compares the contract to the runner and the test inventory; until recently it never compared the contract to runtime behaviour, which is how three false promises survived review. One clause is now covered (move recovery direction). The general fix is still open.",
+    "Do NOT treat the green gate run as evidence that a declared invariant is TRUE. It is now evidence that every declared invariant is bound to a proving test or an explicit waiver (89 + 6 of 95), which is a different and weaker claim: the registry proves a test is named and exists, not that it exercises the clause. The six waivers are listed in [[verification.invariant_waiver]] with reasons and are the honest next target.",
     "merge_readiness is a required CI job with no continue-on-error, so a new blocks_merge finding turns the branch red immediately. That is intentional - fixing the finding is what turns it green - but do not silence it with continue-on-error.",
     "Move recovery is the largest known gap: a swept Move intent wedges the population path for that key with no automatic remedy. Option (b) in pending_work (commit before source removal, then allow the sweep to abort) is the cheaper of the two and needs a test pinning the reorder.",
     "2.0.0 is a breaking release and invalidates every cached key, because tenant is now part of the key. It has not been published; the crates.io version is 0.2.3.",
@@ -331,6 +367,12 @@ entries = [
     { type = "changed", description = "recovery_direction_prepare_move = external-reconciliation (was complete-forward)", scope = "theSix.toml" },
     { type = "changed", description = "BackendKind::is_native() replaced by is_implemented(); the old predicate returned true for five absent backends", scope = "src/tier/trait.rs" },
     { type = "changed", description = "Build profiles use debug = 0; debuginfo filled the disk mid-matrix", scope = "Cargo.toml" },
+    { type = "added", description = "Every declared invariant is bound to a proving test or an explicit waiver. 89 proofs, 6 waivers, checked for exact set equality so an invariant cannot be declared without something responsible for it", scope = "testkit/src/coverage.rs, tests/contract/invariant.rs, theSix.toml" },
+    { type = "added", description = "tests/contract parses .github/workflows/ci.yml and holds it to the contract in both directions, plus a bash -n lint over every run: block. The comment claiming this check existed was true for the first time", scope = "tests/contract/workflow.rs, .github/workflows/ci.yml" },
+    { type = "fixed", description = "The gate runner leaked cargo's own CARGO_MANIFEST_DIR and CARGO_PKG_* into every gate, so `cargo xtask run machete` walked the wrong tree. The documented invocation was the broken one", scope = "xtask/src/gates.rs" },
+    { type = "fixed", description = "The check and clippy gates omitted --workspace, so the gate runner and test harness were never linted; four warnings had accumulated there uncaught", scope = "theSix.toml" },
+    { type = "fixed", description = "CI could not run for a stacked PR at all: both triggers were filtered to branches: [main]", scope = ".github/workflows/ci.yml" },
+    { type = "fixed", description = "Three build steps referenced a tool or tag that did not exist and reported success having done nothing: sccache, cargo-fuzz, and a guessed sccache-action@v0.8", scope = ".github/workflows/ci.yml, .cargo/config.toml" },
     { type = "added", description = "KeyAddress: 128-bit identity and 64-bit placement held separately; Cachelito placement is now injectable", scope = "src/integrity.rs, src/control/cachelito.rs" },
     { type = "added", description = "SeededFnv: a seeded Hasher, so the blanket digest can have two independent lanes", scope = "src/integrity.rs" },
     { type = "added", description = "testkit::MisreportingTier - stores bytes then reports a failure nobody can classify", scope = "testkit/src/lib.rs" },

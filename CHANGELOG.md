@@ -1,5 +1,60 @@
 # CHANGELOG
 
+## Unreleased — verification architecture
+
+The second review closed seven findings and could not confirm CI had executed the
+head it approved. Chasing that found CI *could not* run for this branch at all, and
+three more things underneath it that had never run either.
+
+### Fixed
+
+- **CI could not run for a stacked PR.** Both triggers were filtered to
+  `branches: [main]`, and every PR here is stacked on a feature branch, so the
+  filter excluded all of them. Every "green" gate result for this branch was a local
+  fact.
+- **Five mandatory gates executed in no CI job.** `xtask_unit` had none at all, so
+  the tests for the code deciding which gates pass ran only on the maintainer's
+  machine. `deny` and `machete` were shadowed by third-party actions that merely
+  resemble the gates; `fmt` and `fuzz` bypassed theirs.
+- **`check` and `clippy` never linted the gate runner or the test harness.** Both
+  omitted `--workspace`, so only the root package was covered and four warnings
+  accumulated in `xtask` unnoticed.
+- **The gate runner leaked cargo's own package environment into every gate.**
+  `CARGO_MANIFEST_DIR` and `CARGO_PKG_*` described *xtask's* package, so
+  `cargo machete` walked the wrong tree — meaning `cargo xtask run machete` failed
+  while the undocumented `./target/debug/xtask` invocation passed.
+- **The fuzz job named an installer tag that does not exist**, so no fuzzer was
+  installed and every smoke run failed looking like a crash. B7 fixed that job's
+  shell syntax; the loop it fixed had never had a fuzzer to run.
+
+### Added
+
+- `[[verification.ci_job]]` in the contract plus `tests/contract/workflow.rs`, which
+  parses the workflow and holds it to the contract in both directions: every gate
+  covered, every cover real, every job declared, every reported check name matching.
+- A `bash -n` lint over every `run:` block, with a regression test that feeds B7's
+  exact stray `done` through the same path and requires it to be caught.
+- `testkit::coverage::INVARIANT_PROOFS` and `[[verification.invariant_waiver]]`:
+  all 95 declared invariants bound to a proving test (89) or waived with a stated
+  reason (6), checked for exact set equality.
+- A `Verification (all gates)` aggregator job, which is the single check branch
+  protection requires. Matrix job names would silently stop matching.
+
+### Changed
+
+- `main` is branch-protected: the aggregated gate is required, admins included,
+  force-push and deletion disallowed.
+- An abort of a write with an unknown outcome costs one repopulation — cheaper than
+  serving a value nobody authorised.
+
+### The limit worth stating
+
+The invariant registry proves a test is **named and exists**, not that it proves the
+clause. Naming a test that ignores an invariant satisfies the gate. What it does
+enforce is that an invariant cannot be declared into existence without something in
+the repository being made responsible for it, and the six that have no honest proof
+are listed with reasons rather than papered over.
+
 ## Unreleased — second review remediation
 
 The three original findings were addressed, and a second review of that head found
