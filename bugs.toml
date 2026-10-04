@@ -1394,3 +1394,77 @@ blocking finding, so the protection is the last line rather than the first — b
 the one that cannot be argued with. This finding being non-blocking means **no gate
 enforces that it be closed**; it relies on this record being read.
 """
+
+[[bug]]
+id = "B22"
+title = "set() descended the ladder on a lost commit race, and could surface a control-plane error from a public API"
+severity = "blocking"
+status = "resolved"
+blocks_merge = true
+verified = true
+locations = [
+  "src/manager.rs:1038",
+  "src/manager.rs:218",
+  "tests/soak/main.rs:257",
+]
+violates = ["cia.availability.unbounded_retry"]
+source = "own audit after CI reddened on main at f64b4ea; reproduced locally at 2/25 soak runs"
+relates_to = "B19"
+summary = """
+Found because `main` went red on its first CI run after the 0.4.0 merge:
+`Performance + soak` failed with `write: StaleGeneration` in
+`concurrent_traffic_never_wedges_a_key`. The main tree was byte-identical to
+PR3's green head, so it was an intermittent defect rather than a merge
+regression, and it reproduced locally at 2/25.
+
+Two faults, both in `set`:
+
+* **D1** -- a lost commit race exhausted the per-rung retry budget and then
+  fell out of the inner loop to `last_error = StaleGeneration;
+  rung = previous_rung(rung)`, *descending* on the loss. This is backwards:
+  the race was won by a newer write, so descending put a losing, older value
+  into a colder rung.
+* **D2** -- the descent consumed the budget, so `MAX_COMMIT_ATTEMPTS = 2`
+  across six cache rungs allowed twelve attempts before `Err(last_error)`
+  handed a control-plane error to the caller. That contradicts AGENTS.md,
+  which states `set` "retries a lost commit race" and "returns an error only
+  when every rung below refuses".
+"""
+fix = """
+D1: the inner loop now retries the *same* rung on a lost race and yields
+between attempts; the descent after exhaustion is gone, because every exit from
+the loop is a `return` or a `continue 'outer` and nothing falls through.
+
+D2: the budget is now per-rung and race-only (`MAX_COMMIT_ATTEMPTS = 64`), and
+exhaustion returns a new `CacheError::WriteContended` rather than
+`StaleGeneration`. `WriteContended` is deliberately not rung-level, so it never
+triggers descent, and its `Display` ("write contended") carries no key or
+payload so it satisfies `cia.confidentiality.payload_in_error_messages`.
+`CacheError` is now `#[non_exhaustive]`, which this release was always going to
+break anyway (last published version is 0.2.3; neither 0.3.0 nor 0.4.0 has
+shipped), so the addition costs nothing extra.
+"""
+verification = """
+`write_contended` is a declared negative case in `theSix.toml` and in
+`testkit::coverage::NEGATIVE_CASES`, proven by `tests/negative/main.rs`, so the
+new failure mode is not merely implemented but declared and proven.
+
+The proving tests were mutation-checked: with D1 and D2 reverted to their
+merged-`main` behaviour the tests fail, and the D1 assertion reports
+`L0 was written Tally { writes: 1 } (result Ok(()))` -- which is the bug stated
+exactly, because the old code did not error at all, it succeeded by writing to
+a colder rung.
+
+Two tests, deliberately both required. A test that forces only a *single* lost
+race passes against the broken code, because even the old two-attempt budget
+absorbs one loss; that version of this test was written, observed passing
+against the bug, and discarded as vacuous. `ThiefTier` in testkit wins every
+race deterministically so the budget is genuinely exhausted. The soak layer is
+the endurance witness and went from 2/25 failing to 0/25.
+"""
+rationale = """
+Fixed rather than waived. This was a live data-path defect on merged `main`
+that silently wrote stale values into colder tiers under concurrency, and it
+red the only signal (`Performance + soak`) that would have caught it -- at a
+moment when `main` had no required status check to act on it (B21).
+"""

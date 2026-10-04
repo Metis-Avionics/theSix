@@ -1,6 +1,7 @@
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum CacheError {
     #[error("unauthenticated")]
     Unauthenticated,
@@ -44,6 +45,22 @@ pub enum CacheError {
 
     #[error("stale generation")]
     StaleGeneration,
+
+    /// A write lost the commit race on its own rung more times than the race
+    /// budget allows, so it stopped retrying rather than spinning.
+    ///
+    /// This is deliberately distinct from [`CacheError::StaleGeneration`].
+    /// Losing one race is a benign optimistic-concurrency outcome that `set`
+    /// absorbs by re-preparing; only the *budget* running out is a condition a
+    /// caller may want to see. It is also deliberately not a rung-level error:
+    /// it says nothing about whether the rung can take the write, so the ladder
+    /// walk does not treat it as a reason to descend.
+    ///
+    /// The payload-free message is load-bearing: `cia.confidentiality
+    /// .payload_in_error_messages` requires that an error never carry key or
+    /// value material, and the `security` gate proves it.
+    #[error("write contended")]
+    WriteContended,
 
     #[error("serialization failed")]
     SerializationFailed,

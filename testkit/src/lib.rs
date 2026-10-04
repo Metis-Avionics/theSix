@@ -728,6 +728,89 @@ pub fn faulty_corrupting<V: Clone + Send + Sync + 'static + thesix::IntegrityChe
 /// that fails cleanly stores nothing, so asserting against one proves nothing
 /// about residue at all — which is how the original gap survived: the write path
 /// was tested only with tiers that kept their promises.
+/// A tier that wins every commit race it can reach.
+///
+/// On every non-re-entrant `set` it performs a competing `manager.set` for the
+/// *same application key* first. That commit bumps the generation, so the
+/// caller's own token is expired by the time it reaches `commit` and it loses.
+/// The re-entrancy guard stops the thief's own write from being stolen from,
+/// so exactly one competitor runs per attempt and the loss is deterministic
+/// rather than probable.
+pub struct ThiefTier {
+    inner: Arc<dyn CacheTier<String>>,
+    /// The *application* key, not the framed bytes: re-framing `KeyRef` bytes
+    /// would address a different key and the theft would silently miss.
+    key: String,
+    mgr: std::sync::OnceLock<std::sync::Weak<CacheManager<String, String, DefaultPolicy>>>,
+    stealing: std::sync::atomic::AtomicBool,
+    steals: std::sync::atomic::AtomicU64,
+}
+
+impl ThiefTier {
+    #[must_use]
+    pub fn wrap(inner: Arc<dyn CacheTier<String>>, key: &str) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            key: key.to_string(),
+            mgr: std::sync::OnceLock::new(),
+            stealing: std::sync::atomic::AtomicBool::new(false),
+            steals: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+    pub fn attach(&self, m: &Arc<CacheManager<String, String, DefaultPolicy>>) {
+        let _ = self.mgr.set(Arc::downgrade(m));
+    }
+    #[must_use]
+    pub fn steals(&self) -> u64 {
+        self.steals.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl CacheTier<String> for ThiefTier {
+    fn name(&self) -> String {
+        self.inner.name()
+    }
+    fn backend(&self) -> thesix::BackendKind {
+        self.inner.backend()
+    }
+    fn health(&self) -> thesix::TierHealth {
+        self.inner.health()
+    }
+    fn tier_id(&self) -> thesix::TierId {
+        self.inner.tier_id()
+    }
+
+    async fn get(&self, key: &KeyRef<'_>) -> Result<Option<String>, CacheError> {
+        self.inner.get(key).await
+    }
+
+    async fn set(
+        &self,
+        key: &KeyRef<'_>,
+        value: String,
+        ttl: Option<std::time::Duration>,
+    ) -> Result<(), CacheError> {
+        use std::sync::atomic::Ordering::SeqCst;
+        if !self.stealing.swap(true, SeqCst) {
+            self.steals.fetch_add(1, SeqCst);
+            if let Some(m) = self.mgr.get().and_then(std::sync::Weak::upgrade) {
+                let _ = m.set(&self.key, "thief".to_string(), &test_ctx()).await;
+            }
+            self.stealing.store(false, SeqCst);
+        }
+        self.inner.set(key, value, ttl).await
+    }
+
+    async fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError> {
+        self.inner.remove(key).await
+    }
+
+    async fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
+        self.inner.contains(key).await
+    }
+}
+
 pub struct MisreportingTier {
     inner: Arc<dyn CacheTier<String>>,
     misreport_next: AtomicBool,

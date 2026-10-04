@@ -210,12 +210,20 @@ fn previous_rung(rung: TierId) -> TierId {
 }
 
 impl<K, V, P> CacheManager<K, V, P> {
-    /// How many times a single write may be re-prepared after losing a race.
+    /// How many times a single write may be re-prepared after losing a commit
+    /// race on its *own* rung.
     ///
-    /// Two is deliberate: the loser of a two-writer race needs one retry, and a
-    /// third attempt means genuine contention, which a caller should see rather
-    /// than have hidden behind a retry loop.
-    const MAX_COMMIT_ATTEMPTS: usize = 2;
+    /// This budget is per-rung and is spent only on lost races. It used to also
+    /// bound the rung walk, which is what let a benign race end a write: a
+    /// loser that spent its two attempts descended, and descending after losing
+    /// is wrong in its own right (see the race arm of `set`).
+    ///
+    /// The value is generous on purpose. Exhausting it requires losing this many
+    /// races in a row on one rung, which means the key is being rewritten
+    /// continuously by writers that never pause; a cache write that hits that
+    /// is a caller-visible condition worth reporting, not something to hide
+    /// behind an unbounded loop that would livelock the executor.
+    const MAX_COMMIT_ATTEMPTS: usize = 64;
 
     /// How many times `get_or_fetch` may hand the entry to another caller before
     /// giving up.
@@ -910,7 +918,8 @@ where
                 continue;
             };
 
-            for _attempt in 0..Self::MAX_COMMIT_ATTEMPTS {
+            let mut lost_races = 0usize;
+            loop {
                 // Phase 1: record the intent. From here the entry reads as a miss,
                 // so a crash between the phases cannot expose a half-written
                 // value.
@@ -973,10 +982,35 @@ where
                                 intent.disarm();
                                 Ok(())
                             }
-                            // A lost race is not an error: this token is dead and
-                            // the guard aborts it as the loop re-prepares, so the
-                            // retry starts from the restored state.
-                            Err(CacheError::StaleGeneration) => continue,
+                            // A lost race is not an error, and it is not a
+                            // reason to change rung. The winner's value is
+                            // *newer* than this one, so the response is to
+                            // re-prepare against the generation it left behind
+                            // and try again right here.
+                            //
+                            // This arm used to fall out of a bounded retry loop
+                            // that, when exhausted, set `last_error =
+                            // StaleGeneration` and walked down the ladder. That
+                            // was wrong twice over: it wrote a losing, older
+                            // value into a colder tier, and because the walk
+                            // *consumed* the budget it could run out of rungs
+                            // and hand the caller a control-plane error from a
+                            // public API documented never to do so.
+                            Err(CacheError::StaleGeneration) => {
+                                lost_races += 1;
+                                if lost_races >= Self::MAX_COMMIT_ATTEMPTS {
+                                    let e = CacheError::WriteContended;
+                                    // The token is already dead, so the guard
+                                    // aborts it as we release. Nothing was
+                                    // committed at this rung by this attempt.
+                                    drop(intent);
+                                    return Err(e);
+                                }
+                                // Yield rather than spin: the writer we lost
+                                // to needs the executor to make progress too.
+                                tokio::task::yield_now().await;
+                                continue;
+                            }
                             Err(e) => {
                                 // Uncommitted: the rung holds residue this write
                                 // created, so remove it before releasing the intent.
@@ -1036,8 +1070,11 @@ where
                     }
                 }
             }
-            last_error = CacheError::StaleGeneration;
-            rung = previous_rung(rung);
+            // Unreachable: the inner loop only ever exits by returning (every
+            // path out of it is a `return` or a `continue 'outer`), so there is
+            // no longer a way to exhaust it and fall through to a rung change.
+            // This is the line that used to turn a lost race into a rung
+            // descent; its absence is the fix for D1.
         }
 
         Err(last_error)

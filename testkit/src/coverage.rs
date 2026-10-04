@@ -27,6 +27,7 @@ pub const NEGATIVE_CASES: &[&str] = &[
     "cancelled_operation",
     "duplicate_operation",
     "stale_generation",
+    "write_contended",
     "generation_conflict",
     "partial_write",
     "partial_promotion",
