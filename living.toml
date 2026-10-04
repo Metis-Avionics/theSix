@@ -197,20 +197,27 @@ most obvious route to defeating the registry being added.
 """
 
 pending_work = """
-- The residual limit of every proof registry, now stated once and applying to three of
+# Double entry with bugs.toml, kept deliberately. `pending_work` here holds the
+# reasoning and the sequencing; `bugs.toml` holds the tracked status and is what
+# `merge_readiness` reads. Each item below names its finding so the two can be
+# reconciled by eye. They are not merged into one list because they answer
+# different questions: this one asks *why is it hard and what order*, the tracker
+# asks *is it done*. B15-B20 are open and non-blocking, so a green
+# `merge_readiness` is consistent with every item below still being true.
+- **B20.** The residual limit of every proof registry, now stated once and applying to three of
   them. `missing_locators` proves a function of that name is defined in that file. It
   does not prove the function is a test, and it does not prove the test exercises the
   clause it is cited for. A row pointing at a real but irrelevant function passes.
   Closing this needs the instrument the fault layer already has - assert that the
   injected fault actually fired, per row - rather than a better string match.
-- An unverified concurrency caveat, carried forward and never closed: `peek` observes
+- **B19.** An unverified concurrency caveat, carried forward and never closed: `peek` observes
   without claiming, and `CacheTier::get` returns a bare `V`, so a value read from a
   rung across an `await` cannot be revalidated against the generation it was read at.
   If an abort lands in that window the caller holds a value the control plane has
   stopped describing. Either `get` needs to return something carrying its generation,
   or the read path needs a post-read generation check. It needs a test that forces the
   interleaving, which is why it is written here rather than described as safe.
-- Move recovery needs a real answer. `theSix.toml` declares
+- **B15.** Move recovery needs a real answer. `theSix.toml` declares
   `recovery_direction_prepare_move = "external-reconciliation"` and the runtime
   implements exactly that, so the contract and the code agree — but the consequence is
   that a swept Move intent stays `Prepared` forever, with `population_owner = true`,
@@ -231,12 +238,14 @@ pending_work = """
   reporting success while doing nothing. Only executing CI found them. A ref that
   cannot be resolved is invisible to every local gate, and the nearest local
   approximation — grepping for the tool in the file — would pass on all three.
-- The `sccache-action`, `cargo-deny-action` removal and `rust-toolchain@stable` refs
-  are pinned variously by SHA and by version tag. SHA-pinning every action is the
+- **B18.** The `sccache-action`, `cargo-deny-action` removal and `rust-toolchain@stable` refs
+  are pinned variously by SHA and by version tag. Seven of the eight action
+  references in the workflow are tags; only `sccache-action` is SHA-pinned. SHA-pinning every action is the
   consistent end state; the SHAs resolve the same way this one did, it has just not
   been done for all of them.
-- The six waived invariants are the honest remainder of the audit and are the next
-  thing worth closing: `unbounded_retry` (nothing counts retries), `silent_stale_data_
+- **B16.** The six waived invariants are the honest remainder of the audit and are the next
+  thing worth closing. Two of the six are not test-authoring work: one needs a
+  genuinely blocking backend, the other is blocked on **B17**. `unbounded_retry` (nothing counts retries), `silent_stale_data_
   acceptance` (nothing distinguishes silent from explicit stale service),
   `recovering_from_available` (the state exists, no test drives a rung into it),
   `blocking_runtime_thread` and `nested_block_on` (nothing in the suite can catch
@@ -245,9 +254,10 @@ pending_work = """
 - Extend the non-vacuity discipline past bugs.toml. `bugs.toml` is enforced by a gate;
   the contract's own prose clauses, the `decisions` list below, and the `remaining`
   list are not. Nothing fails when one of them goes stale.
-- Eviction policy for fixed-capacity tiers. CapacityExhausted plus ladder degradation
+- **B17.** Eviction policy for fixed-capacity tiers. CapacityExhausted plus ladder degradation
   is honest but lossy: a cache with no eviction stops accepting writes once its ladder
-  fills. Not attempted here because it is a policy choice (LRU, sampled, clock) and the
+  fills. There is no `evict` in `src/` at all — this is a policy decision the contract
+  leaves to the consumer, not an unfinished loop. Not attempted here because it is a policy choice (LRU, sampled, clock) and the
   contract deliberately leaves policy to the consumer.
 - Durable backing for the authority rung. L6 has no in-tree implementation, so the
   authority is currently a configured role with no binding. DurabilityClass::Verified
@@ -431,6 +441,9 @@ entries = [
     { type = "fixed", description = "The locator existence check matched `fn <name>` as a substring, so renaming a cited test aside kept its coverage claim alive", scope = "testkit/src/coverage.rs" },
     { type = "changed", description = "CI triggers are unfiltered, so a stacked branch raises checks at all; main requires exactly `Verification (all gates)` with strict:true, admins enforced and force-push disabled", scope = ".github/workflows/ci.yml" },
     { type = "changed", description = "History rewritten to remove attribution trailers from seven commits, found by the authorship gate. The rewrite was correct and the force-push that published it was not optional: until the remote ref moved, the gate kept correctly reporting them", scope = "git history" },
+    { type = "added", description = "B15-B20: the independent review's remaining debt (move recovery's permanent wedge, the six waivers, no eviction, unpinned action refs, the unproven peek/get interleaving, and the proof registries' existence-not-semantics limit) recorded as open non-blocking findings, so a gate tracks them rather than prose. expected_should_fix moves 5 -> 11", scope = "bugs.toml, theSix.toml" },
+    { type = "fixed", description = "bugs.toml's header claimed nothing read it; merge_readiness has read it since B12/B13 landed. A stale claim about the checking apparatus, inside the apparatus", scope = "bugs.toml" },
+    { type = "changed", description = "main now advances 0.2.3 -> 0.3.0 -> 0.4.0. PR2 was renumbered to 0.3.0 and that commit merged into this branch, so the release line is monotonic and neither PR needs a conflict resolution at merge time", scope = "Cargo.toml, CHANGELOG.md, living.toml" },
     { type = "added", description = "Release order is recorded rather than automated. 0.4.0 publishes only after PR2 (0.3.0) and PR3 are both merged and PR3 is re-reviewed; cargo publish is irreversible, so it is a human step with a dry-run first, not something a session does on finishing a task", scope = "living.toml" },
     { type = "added", description = "tests/contract parses .github/workflows/ci.yml and holds it to the contract in both directions, plus a bash -n lint over every run: block. The comment claiming this check existed was true for the first time", scope = "tests/contract/workflow.rs, .github/workflows/ci.yml" },
     { type = "fixed", description = "The gate runner leaked cargo's own CARGO_MANIFEST_DIR and CARGO_PKG_* into every gate, so `cargo xtask run machete` walked the wrong tree. The documented invocation was the broken one", scope = "xtask/src/gates.rs" },

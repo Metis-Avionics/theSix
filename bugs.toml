@@ -1,10 +1,25 @@
 # bugs.toml — review findings against PR3 (`feat/hpa-continuity-contract`)
 #
-# This file is a record, not a gate. Nothing in `cargo xtask` reads it yet, and
-# `cargo xtask contract` does not check it. That is stated here explicitly so the
-# file cannot be mistaken for a passing state: the clauses in `theSix.toml` that
-# findings B1, B2 and B3 contradict are asserted by `tests/contract` today, and
-# those assertions are true *about the contract text*, not about the runtime.
+# This file IS a gate input. `merge_readiness` reads it, via the contract's
+# `[verification.merge_readiness].tracker` key, and fails while any finding with
+# `blocks_merge = true` is open. An earlier version of this header said nothing
+# read it yet; that was true when written and stopped being true when the gate
+# landed, which is exactly the failure mode B8 and B13 are about — a stale claim
+# about the checking apparatus, sitting inside the apparatus.
+#
+# Two consequences worth stating plainly:
+#
+#   * `severity` is documentation. The gate splits findings on `blocks_merge`
+#     alone, so a `should-fix` entry with `blocks_merge = true` reads as blocking
+#     and vice versa. Both fields are set consistently on every entry below.
+#   * the expected counts live in `theSix.toml`, not in `[meta]` below. A tracker
+#     that declares its own expected contents can be edited to agree with whatever
+#     it currently holds, so `[meta]` is informational and deliberately unread.
+#
+# A green `merge_readiness` means every merge-blocking finding is cleared. It does
+# NOT mean every finding below is closed: B15–B20 are open, non-blocking, and are
+# listed because they are real remaining work rather than because they should hold
+# the branch.
 #
 # Each finding below was re-derived from the source at the recorded commit before
 # being written down. The review's own claims were not taken on trust; where the
@@ -1038,4 +1053,286 @@ invisible locally because both only fail where the tool is absent. The honest
 summary is that CI executing for the first time found three separate things that
 had never run, which is an argument for the unfiltered `pull_request` trigger and
 against every claim in this repository that the gates were already covering it.
+"""
+
+# ---------------------------------------------------------------------------
+# OPEN, NON-BLOCKING — REMAINING WORK
+# ---------------------------------------------------------------------------
+#
+# B15–B20 come from an independent review of both PRs at the current heads, which
+# returned MERGEABLE for each with no blocking finding. The six items below are
+# that review's "remaining engineering debt", recorded here so they are tracked by
+# a gate rather than living only in prose.
+#
+# None of them blocks a merge, and the mechanics are deliberate rather than
+# accidental: `merge_readiness` inspects `status` only for entries with
+# `blocks_merge = true`, so an open non-blocking finding is counted by the check
+# and does not fail it. That is the behaviour wanted here — the work is real and
+# should not be forgotten, and it is also genuinely not a reason to hold a branch
+# whose blocking findings are all cleared.
+#
+# `status = "open"` is therefore accurate, not a euphemism. If any of these is
+# promoted to `blocks_merge = true` before it is fixed, the gate goes red
+# immediately, which is the intended pressure.
+
+[[bug]]
+id = "B15"
+title = "A swept Move intent wedges its key's population path permanently, with no automatic remedy"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["src/continuity.rs:141", "src/manager.rs:537", "theSix.toml:recovery_direction_prepare_move"]
+violates = []
+source = "independent review of both PRs at 5ab1aaa, listed as remaining debt"
+relates_to = "B3"
+summary = """
+B3 is resolved and this does not reopen it. B3 fixed a *disagreement*: the contract
+promised `complete-forward` while the runtime could only report failure. Both now
+say `external-reconciliation`, which is honest.
+
+What remains is a capability gap rather than a contradiction, and it has a
+permanent cost. `RecoveryDirection::for_kind(Move)` returns
+`ExternalReconciliation` (src/continuity.rs:141) and the sweep counts these
+separately as `needs_reconciliation` (src/manager.rs:537) rather than resolving
+them. So the intent is left intact — `Prepared`, with `population_owner = true` —
+and `acquire` declines while an owner is set. The population path for that key is
+wedged until something outside the crate reconciles it.
+"""
+mechanism = """
+move_entry:  prepare(kind=Move, owner=true) -> remove source -> set dest -> commit
+crash between remove-source and commit:
+  sweep:      for_kind(Move) == ExternalReconciliation -> counted, not resolved
+  entry:      stays Prepared, population_owner = true
+  get_or_fetch: acquire declines -> caller becomes a waiter against an owner
+                that will never arrive -> burns the full bound and fails
+"""
+re_derived = """
+Verified against source rather than taken from the review: `IntentKind::Move =>
+Self::ExternalReconciliation` at src/continuity.rs:141, and `IntentKind:: Move =>
+report.needs_reconciliation += 1` at src/manager.rs:537. The entry is left intact
+rather than failed, so nothing releases the claim.
+"""
+required_fix = """
+Two options, both contract changes rather than patches:
+
+  (a) persist the key bytes, or a durable handle to them, in `CommitIntent`. This
+      collides with the payload-free intent invariant, which is a contract
+      guarantee in its own right — `commit_protocol` exists to forbid exactly this.
+  (b) reorder the move so the commit precedes the source removal. Then abort is
+      always safe: a crash before the commit leaves the source intact, and a crash
+      after it leaves only an unreachable duplicate at the source. This makes the
+      wedge a transient rather than a permanent state.
+
+Option (b) is the cheaper of the two and needs a test that pins the ordering,
+because the current order is what makes abort unsafe.
+"""
+related_window = """
+A move removes the source rung *before* it commits, so a crash in that window
+leaves the value only at the destination. Any future reconciliation pass must
+handle that window rather than assuming the source is still authoritative.
+"""
+
+[[bug]]
+id = "B16"
+title = "Six declared invariants have no proving test and are waived"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["theSix.toml:verification.invariant_waiver", "testkit/src/coverage.rs"]
+violates = []
+source = "independent review of both PRs at 5ab1aaa; enumerated by B9's audit"
+relates_to = "B9"
+summary = """
+B9 bound 89 of the 95 declared invariant leaves to a proving test and waived 6
+with stated reasons, requiring the union to equal the declared set exactly. The
+waivers are the honest remainder rather than bookkeeping, and they are recorded in
+the contract rather than hidden. This finding tracks closing them.
+"""
+the_six = """
+  capabilities.must_distinguish.recovering_from_available
+      The state is representable and required; no test drives a rung into it.
+  cia.availability.unbounded_retry
+      Ladder descent is bounded by LAST_CACHE_TIER, but nothing counts retries.
+  cia.integrity.silent_stale_data_acceptance
+      Nothing distinguishes *silent* stale acceptance from explicit stale service.
+  concurrency.blocking_runtime_thread
+      Every tier is an in-process stub, so there is no blocking call to catch.
+  concurrency.nested_block_on
+      Nothing in the suite nests block_on, so the invariant is unobserved.
+  concurrency.testing.promotion_eviction_races
+      Eviction is not implemented, so there is no race to schedule.
+"""
+scope_note = """
+Two of the six are not test-authoring work and cannot be closed by writing a test.
+`blocking_runtime_thread` needs a genuinely blocking backend, and
+`promotion_eviction_races` is blocked on B17. The remaining four are reachable
+today. Treating all six as equally cheap would misestimate the work.
+"""
+re_derived = """
+Confirmed by reading `[[verification.invariant_waiver]]` in theSix.toml: six
+entries, each with a `reason`, and the reasons match the enumeration above.
+"""
+
+[[bug]]
+id = "B17"
+title = "Nothing evicts, so a cache whose whole ladder is full refuses new writes"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["src/tier/fixed_tier_stub.rs:256", "src/manager.rs"]
+violates = []
+source = "independent review of both PRs at 5ab1aaa"
+relates_to = "B16"
+summary = """
+`FixedTierStub::set` returns `CacheError::CapacityExhausted` when full
+(src/tier/fixed_tier_stub.rs:256). `CacheManager` degrades down the ladder on that
+error, which is honest and lossless — but when every rung is full there is nothing
+left to degrade to, and the write is refused. A cache with no eviction eventually
+stops accepting writes entirely.
+"""
+re_derived = """
+Verified rather than assumed: `Err(CacheError::CapacityExhausted)` at
+src/tier/fixed_tier_stub.rs:256, and a search for `fn evict` / `evict(` across
+`src/` returns nothing. There is no eviction implementation, partial or otherwise.
+"""
+required_fix = """
+Blocked on a policy decision rather than on engineering. Eviction is a policy
+choice — LRU, sampled, clock — and the contract deliberately leaves policy to the
+consumer, so this cannot be closed by picking one inside the crate. Closing it
+means either implementing a policy behind a consumer-supplied hook, or declaring
+the limitation in the contract rather than leaving it implied by the ladder's
+degradation behaviour.
+"""
+blocks = "B16's `promotion_eviction_races` waiver cannot be lifted before this lands."
+
+[[bug]]
+id = "B18"
+title = "Seven of eight action references are pinned by tag rather than by SHA"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = [".github/workflows/ci.yml"]
+violates = []
+source = "independent review of both PRs at 5ab1aaa; residual of B11 and B14"
+relates_to = "B11, B14"
+summary = """
+`mozilla-actions/sccache-action` is pinned to a commit SHA. Every other action
+reference is a tag or a branch name, and a tag is a mutable pointer: whoever owns
+the repository can move it, so what CI executes is not fixed by this file.
+"""
+re_derived = """
+Enumerated from the workflow rather than carried over from a review comment.
+Eight distinct `uses:` references, one SHA-pinned:
+
+  mozilla-actions/sccache-action@fd02668...   SHA      (pinned)
+  Swatinem/rust-cache@v2                      tag
+  actions/checkout@v4                         tag
+  dtolnay/rust-toolchain@stable                tag
+  dtolnay/rust-toolchain@nightly               tag
+  taiki-e/install-action@cargo-deny           tag
+  taiki-e/install-action@cargo-machete        tag
+  taiki-e/install-action@cargo-nextest        tag
+"""
+scope_note = """
+The residual risk is the action's own code, not the compiler version:
+`env.RUST_TOOLCHAIN` pins the toolchain, so `rust-toolchain@stable` selects a
+plugin rather than an unpinned compiler.
+"""
+why_this_is_more_than_theoretical = """
+B11 and B14 were both build steps whose action or tag did not exist, and both
+reported success having done nothing. Those were *absent* refs. A tag that is later
+moved is the quieter version of the same failure: the ref resolves, the step runs,
+and it runs whatever the tag now points at.
+"""
+
+[[bug]]
+id = "B19"
+title = "A value read across an await cannot be revalidated against the generation it was read at"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = false
+locations = ["src/control/cachelito.rs:808", "src/tier/trait.rs:165"]
+violates = []
+source = "own audit; recorded as an identified but UNPROVEN caveat, not a demonstrated defect"
+relates_to = "B6"
+summary = """
+`Cachelito::peek` observes without claiming (src/control/cachelito.rs:808) and
+`CacheTier::get` returns a bare `V` (src/tier/trait.rs:165) — no generation, no
+address, nothing the caller can check the control plane against afterwards. A
+caller that peeks, then awaits the tier, then uses the value cannot detect that an
+`abort` landed in the window: B6's `abort` leaves the entry `Failed` and advances
+the generation, and the caller is holding a value the control plane has stopped
+describing.
+"""
+verified_false_means = """
+This is the only entry in this file not marked `verified = true`, and the reason is
+the point: no test forces the interleaving, so the concern is unproven in *either*
+direction. It is recorded rather than dismissed because the asymmetry is real and
+cheap to state, and because the alternative — leaving it in prose where it was —
+is how it survived several review rounds already.
+
+It is not blocking *because it is unverified*. Promoting it on suspicion would be
+the same error as closing it on optimism.
+"""
+what_would_settle_it = """
+A test that interleaves an abort between the peek and the tier read and asserts
+what the caller observes. Two possible outcomes, with different consequences:
+
+  * the caller cannot observe a stale value — the concern is unfounded and this
+    finding closes with the test retained as the proof;
+  * the caller can be handed a value from a rung the control plane has stopped
+    describing — this is a data-correctness defect of the same family as B2 and B6,
+    and it should be promoted to `blocks_merge = true` immediately.
+
+Either result is worth having. The current state, where nobody has run the test,
+is the only outcome that is not worth having.
+"""
+possible_fix_if_confirmed = """
+`CacheTier::get` returning a bare `V` is the root of it. Either the value carries
+its generation so the caller can revalidate after the await, or the read path
+performs a post-read generation check. B6 explicitly declined the first option as
+too broad a change across every tier and backend, which was the right call then;
+this finding is the reason to reconsider it.
+"""
+
+[[bug]]
+id = "B20"
+title = "The proof registries prove a test is named and exists, not that it exercises the clause"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["testkit/src/coverage.rs", "tests/contract/invariant.rs", "tests/contract/main.rs"]
+violates = []
+source = "independent review of both PRs at 5ab1aaa; stated by this repository's own documentation"
+relates_to = "B9"
+summary = """
+Three registries bind declared names to proving tests: `INVARIANT_PROOFS` (95
+leaves), `PROPERTY_CASE_PROOFS` (9) and `FAULT_CASE_PROOFS` (12). `missing_locators`
+resolves each `path::fn` and checks that a function of that name is defined in that
+file. It does not check that the function is a test, and it does not check that the
+test exercises the clause it is cited for. A row pointing at a real but irrelevant
+function satisfies the gate.
+"""
+what_is_and_is_not_closed = """
+Closed: a declared clause cannot exist without something responsible for it, and a
+test cannot be renamed out of a citation. The locator match is word-bounded after
+mutation testing showed the substring form let `no_authority_inversion_RENAMED`
+satisfy a claim on `no_authority_inversion`.
+
+Not closed: semantic sufficiency. The word-bounded match stops the cheapest
+defeat — renaming a test aside — and does nothing about pointing a row at the
+wrong test, which is the same class of defect as B8's comment describing a check
+that did not exist.
+"""
+required_fix = """
+Per-row fault-ledger assertion, which is the instrument the fault layer already
+uses: each row asserts that the thing it injects actually happened, so a citation
+to an irrelevant test fails rather than passing quietly. A stricter string match
+cannot close this and should not be mistaken for progress toward closing it.
 """
