@@ -44,6 +44,18 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## Gates (the contract is authoritative)
 
+> **ACTION REQUIRED AFTER THE 0.4.0 MERGE — `main` is not currently
+> protected by a required check.** Branch protection's `required_status_checks`
+> rule was switched off to merge PR2, which predates the contract and whose
+> workflow emits no `Verification (all gates)` job; with `enforce_admins: true`
+> there was no bypass. Every other rule is intact. **Re-enable it as soon as the
+> contract workflow is running on `main`**, or any PR can merge without the
+> aggregated gate. Tracked as `B21` in `bugs.toml`; no gate enforces it, so it
+> depends on this note being read.
+>
+> Settings → Branches → main → Require status checks → add
+> `Verification (all gates)`, "Require branches to be up to date" enabled.
+
 ```bash
 cargo xtask contract        # validate theSix.toml against the runner + checkout
 cargo xtask gates           # the mandatory pass

@@ -1336,3 +1336,61 @@ uses: each row asserts that the thing it injects actually happened, so a citatio
 to an irrelevant test fails rather than passing quietly. A stricter string match
 cannot close this and should not be mistaken for progress toward closing it.
 """
+
+[[bug]]
+id = "B21"
+title = "main's required_status_checks rule is DISABLED and must be re-enabled after the 0.4.0 merge"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["AGENTS.md", "living.toml"]
+violates = ["verification_required = true"]
+source = "own audit, while merging PR2 under branch protection"
+summary = """
+`main` branch protection no longer requires `Verification (all gates)`. Every other
+rule is intact — `enforce_admins: true`, force-push disabled, deletions disabled,
+conversation resolution on — but the required-check rule is absent, so **any PR can
+merge to main without the aggregated gate passing**.
+
+This is deliberate and temporary, not a regression to be dismissed. PR2 predates the
+contract: its workflow has nine jobs and no aggregator, so it can never report a
+check named `Verification (all gates)`, and with `enforce_admins: true` there is no
+bypass. The rule was therefore dropped for the duration of the PR2 merge and is to be
+restored immediately afterwards.
+"""
+why_the_order_is_what_it_is = """
+The requirement can only be restored once `main` runs the *contract* workflow, because
+that workflow is what emits the check's name. On the pre-merge `main` the name
+referred to nothing any CI run would ever produce, so re-enabling it before the merge
+would block every subsequent PR. Restoring it after 0.4.0 lands is the first moment the
+requirement is meaningful.
+"""
+what_could_not_be_done_here = """
+The automation token can `DELETE` the protection rule but every create/update path
+returns 404 — `PATCH .../protection`, `PUT`/`POST .../required_status_checks`, and
+`POST .../protection` were each attempted. `GET` succeeds and reports
+`permissions.admin: true`, which is the signature of a fine-grained token whose
+repository metadata says admin while the token itself lacks **Administration: write**.
+This finding therefore requires either the web UI or a token with that permission.
+"""
+required_fix = """
+Settings -> Branches -> main -> Require status checks: add
+`Verification (all gates)`, with "Require branches to be up to date" enabled.
+
+Or, with a token holding Administration: write:
+
+    gh api -X POST repos/Metis-Avionics/theSix/branches/main/protection/required_status_checks \\
+      --input '{"strict":true,"checks":[{"context":"Verification (all gates)"}]}'
+
+The original binding was `strict: true` with `app_id: 15368` (GitHub Actions). Omitting
+`app_id` and restoring via `checks[].context` is preferred over guessing at a payload
+that could not be tested against a working writer.
+"""
+residual_risk = """
+Until it is restored, nothing mechanically prevents a merge that skips the aggregated
+gate. `merge_readiness` inside that gate is the check that would have caught an open
+blocking finding, so the protection is the last line rather than the first — but it is
+the one that cannot be argued with. This finding being non-blocking means **no gate
+enforces that it be closed**; it relies on this record being read.
+"""
