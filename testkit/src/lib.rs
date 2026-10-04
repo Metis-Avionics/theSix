@@ -238,6 +238,65 @@ impl Tally {
     }
 }
 
+/// Wraps a tier and reports a chosen [`OperationalState`], delegating everything
+/// else.
+///
+/// Exists because [`OperationalState`] has six members and the in-tree stubs only
+/// ever produce one of them. `capabilities.must_distinguish.recovering_from_available`
+/// cannot be proven by a tier that cannot report the state under test, so the gap
+/// was not "no test exists" but "no test could exist".
+///
+/// Only `state` is overridden. `backend` stays whatever the inner tier reports,
+/// so a test cannot accidentally claim a backend the rung was not built with.
+pub struct StatedTier<V> {
+    inner: Arc<dyn CacheTier<V>>,
+    state: thesix::OperationalState,
+}
+
+impl<V> StatedTier<V> {
+    pub fn wrap(inner: Arc<dyn CacheTier<V>>, state: thesix::OperationalState) -> Arc<Self> {
+        Arc::new(Self { inner, state })
+    }
+}
+
+#[async_trait::async_trait]
+impl<V: Clone + Send + Sync + 'static + thesix::IntegrityCheck> CacheTier<V> for StatedTier<V> {
+    fn name(&self) -> String {
+        format!("stated-{}", self.inner.name())
+    }
+    fn backend(&self) -> BackendKind {
+        self.inner.backend()
+    }
+    fn capability(&self) -> thesix::capability::TierCapability {
+        let mut cap = self.inner.capability();
+        cap.state = self.state;
+        cap
+    }
+    fn health(&self) -> TierHealth {
+        self.inner.health()
+    }
+    fn tier_id(&self) -> TierId {
+        self.inner.tier_id()
+    }
+    async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
+        self.inner.get(key).await
+    }
+    async fn set(
+        &self,
+        key: &KeyRef<'_>,
+        value: V,
+        ttl: Option<std::time::Duration>,
+    ) -> Result<(), CacheError> {
+        self.inner.set(key, value, ttl).await
+    }
+    async fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
+        self.inner.contains(key).await
+    }
+    async fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError> {
+        self.inner.remove(key).await
+    }
+}
+
 /// Wraps a tier and counts every operation that reaches it.
 ///
 /// The anti-vacuity pattern this exists for: asserting `authority_writes == 0`

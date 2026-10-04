@@ -215,6 +215,22 @@ pub const INVARIANT_PROOFS: &[(&str, &str)] = &[
         "tests/concurrency.rs::eviction_invalidates_an_in_flight_commit",
     ),
     (
+        "capabilities.must_distinguish.recovering_from_available",
+        "tests/capability.rs::recovering_is_reported_as_recovering_and_distinguished_from_available",
+    ),
+    (
+        "cia.availability.unbounded_retry",
+        "tests/negative/main.rs::retry_counts_are_bounded_and_observed",
+    ),
+    (
+        "cia.integrity.silent_stale_data_acceptance",
+        "tests/integration.rs::stale_service_is_reported_rather_than_silent",
+    ),
+    (
+        "concurrency.nested_block_on",
+        "tests/await_safety.rs::nested_block_on_is_absent_from_the_crate_and_would_be_caught",
+    ),
+    (
         "acid.atomicity.cancelled_operation_may_commit_partially",
         "tests/recovery/main.rs::an_aborted_prepared_write_is_not_left_readable",
     ),
