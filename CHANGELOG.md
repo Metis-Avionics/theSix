@@ -1,6 +1,6 @@
 # CHANGELOG
 
-## v1.0.0 — 2026-10-02
+## v0.3.0 — 2026-10-02
 
 ### Added
 - `L6` authority tier — Postgres with pgvector is the intended binding. Excluded from the cache ladder: never blind-written, never invalidated, never selected as a fallback rung

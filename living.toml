@@ -4,7 +4,7 @@ phase = "v1_tier_capability"
 last_updated = "2026-10-02T00:00:00+01:00"
 
 summary = """
-1.0.0: the data plane can finally host real I/O backends, and a consumer can
+0.3.0: the data plane can finally host real I/O backends, and a consumer can
 find out what it has. Four defects made 0.2.3 misleading in ways its own docs
 denied, and all four are now fixed at the source rather than documented around.
 
@@ -135,7 +135,7 @@ tests_passing = [
 ]
 
 [changelog]
-version = "1.0.0"
+version = "0.3.0"
 date = "2026-10-02"
 entries = [
     { type = "added", description = "CacheContext builder carrying IdentityContext + optional TTL", scope = "src/identity.rs" },
