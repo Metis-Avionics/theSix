@@ -22,8 +22,8 @@ fn test_byte_value_roundtrip() {
 }
 
 #[cfg(feature = "sled")]
-#[test]
-fn test_l4_sled_backend_get_set_remove() {
+#[tokio::test]
+async fn test_l4_sled_backend_get_set_remove() {
     use thesix::L4SledBackend;
 
     let pid = std::process::id();
@@ -32,23 +32,29 @@ fn test_l4_sled_backend_get_set_remove() {
 
     let key = KeyRef(b"sled-key".as_slice());
     // Miss first.
-    assert!(backend.get(&key).unwrap().is_none());
-    assert!(!backend.contains(&key).unwrap());
+    assert!(backend.get(&key).await.unwrap().is_none());
+    assert!(!backend.contains(&key).await.unwrap());
 
     // Set and read back.
-    backend.set(&key, b"sled-value".to_vec(), None).unwrap();
-    assert_eq!(backend.get(&key).unwrap(), Some(b"sled-value".to_vec()));
-    assert!(backend.contains(&key).unwrap());
+    backend
+        .set(&key, b"sled-value".to_vec(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        backend.get(&key).await.unwrap(),
+        Some(b"sled-value".to_vec())
+    );
+    assert!(backend.contains(&key).await.unwrap());
 
     // Remove.
-    backend.remove(&key).unwrap();
-    assert!(backend.get(&key).unwrap().is_none());
+    backend.remove(&key).await.unwrap();
+    assert!(backend.get(&key).await.unwrap().is_none());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn test_l5_origin_backend_fetch_through() {
+#[tokio::test]
+async fn test_l5_origin_backend_fetch_through() {
     use thesix::L5OriginBackend;
 
     let fetcher: Box<thesix::OriginFetcher> = Box::new(|key: &[u8]| {
@@ -61,7 +67,10 @@ fn test_l5_origin_backend_fetch_through() {
     let backend = L5OriginBackend::<Vec<u8>>::new(fetcher);
 
     let key = KeyRef(b"origin-key".as_slice());
-    assert_eq!(backend.get(&key).unwrap(), Some(b"origin-value".to_vec()));
+    assert_eq!(
+        backend.get(&key).await.unwrap(),
+        Some(b"origin-value".to_vec())
+    );
     let miss = KeyRef(b"nope".as_slice());
-    assert!(backend.get(&miss).unwrap().is_none());
+    assert!(backend.get(&miss).await.unwrap().is_none());
 }

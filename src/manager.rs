@@ -10,7 +10,7 @@ use crate::key::Key;
 use crate::key::KeyRef;
 use crate::policy::{CacheOperation, CachePolicy, CacheRequest, CacheState, FailMode};
 use crate::pool::MemoryPool;
-use crate::tier::tier_trait::CacheTier;
+use crate::tier::tier_trait::{BackendKind, CacheTier};
 use crate::tier::{TierId, TierRegistry};
 
 const MAX_KEY_SIZE: usize = 256;
@@ -171,7 +171,7 @@ where
         match snapshot.state {
             EntryState::Ready if !snapshot.expired => {
                 let tier = self.tier_for(&snapshot.tier);
-                let result = tier.get(&key_ref);
+                let result = tier.get(&key_ref).await;
                 self.record_read(snapshot.tier, &result);
                 result
             }
@@ -185,7 +185,7 @@ where
                 let mut buf2 = [0u8; MAX_KEY_SIZE];
                 let key_ref2 = Self::encode_key(key, &mut buf2)?;
                 let tier = self.tier_for(&snapshot.tier);
-                let result = tier.get(&key_ref2);
+                let result = tier.get(&key_ref2).await;
                 self.record_read(snapshot.tier, &result);
                 result
             }
@@ -216,7 +216,7 @@ where
 
         if snapshot.state == EntryState::Ready && !snapshot.expired {
             let tier = self.tier_for(&snapshot.tier);
-            if let Some(v) = tier.get(&key_ref)? {
+            if let Some(v) = tier.get(&key_ref).await? {
                 return Ok(v);
             }
         }
@@ -250,8 +250,16 @@ where
         let decision = self.resolve_with_snapshot(&request, ctx, &snapshot);
         Self::authorize(&decision)?;
 
+        // Authority rule (tripwired by `put_never_writes_l6_authority`): L6 is
+        // the judge, not a rung. A blind put would write a projection into the
+        // authority and let a cache tier decide what is true. Authority writes
+        // go through the owning repository, which then invalidates downward.
+        if decision.tier == TierId::L6 {
+            return Err(CacheError::PolicyDenied);
+        }
+
         let tier = self.tier_for(&decision.tier);
-        let set_result = tier.set(&key_ref, value, ctx.ttl());
+        let set_result = tier.set(&key_ref, value, ctx.ttl()).await;
         self.record_outcome(decision.tier, set_result);
         set_result?;
 
@@ -284,9 +292,15 @@ where
         let mut buf = [0u8; MAX_KEY_SIZE];
         let key_ref = Self::encode_key(key, &mut buf)?;
 
-        for tier in &self.tiers {
+        for (idx, tier) in self.tiers.iter().enumerate() {
+            // Authority rule (tripwired by `invalidate_skips_l6_authority`):
+            // removing the authority row would delete the record of truth. Only
+            // cache rungs are cleared; authority writes invalidate downward.
+            if idx == TierId::L6.as_usize() {
+                continue;
+            }
             // Best-effort: a tier may legitimately not hold the key.
-            let _ = tier.remove(&key_ref);
+            let _ = tier.remove(&key_ref).await;
         }
         self.cachelito.release(key_ref.0)?;
         Ok(())
@@ -306,7 +320,7 @@ where
             return Ok(false);
         }
         let tier = self.tier_for(&snapshot.tier);
-        tier.contains(&key_ref)
+        tier.contains(&key_ref).await
     }
 
     pub async fn refresh<F, Fut>(
@@ -331,7 +345,7 @@ where
         let current_tier = snapshot.tier;
         let current = {
             let tier = self.tier_for(&current_tier);
-            tier.get(&key_ref).unwrap_or(None)
+            tier.get(&key_ref).await.unwrap_or(None)
         };
 
         match self
@@ -364,6 +378,7 @@ where
         let new_tier_id =
             TierId::from_usize(current_idx - 1).ok_or(CacheError::ConfigurationError)?;
         self.move_entry(key, &key_ref, &snapshot, new_tier_id, ctx)
+            .await
     }
 
     pub async fn demote(&self, key: &K, ctx: &CacheContext) -> Result<(), CacheError> {
@@ -379,16 +394,24 @@ where
             return Err(CacheError::Miss);
         }
 
-        let current_idx = snapshot.tier.as_usize();
-        if current_idx == TierId::L5.as_usize() {
+        // Bounded by the ladder constant rather than by a literal tier, so the
+        // bound lives in exactly one place. L6 is terminal as well as L5: the
+        // authority is never a promotion target, so an entry already sitting on
+        // it has nowhere to move and this is a no-op rather than an error.
+        if snapshot.tier >= crate::policy::LAST_CACHE_TIER {
             return Ok(());
         }
-        let new_tier_id =
-            TierId::from_usize(current_idx + 1).ok_or(CacheError::ConfigurationError)?;
+        let new_tier_id = TierId::from_usize(snapshot.tier.as_usize() + 1)
+            .ok_or(CacheError::ConfigurationError)?;
         self.move_entry(key, &key_ref, &snapshot, new_tier_id, ctx)
+            .await
     }
 
-    fn move_entry(
+    /// Moves an entry between tiers, so it awaits the source read and the
+    /// destination write. It is async for that reason alone: the control-plane
+    /// work around those two awaits (`cachelito.set_tier`, `record_outcome`)
+    /// holds no guard across them, per the no-guard-across-await rule.
+    async fn move_entry(
         &self,
         key: &K,
         key_ref: &KeyRef<'_>,
@@ -397,12 +420,12 @@ where
         ctx: &CacheContext,
     ) -> Result<(), CacheError> {
         let from_tier = self.tier_for(&snapshot.tier);
-        let value = from_tier.get(key_ref)?.ok_or(CacheError::Miss)?;
+        let value = from_tier.get(key_ref).await?.ok_or(CacheError::Miss)?;
 
         let to_tier = self.tier_for(&new_tier_id);
         let mut buf2 = [0u8; MAX_KEY_SIZE];
         let key_ref2 = Self::encode_key(key, &mut buf2)?;
-        let set_result = to_tier.set(&key_ref2, value, ctx.ttl());
+        let set_result = to_tier.set(&key_ref2, value, ctx.ttl()).await;
         self.record_outcome(new_tier_id, set_result);
         set_result?;
 
@@ -410,13 +433,56 @@ where
         Ok(())
     }
 
+    /// Resolves a tier by id.
+    ///
+    /// A tier outside the configured set falls back to `L0` rather than
+    /// panicking, but that fallback is now *observable* rather than silent:
+    /// `unbound_tier_falls_back_and_reports` asserts it, and
+    /// `CacheManager::capabilities` reports which ids are actually bound. A
+    /// consumer that asks for an L6 it did not bind used to get L0's data with
+    /// no indication that anything was wrong.
     pub fn tier_for(&self, tier_id: &TierId) -> Arc<dyn CacheTier<V>> {
         let idx = tier_id.as_usize();
         if idx >= self.tiers.len() {
-            // Defensive: configuration guarantees 6 tiers; fall back to L0.
             return self.tiers[0].clone();
         }
         self.tiers[idx].clone()
+    }
+
+    /// What every configured tier is actually bound to, keyed by tier id.
+    ///
+    /// This is the answer to the question that could previously only be
+    /// discovered by issuing an operation and catching `TierUnavailable`. A
+    /// caller can now fail fast at construction - refuse to start if the
+    /// distributed tier is really an in-memory fallback, say - instead of
+    /// discovering it on a live read path in production.
+    ///
+    /// Tiers that are not bound at all are reported as
+    /// [`BackendKind::Unavailable`], which is distinct from a bound tier whose
+    /// backend is merely down: the former is a build/config error, the latter a
+    /// runtime condition.
+    #[must_use]
+    pub fn capabilities(&self) -> std::collections::BTreeMap<TierId, BackendKind> {
+        TierId::ALL
+            .iter()
+            .map(|id| {
+                let kind = if self.has_tier(id) {
+                    self.tier_for(id).backend()
+                } else {
+                    BackendKind::Unavailable
+                };
+                (*id, kind)
+            })
+            .collect()
+    }
+
+    /// Whether `tier_id` is actually bound in this manager.
+    ///
+    /// Distinct from `tier_for`, which substitutes. A caller that must not
+    /// silently receive another tier's data asks this first.
+    #[must_use]
+    pub fn has_tier(&self, tier_id: &TierId) -> bool {
+        tier_id.as_usize() < self.tiers.len()
     }
 
     pub fn tier(&self, tier_id: &TierId) -> Arc<dyn CacheTier<V>> {
@@ -447,7 +513,7 @@ where
         let key_ref = Self::encode_key(key, &mut buf)?;
 
         let tier = self.tier_for(&snapshot.tier);
-        match tier.get(&key_ref)? {
+        match tier.get(&key_ref).await? {
             Some(v) => Ok(v),
             None => Err(CacheError::Miss),
         }
@@ -525,7 +591,7 @@ where
         let tier = self.tier_for(&tier_id);
         let mut buf2 = [0u8; MAX_KEY_SIZE];
         let key_ref2 = Self::encode_key(key, &mut buf2)?;
-        let set_result = tier.set(&key_ref2, value.clone(), ctx.ttl());
+        let set_result = tier.set(&key_ref2, value.clone(), ctx.ttl()).await;
         self.record_outcome(tier_id, set_result);
         set_result?;
 
@@ -548,7 +614,7 @@ where
             let tier = self.tier_for(tier_id);
             let mut buf = [0u8; MAX_KEY_SIZE];
             let key_ref = Self::encode_key(key, &mut buf)?;
-            match tier.get(&key_ref) {
+            match tier.get(&key_ref).await {
                 Ok(Some(v)) => return Ok(v),
                 Ok(None) => continue,
                 Err(_) => continue,

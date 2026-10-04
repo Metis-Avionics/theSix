@@ -6,9 +6,25 @@ pub enum TierId {
     L3,
     L4,
     L5,
+    /// Authority. Not a cache rung: it is never blind-written and never
+    /// invalidated. Writes reach it through the owning repository, which then
+    /// invalidates downward.
+    L6,
 }
 
 impl TierId {
+    /// Every rung, in ladder order. `capabilities()` iterates this so a new
+    /// rung cannot be forgotten by a hand-written list.
+    pub const ALL: [TierId; 7] = [
+        TierId::L0,
+        TierId::L1,
+        TierId::L2,
+        TierId::L3,
+        TierId::L4,
+        TierId::L5,
+        TierId::L6,
+    ];
+
     pub fn as_usize(&self) -> usize {
         match self {
             TierId::L0 => 0,
@@ -17,6 +33,7 @@ impl TierId {
             TierId::L3 => 3,
             TierId::L4 => 4,
             TierId::L5 => 5,
+            TierId::L6 => 6,
         }
     }
 
@@ -28,6 +45,7 @@ impl TierId {
             3 => Some(TierId::L3),
             4 => Some(TierId::L4),
             5 => Some(TierId::L5),
+            6 => Some(TierId::L6),
             _ => None,
         }
     }
@@ -42,6 +60,7 @@ impl std::fmt::Display for TierId {
             TierId::L3 => write!(f, "L3"),
             TierId::L4 => write!(f, "L4"),
             TierId::L5 => write!(f, "L5"),
+            TierId::L6 => write!(f, "L6"),
         }
     }
 }
@@ -62,8 +81,11 @@ impl TierRegistry {
             TierId::L3,
             TierId::L4,
             TierId::L5,
+            TierId::L6,
         ];
-        let health = (0..6)
+        // One health slot per tier. Sized from the tier list rather than a
+        // literal so adding a rung cannot desynchronise the two.
+        let health = (0..tiers.len())
             .map(|_| std::sync::RwLock::new(TierHealth::default()))
             .collect();
         TierRegistry { tiers, health }
@@ -139,6 +161,7 @@ pub mod l2;
 pub mod l3;
 pub mod l4;
 pub mod l5;
+pub mod sharded_stub;
 pub mod test;
 
 pub mod backends;
@@ -146,4 +169,4 @@ pub mod backends;
 #[path = "trait.rs"]
 pub mod tier_trait;
 
-pub use tier_trait::{CacheTier, TierHealth};
+pub use tier_trait::{BackendKind, CacheTier, TierHealth};

@@ -24,6 +24,11 @@ pub use l3_redis::L3RedisBackend;
 pub use l4_sled::L4SledBackend;
 pub use l5_origin::{L5OriginBackend, OriginFetcher, OriginWriter};
 
+#[cfg(feature = "oxigraph")]
+pub mod l5_oxigraph;
+#[cfg(feature = "oxigraph")]
+pub use l5_oxigraph::L5OxigraphBackend;
+
 /// A value that can be encoded to and decoded from raw bytes for storage in a
 /// real backend. Implementations must round-trip: `from_bytes(to_bytes())`
 /// must succeed and yield an equivalent value.

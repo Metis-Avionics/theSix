@@ -1,5 +1,29 @@
 # CHANGELOG
 
+## v0.3.0 — 2026-10-02
+
+### Added
+- `L6` authority tier — Postgres with pgvector is the intended binding. Excluded from the cache ladder: never blind-written, never invalidated, never selected as a fallback rung
+- Capability reporting — `BackendKind`, `CacheTier::backend()` (required), `CacheManager::capabilities()`, `TierRegistry::has_tier()`. A consumer can now learn which backend a tier is bound to instead of discovering it by catching `TierUnavailable`
+- `CacheError::CapacityExhausted`, replacing the `ConfigurationError` a full fixed-capacity tier returned. A full table is a runtime condition under load, not a misconfiguration
+- `L5OxigraphBackend` (`feature = "oxigraph"`) — RDF/SPO backend; each entry is one quad, so entries are queryable with SPARQL. Built with `default-features = false`, because oxigraph's default feature is `rocksdb`
+- `tests/await_safety.rs` — proves no control-plane shard guard is held across an `.await`, plus a watchdog test proving the harness would notice a block
+
+### Changed
+- **`CacheTier` is now `async` (breaking)** — via `#[async_trait]`, because the trait is held as `Arc<dyn CacheTier<V>>` and native AFIT is not dyn-compatible. `CacheManager`'s methods were already async; this was the last synchronous edge in the data path. The control plane stays synchronous
+- **L3/L4/L5 no longer refuse every operation (breaking)** — in 0.2.x they returned `Err(TierUnavailable` unconditionally, leaving a default six-rung manager permanently failing on its upper three rungs. They now store values via a sharded `FixedTierStub` and self-report as `InMemoryFallback`, so an upper rung cannot read as the distributed or durable store it nominally is
+- In-memory tier stubs are sharded — one `Mutex` per tier serialised all access to L0. Copies `Cachelito`'s pre-allocated shard pattern; `DashMap` remains rejected (allocates after init, and its caller-chosen guard lifetime deadlocks a shard when held across an await)
+- `specs/tiers.toml` records `count = 7`, `[tier.l6]`, and `routing.last_cache_tier`
+
+### Fixed
+- `cargo deny` advisories: RUSTSEC-2026-0194 and RUSTSEC-2026-0195 on `quick-xml 0.37.5`, reached only as `oxrdfxml -> oxrdfio -> oxigraph` under `--all-features`. Not fixable in-tree (`oxrdfxml` pins `quick-xml = "0.37"`, patched release is `>= 0.41.0`) and unreachable from any thesix feature, so both are ignored with a documented reason in `deny.toml`
+- Shard count rounds up to a power of two. Rounding down stranded shards the mask could never produce: with 3 shards and mask 2 the index was only ever 0 or 2
+- `tier_for` silently substituted L0 for an unbound tier; `has_tier` now distinguishes substituted from bound
+
+### Not included
+- Postgres, Neo4j and HelixDB backends. Each needs a live service to verify, and an unrunnable tier in a cache library is a liability rather than a feature. They follow once there is a service to test against.
+
+
 ## v0.2.3 — 2026-09-14
 
 ### Added

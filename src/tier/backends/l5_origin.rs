@@ -12,7 +12,7 @@ use crate::error::CacheError;
 use crate::key::KeyRef;
 use crate::tier::TierId;
 use crate::tier::backends::ByteValue;
-use crate::tier::tier_trait::{CacheTier, TierHealth};
+use crate::tier::tier_trait::{BackendKind, CacheTier, TierHealth};
 
 /// Fetches a value from the origin for a key. Returns `Ok(None)` on a
 /// genuine absence, `Err` on an origin failure.
@@ -68,12 +68,17 @@ impl<V: ByteValue> L5OriginBackend<V> {
     }
 }
 
+#[async_trait::async_trait]
 impl<V: ByteValue> CacheTier<V> for L5OriginBackend<V> {
     fn name(&self) -> String {
         "L5-origin-fallback".to_string()
     }
 
-    fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
+    fn backend(&self) -> BackendKind {
+        BackendKind::Origin
+    }
+
+    async fn get(&self, key: &KeyRef<'_>) -> Result<Option<V>, CacheError> {
         match (self.fetcher)(key.0) {
             Ok(Some(bytes)) => {
                 self.succeed();
@@ -90,7 +95,12 @@ impl<V: ByteValue> CacheTier<V> for L5OriginBackend<V> {
         }
     }
 
-    fn set(&self, key: &KeyRef<'_>, value: V, ttl: Option<Duration>) -> Result<(), CacheError> {
+    async fn set(
+        &self,
+        key: &KeyRef<'_>,
+        value: V,
+        ttl: Option<Duration>,
+    ) -> Result<(), CacheError> {
         let Some(writer) = &self.writer else {
             // No write-through configured: a set against origin is a no-op hit.
             return Ok(());
@@ -108,7 +118,7 @@ impl<V: ByteValue> CacheTier<V> for L5OriginBackend<V> {
         }
     }
 
-    fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError> {
+    async fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError> {
         let Some(writer) = &self.writer else {
             return Ok(());
         };
@@ -125,7 +135,7 @@ impl<V: ByteValue> CacheTier<V> for L5OriginBackend<V> {
         }
     }
 
-    fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
+    async fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
         match (self.fetcher)(key.0) {
             Ok(opt) => {
                 self.succeed();

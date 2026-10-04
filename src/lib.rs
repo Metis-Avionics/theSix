@@ -215,7 +215,8 @@ pub use policy::{
     PopulationStrategy, StrictPolicy,
 };
 pub use pool::MemoryPool;
-pub use tier::{CacheTier, TierHealth, TierId, TierRegistry};
+pub use tier::fixed_tier_stub::FixedTierStub;
+pub use tier::{BackendKind, CacheTier, TierHealth, TierId, TierRegistry};
 pub use tier::{
     l0::L0Stub, l1::L1Stub, l2::L2Stub, l3::L3Stub, l4::L4Stub, l5::L5Stub, test::TestTier,
 };
@@ -224,4 +225,6 @@ pub use tier::{
 pub use tier::backends::L3RedisBackend;
 #[cfg(feature = "sled")]
 pub use tier::backends::L4SledBackend;
+#[cfg(feature = "oxigraph")]
+pub use tier::backends::L5OxigraphBackend;
 pub use tier::backends::{ByteValue, L5OriginBackend, OriginFetcher, OriginWriter};
