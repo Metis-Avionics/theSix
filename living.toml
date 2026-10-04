@@ -20,9 +20,19 @@ did not exist, and the gaps were found by the machinery built to close them:
 Two-phase commit was the largest addition. set was three independently-failable steps
 with no rollback, so a crash between the data write and the publish left a value in a
 tier with no control-plane record. The control plane now carries a payload-free intent
-record, the entry becomes Prepared - unreadable - and recovery resolves by kind: a
-write aborts, a move completes forward, because aborting a move would discard an
-already-committed value.
+record and the entry becomes Prepared - unreadable.
+
+Recovery resolves by kind, and the two directions are not symmetric. A write aborts:
+the value is reproducible, and the key hash is all a sweep needs. A move cannot be
+completed by this crate at all. Finishing one means reading the source rung and
+writing the destination, which needs key bytes, and the control plane persists only a
+hash. Aborting is not the safe substitute either, because the move removes the source
+before it commits - so a crash in that window leaves the value only at the
+destination, and aborting would point the control plane at an empty source. The sweep
+therefore reports such an intent as needing external reconciliation and leaves it
+intact. That was a contract change, not a patch: theSix.toml used to declare
+recovery_direction_prepare_move = "complete-forward", which described the correct
+direction and one the runtime had no way to execute.
 
 The negative and property layers found more than the contract asked about. They found
 that a lost CAS in acquire reported the state the CAS expected, which looked claimable,
@@ -52,18 +62,78 @@ empty rung list it panicked; a property test generated a manager with no rungs a
 found the panic. bound_tier returns None instead, and nearest_bound_rung resolves the
 policy's choice to the best bound rung at or below it - routing, not substitution.
 
-Verification: twenty mandatory gates in ~50s on a warm cache, plus deferred loom,
-performance and soak. nextest per-test processes, sccache, and clang + mold. Build
-profiles moved to debug = 0 after debuginfo filled the disk mid-matrix and produced
-nineteen failures that had nothing to do with the code.
+An external review of this branch then found that the architecture was ahead of its
+recovery semantics, and was right about all three blocking findings. Each one was a
+promise theSix.toml made that the runtime did not keep:
 
-Known limitation: eviction policy. FixedTierStub reports CapacityExhausted when full
-and CacheManager degrades down the ladder, but nothing evicts. A cache whose whole
-ladder is full refuses new writes, which the soak layer asserts rather than pretends
-otherwise.
+- A cancelled set had no RAII guard on its commit intent, so a future dropped at any
+  await in between left the key Prepared with an owner nobody would release. The
+  symptom was narrower than first reported: set was never wedged, because prepare
+  has no claimability precondition, and get was never wedged either. Only
+  get_or_fetch was, since it must claim the entry to populate it - so the assertion
+  a reviewer would naturally reach for would have passed against the broken code.
+- A failed write left the rung holding a value the control plane had aborted. On a
+  previously-populated key the rung silently became the new value while the control
+  plane still described the old one: not an orphan, which is at least invisible, but
+  a plausible-looking wrong answer.
+- Move recovery, above.
+
+The fix for the second one is the instructive part. The obvious design - gate the
+cleanup on a new per-tier capability flag claiming write-or-error atomicity - is
+wrong, and an existing test proved it immediately. A blanket per-tier claim cannot
+distinguish a rejected write from an accepted one, so it removes the key in both
+cases and destroys a good committed value in one of them. Only the tier knows
+whether its bytes landed, so the tier has to say so per operation:
+CacheError::WriteIndeterminate. The capability flag survives as reported capability,
+documented as not governing the decision.
+
+The same review noted that the contract gate only ever compared theSix.toml to the
+runner and the test inventory, never to runtime behaviour - which is precisely why
+all three findings survived a green gate run. tests/contract now asserts at least one
+declared invariant against the runtime (the move recovery direction), and
+cargo xtask run merge_readiness reads bugs.toml and fails while any blocks_merge
+finding is open. The expected finding counts live in theSix.toml, not in the tracker:
+a tracker that grades its own homework can be defused by editing itself, and the
+tests written against that gate caught it passing on an emptied tracker and on a
+self-consistent severity downgrade. xtask had no tests at all until this, so the
+logic deciding which gates run was unverified; it now has its own gate.
+
+Verification: twenty-five mandatory gates in ~2min on a warm cache, plus deferred
+performance, soak and fuzz. nextest per-test processes, sccache, and clang + mold.
+Build profiles moved to debug = 0 after debuginfo filled the disk mid-matrix and
+produced nineteen failures that had nothing to do with the code.
+
+Known limitations, in rough order of how much they will bite. Eviction policy:
+FixedTierStub reports CapacityExhausted when full and CacheManager degrades down the
+ladder, but nothing evicts, so a cache whose whole ladder is full refuses new writes.
+Move recovery, as above: a swept move intent stays Prepared forever, which wedges the
+population path for that key with no automatic remedy. Both are named in
+pending_work rather than worked around.
 """
 
 pending_work = """
+- Move recovery needs a real answer. `theSix.toml` declares
+  `recovery_direction_prepare_move = "external-reconciliation"` and the runtime
+  implements exactly that, so the contract and the code agree — but the consequence is
+  that a swept Move intent stays `Prepared` forever, with `population_owner = true`,
+  which wedges the population path for that key and has no automatic remedy. Two ways
+  out, both contract changes rather than patches:
+    (a) persist the key bytes, or a durable handle to them, in `CommitIntent`, which
+        collides with the payload-free intent invariant;
+    (b) reorder the move so the commit precedes the source removal, then let the sweep
+        abort. That makes abort always safe, because a crash before the commit leaves
+        the source intact and a crash after it leaves only an unreachable duplicate.
+        Needs a test that pins the reorder, and a decision on whether `CommitIntent`
+        may reference key material at all.
+- The gate-coverage gap is only partly closed. tests/contract now compares one declared
+  invariant to runtime behaviour. `cancel_safe`, `partial_commit_visible` and
+  `cancelled_operation_may_commit_partially` are declared true and are now true, but
+  nothing structurally requires a *new* runtime invariant to come with a proving test,
+  so the next over-promise will pass a green gate again. See `[gate_coverage_gap]` in
+  bugs.toml.
+- Extend the non-vacuity discipline past bugs.toml. `bugs.toml` is enforced by a gate;
+  the contract's own prose clauses, the `decisions` list below, and the `remaining`
+  list are not. Nothing fails when one of them goes stale.
 - Eviction policy for fixed-capacity tiers. CapacityExhausted plus ladder degradation
   is honest but lossy: a cache with no eviction stops accepting writes once its ladder
   fills. Not attempted here because it is a policy choice (LRU, sampled, clock) and the
@@ -105,38 +175,47 @@ decisions = [
     "Values travel through the Oxigraph backend as hex, not String::from_utf8_lossy: the lossy path replaced every invalid byte with U+FFFD and corrupted binary payloads silently",
     "cargo deny all-features advisories on quick-xml 0.37.5 (RUSTSEC-2026-0194/0195) are ignored with a reason rather than left to fail CI: the crate is pinned by oxrdfxml below the patched 0.41.0, and cargo tree shows zero quick-xml nodes for the default set, for --features oxigraph, and for --features redis,sled,oxigraph. It appears only under --all-features, and L5OxigraphBackend never parses XML. Local advisory-db was a month stale, which is why this passed locally and failed in CI - refresh it before trusting a deny gate",
     "A poisoned-shard handler exists but is unreachable through the public API, because every guard is scoped inside a method and released before returning. Recorded rather than asserted",
+    "A cancelled set is released by an RAII IntentGuard rather than by a compensation path, because Drop is the only construct that runs on every exit path including a dropped future. Deliberately NOT a rollback of the data write: if tier.set completed and the future died before commit, the value is on the rung and the intent is gone, and recovery cannot distinguish that from an abort. The tier read path consults the control plane first, so the value is unreachable, which is what partial_commit_visible claims",
+    "Write-error cleanup is keyed on CacheError::WriteIndeterminate, per operation, NOT on a tier capability flag. Attempted the flag first; a blanket per-tier claim cannot separate a rejected write from an accepted one, so it over-removes and destroys committed values. CapabilityFlags::ATOMIC_WRITE_OR_ERROR is retained as reported capability only",
+    "theSix.toml, not bugs.toml, holds the expected finding counts the merge_readiness gate checks. A tracker that declares its own expected contents can be emptied or downgraded to make the gate pass, and both happened before the count check existed",
+    "Move recovery was resolved by redefining the contract rather than by implementing the recovery, on the grounds that persisting key bytes in CommitIntent violates the payload-free intent invariant. This is the one place the contract was changed to match reality instead of the reverse, and it is recorded as such rather than presented as a fix",
 ]
 
 blockers = []
 
 [handover.next_agent]
-focus = "Complete; PR #1 merged, 1.98 upgrade landed, README rewritten, v0.2.1 on crates.io, CI green — no pending work"
+focus = "Merge the v2 revision (PR from feat/hpa-continuity-contract) once review lands. No open blocking findings: bugs.toml is green. The substantive remaining work is the two contract-change items in pending_work - move recovery, and the gate-coverage gap."
 tasks = [
-    "Confirmed: CI on main is green across all jobs (fmt, check, test, clippy, doc, package, deny, machete, miri) on the 1.98 toolchain.",
-    "Rust 1.98 upgrade landed: edition 2021 -> 2024, rust-version -> 1.98, CI toolchain -> 1.98; gen renamed (reserved keyword), let-chain + redundant-binding clippy lints fixed; CHANGELOG documents the upgrade; all gates green.",
-    "Published thesix v0.2.0 to crates.io (registry confirms edition 2024, rust_version 1.98, MIT); remote moved to Metis-Avionics/theSix; tag v0.2.0 pushed.",
-    "Published thesix v0.2.1 (README rewrite + quickstart example); tag v0.2.1 pushed.",
-    "Fixed README install snippets to 0.2.1; releasing as v0.2.2 so the registry renders the corrected README.",
-    "Added Polars ETL/ELT examples exploiting single-flight, invalidation, refresh; releasing as v0.2.3.",
-    "Published thesix v0.2.3 (registry readme verified: 0.2.1 snippets + polars section); fixed CI package job via Cargo.lock sync to 0.2.3.",
+    "Do NOT treat the green gate run as evidence about runtime invariants. tests/contract compares the contract to the runner and the test inventory; until recently it never compared the contract to runtime behaviour, which is how three false promises survived review. One clause is now covered (move recovery direction). The general fix is still open.",
+    "merge_readiness is a required CI job with no continue-on-error, so a new blocks_merge finding turns the branch red immediately. That is intentional - fixing the finding is what turns it green - but do not silence it with continue-on-error.",
+    "Move recovery is the largest known gap: a swept Move intent wedges the population path for that key with no automatic remedy. Option (b) in pending_work (commit before source removal, then allow the sweep to abort) is the cheaper of the two and needs a test pinning the reorder.",
+    "2.0.0 is a breaking release and invalidates every cached key, because tenant is now part of the key. It has not been published; the crates.io version is 0.2.3.",
+    "PR #2 (feat/async-tiers-l6-graph-backends, v1.0.0) is open against main and was allowed to land first deliberately. This branch is built on top of it, so merge order matters.",
 ]
 
 [session]
 start = "2026-09-14T00:00:00+01:00"
-end = "2026-09-14T10:09:13+01:00"
+end = "2026-10-04T00:00:00+01:00"
 agent = "opencode"
-type = "spec_completion_and_tetanus_hardening"
+type = "contract_driven_revision_and_external_review_remediation"
 summary = """
-Implemented full spec completion for PR #1 and hardened the crate against the
-TETANUS rules. Fixed the stale lib.rs doctest, the Cachelito acquire CAS bug
-(claim from actual state), and the populate tier-mismatch that broke waiter
-reads. Added CacheContext identity builder, exists/refresh, retry-with-backoff,
-TTL/lazy-expiry, waiter-error propagation, and feature-gated real backends.
-Follow-up in the same session: upgraded to Rust 1.98 (edition 2024, MSRV 1.98,
-CI toolchain 1.98) and recorded the upgrade in CHANGELOG.md; moved the remote
-to Metis-Avionics/theSix and published v0.2.0; then rewrote the README as a
-proper crate README with a compile-checked quickstart example and published
-v0.2.1. CI green throughout.
+Two phases. First, PR #1 spec completion and TETANUS hardening: fixed the stale
+lib.rs doctest, the Cachelito acquire CAS bug (claiming from the actual state),
+and the populate tier-mismatch that broke waiter reads. Added CacheContext,
+exists/refresh, retry-with-backoff, TTL/lazy-expiry, waiter-error propagation and
+feature-gated backends. Then the Rust 1.98 upgrade (edition 2024), the remote move
+to Metis-Avionics/theSix, and publishes of 0.2.0 through 0.2.3.
+
+The second phase is this revision. The user asked for all phases tested end to end
+in one pass, driven by a clap CLI, with nextest, sccache, Swatinem/rust-cache and
+any optimisations available, and for the appropriate invariants turned into local
+gates and CI gates. That produced theSix.toml as the source of truth, cargo xtask
+as the gate runner, ten new test layers, and the machinery that found the defects
+listed in bugs.toml.
+
+An external review of the result found three blocking findings, all real, and the
+work of this session's end was closing them - see the handover summary above for
+what each was and why two of the three fixes are not the obvious ones.
 """
 work_done = [
     "Fixed broken lib.rs doctest (real 5-arg + MemoryPool signature); doc example now compiles",
@@ -191,28 +270,41 @@ tests_passing = [
 ]
 
 [changelog]
-version = "1.0.0"
-date = "2026-10-02"
+version = "2.0.0"
+date = "2026-10-04"
 entries = [
-    { type = "added", description = "CacheContext builder carrying IdentityContext + optional TTL", scope = "src/identity.rs" },
-    { type = "added", description = "exists() and refresh() (stale-while-revalidate) operations", scope = "src/manager.rs" },
-    { type = "added", description = "StrictPolicy (authz-deny for anonymous mutations)", scope = "src/policy.rs" },
-    { type = "added", description = "TTL/expiration tracked in control plane and tiers; lazy Ready->Stale", scope = "src/control/cachelito.rs" },
-    { type = "added", description = "Populate retry (max 3, exponential backoff) + fail-open fallback", scope = "src/manager.rs" },
-    { type = "added", description = "waiters_receive_population_error via control-plane error marker", scope = "src/control/cachelito.rs" },
-    { type = "added", description = "ByteValue codec + L3 redis / L4 sled / L5 origin backends (feature-gated)", scope = "src/tier/backends/" },
-    { type = "changed", description = "All CacheManager ops take a &CacheContext (breaking API change)", scope = "src/manager.rs" },
-    { type = "changed", description = "TierHealth gains availability; TierRegistry is interior-mutable with fail/recover", scope = "src/tier/" },
-    { type = "changed", description = "CacheError is now Copy", scope = "src/error.rs" },
-    { type = "fixed", description = "Cachelito::acquire CAS claims from the actual state (Failed/Stale reclaimable)", scope = "src/control/cachelito.rs" },
-    { type = "fixed", description = "Populate tier now matches the policy decision waiters observe (fixed waiter Miss bug)", scope = "src/manager.rs" },
-    { type = "fixed", description = "Stale lib.rs doctest; doc example compiles", scope = "src/lib.rs" },
-    { type = "security", description = "Real authn gate: unauthenticated requests rejected pre-policy", scope = "src/manager.rs" },
-    { type = "removed", description = "DashMap; dead moka feature", scope = "Cargo.toml" },
-    { type = "changed", description = "Edition 2021 -> 2024; MSRV 1.88 -> 1.98; CI toolchain 1.98", scope = "Cargo.toml, .github/workflows/ci.yml" },
-    { type = "added", description = "examples/quickstart.rs runnable quick start (mirrors README)", scope = "examples/quickstart.rs" },
-    { type = "changed", description = "README rewritten as crate README; stale design-doc content, signatures, dashmap/moka refs removed", scope = "README.md" },
-    { type = "fixed", description = "README install snippets point at 0.2.1 (were the 0.2 range)", scope = "README.md" },
-    { type = "added", description = "examples/polars_etl.rs (ETL: versioned marts, single-flight, invalidate)", scope = "examples/polars_etl.rs" },
-    { type = "added", description = "examples/polars_elt.rs (ELT: transform-on-read, stale-while-revalidate refresh)", scope = "examples/polars_elt.rs" },
+    { type = "added", description = "theSix.toml as the machine-checked source of truth; specs/*.toml deleted", scope = "theSix.toml" },
+    { type = "added", description = "cargo xtask clap gate runner + justfile; gates are contract-declared", scope = "xtask/" },
+    { type = "added", description = "Two-phase commit with a payload-free control-plane intent (prepare/commit/abort)", scope = "src/entry.rs, src/control/cachelito.rs" },
+    { type = "added", description = "Capability semantics as three orthogonal axes; authority as a configured role", scope = "src/capability.rs" },
+    { type = "added", description = "Integrity: ContentDigest over every value, 128-bit KeyFingerprint with injectable Placement", scope = "src/integrity.rs" },
+    { type = "added", description = "Deterministic fault injection: 12 fault classes, seedable plan, recording ledger", scope = "src/fault.rs, testkit/" },
+    { type = "added", description = "Tenant-framed keys with an explicit separator; oversized frames rejected not truncated", scope = "src/key.rs" },
+    { type = "added", description = "Structured telemetry: 11-field OperationRecord, no payload, non-reversible KeyIdentity", scope = "src/telemetry.rs" },
+    { type = "added", description = "Continuity states, RecoveryDirection, RecoveryReport; manager continuity() and recover()", scope = "src/continuity.rs" },
+    { type = "added", description = "Ten new test layers: contract, negative, property, fault_injection, recovery, durability, security, performance, soak, loom", scope = "tests/" },
+    { type = "added", description = "Nine fuzz targets in an excluded crate; built by a gate, run by an advisory CI job", scope = "fuzz/" },
+    { type = "added", description = "merge_readiness gate driven by bugs.toml; expected counts held in theSix.toml", scope = "xtask/src/gates.rs, bugs.toml" },
+    { type = "added", description = "xtask_unit gate: the runner that decides what passes is itself under test", scope = "xtask/src/gates.rs" },
+    { type = "added", description = "FaultClass::PartialWrite - the only fault that stores bytes then fails", scope = "src/fault.rs" },
+    { type = "added", description = "CacheError::WriteIndeterminate - per-operation signal that bytes may have landed", scope = "src/error.rs" },
+    { type = "added", description = "IntentGuard: RAII release of a commit intent on cancellation", scope = "src/manager.rs" },
+    { type = "added", description = "CapabilityFlags::ATOMIC_WRITE_OR_ERROR as reported capability (does not govern cleanup)", scope = "src/capability.rs" },
+    { type = "changed", description = "BREAKING: tenant is part of the key, invalidating every existing cached key", scope = "src/key.rs, src/manager.rs" },
+    { type = "changed", description = "BREAKING: rung substitution removed; bound_tier returns None, no panic on empty registry", scope = "src/manager.rs" },
+    { type = "changed", description = "BREAKING: recover() returns RecoveryReport instead of a (usize, usize) tuple", scope = "src/manager.rs" },
+    { type = "changed", description = "recovery_direction_prepare_move = external-reconciliation (was complete-forward)", scope = "theSix.toml" },
+    { type = "changed", description = "BackendKind::is_native() replaced by is_implemented(); the old predicate returned true for five absent backends", scope = "src/tier/trait.rs" },
+    { type = "changed", description = "Build profiles use debug = 0; debuginfo filled the disk mid-matrix", scope = "Cargo.toml" },
+    { type = "fixed", description = "A cancelled set wedged the key's population path (IntentGuard)", scope = "src/manager.rs" },
+    { type = "fixed", description = "A failed write left the rung holding an unauthorised value (WriteIndeterminate cleanup)", scope = "src/manager.rs" },
+    { type = "fixed", description = "Move recovery promised a direction the runtime could not execute", scope = "theSix.toml, src/continuity.rs" },
+    { type = "fixed", description = "A lost CAS in acquire reported the state the CAS expected, admitting two population owners", scope = "src/control/cachelito.rs" },
+    { type = "fixed", description = "abort could overwrite a commit that had already won (found by loom)", scope = "src/control/cachelito.rs" },
+    { type = "fixed", description = "Open addressing did not survive deletion; get returned None for stored values (found by soak)", scope = "src/tier/fixed_tier_stub.rs" },
+    { type = "fixed", description = "notify_one stranded 98 of 99 waiters; the fail-open fallback scanned the authority rung", scope = "src/control/cachelito.rs, src/manager.rs" },
+    { type = "fixed", description = "StaleGeneration returned without releasing ownership, leaving keys unusable", scope = "src/control/cachelito.rs" },
+    { type = "fixed", description = "Seven tests that could not fail were rewritten; coverage registries compared for equality against the contract", scope = "tests/" },
+    { type = "security", description = "Cross-tenant key collision closed by folding tenant into the key", scope = "src/key.rs" },
+    { type = "removed", description = "specs/*.toml - six files that contradicted each other and the code", scope = "specs/" },
 ]
