@@ -1,199 +1,43 @@
 [handover]
-status = "verification_complete_awaiting_rereview"
-phase = "hpa_continuity_contract"
-last_updated = "2026-10-04T18:00:00+01:00"
+status = "backlog_closed_pending_b21_and_release"
+phase = "release_0_4_0"
+last_updated = "2026-10-04T23:40:00+01:00"
 
 summary = """
-0.4.0: the architecture is now a machine-checked contract, and the crate's own
-tests found the defects that the contract's existence attracted.
+0.4.0 backlog pass: findings B15 through B21, with B21 still open and the reason
+being that it cannot be fixed from inside this repository.
 
-theSix.toml is the source of truth. cargo xtask executes the gates it declares,
-refuses to run a gate it does not declare, and exits 3 rather than 0 when a gate's
-tooling is absent. tests/contract asserts the crate agrees with the contract - version,
-rung count, fault taxonomy, negative cases, property invariants, and that every layer
-is bound to a real test target. The six specs/*.toml files, which contradicted each
-other and the code, are deleted.
+Six findings closed, and one of them was not a missing test. B15 left a swept
+`Move` intent holding a population claim on a `Prepared` entry, which both
+`acquire` and the write path decline, so the key's population path was wedged for
+the life of the process unless an external reconciler holding the key bytes
+happened to arrive. The claim is now released while the intent is deliberately
+kept: `Failed` rather than the restored pre-intent state, because restoring would
+point the control plane at a source rung the interrupted move had already emptied
+and a read would serve that emptiness as a value.
 
-Writing the contract down was the useful part. Each clause demanded a mechanism that
-did not exist, and the gaps were found by the machinery built to close them:
+B16's `cia.integrity.silent_stale_data_acceptance` was false rather than unproven.
+`refresh` returned a bare `Option<V>`, so a stale fallback was indistinguishable
+from a fresh value, and worse, the policy's fail-open mode let the population path
+return another rung's value as a successful fetch. `refresh_detailed` now reports
+`Freshness`, and `refresh` fails closed on the fetch.
 
-Two-phase commit was the largest addition. set was three independently-failable steps
-with no rollback, so a crash between the data write and the publish left a value in a
-tier with no control-plane record. The control plane now carries a payload-free intent
-record and the entry becomes Prepared - unreadable.
+B20 closed the gap the registry documentation had admitted for two reviews: a
+locator that resolved proved nothing, so every proving test now declares the clause
+it is cited for and a mis-citation fails the gate.
 
-Recovery resolves by kind, and the two directions are not symmetric. A write aborts:
-the value is reproducible, and the key hash is all a sweep needs. A move cannot be
-completed by this crate at all. Finishing one means reading the source rung and
-writing the destination, which needs key bytes, and the control plane persists only a
-hash. Aborting is not the safe substitute either, because the move removes the source
-before it commits - so a crash in that window leaves the value only at the
-destination, and aborting would point the control plane at an empty source. The sweep
-therefore reports such an intent as needing external reconciliation and leaves it
-intact. That was a contract change, not a patch: theSix.toml used to declare
-recovery_direction_prepare_move = "complete-forward", which described the correct
-direction and one the runtime had no way to execute.
+Two compliance defects were found while reconciling the documentation, and neither
+is covered by any gate. `SECURITY.md` was GitHub's unmodified placeholder, claiming
+support for 5.1.x, 5.0.x and 4.0.x, versions of this crate that have never
+existed. It reached `main` because a commit was pushed straight to a feature branch
+during this pass and merged unchecked, which is B21's concrete cost rather than a
+hypothetical. `CHANGELOG.md` asserted `main` was branch-protected and that the
+invariant registry only proved a test existed; both were true when written and are
+false now.
 
-The negative and property layers found more than the contract asked about. They found
-that a lost CAS in acquire reported the state the CAS expected, which looked claimable,
-so the losing caller became a second population owner and single-flight admitted two
-fetches for one key. A loom model found that abort overwrote a commit that had already
-won, making a committed value invisible. A soak found that open addressing did not
-survive deletion: find_slot stopped at the first empty slot, so removing a key orphaned
-everything behind it, get returned None for values still stored, and the next write
-leaked a pool index until the table ran out of capacity at two-thirds full.
-
-Every one of those had a test that passed. That is the argument for the contract and
-for the anti-vacuity instruments: test_tier_recovery called set_healthy(true), which was
-already the default, so no failure was ever injected; test_waiter_timeout had no
-waiters and an unreachable disjunct; seven tests could not fail. They have been
-rewritten, and testkit's coverage registries are now compared for equality against the
-contract, so a required case cannot be dropped without failing a gate.
-
-Tenant is now part of the key. IdentityContext.tenant existed and no line of the crate
-read it, so two tenants using the same application key shared one entry - a cross-
-tenant read the authz gates could not prevent, because by the time they ran there was
-nothing left to separate. This invalidates every existing cached key and is the one
-upgrade hazard in this release; it is called out in the changelog and the README.
-
-Authority is a configured role, and rung substitution is gone. tier(&L6) on a six-rung
-manager used to return L0's data with nothing to indicate anything was wrong, and on an
-empty rung list it panicked; a property test generated a manager with no rungs and
-found the panic. bound_tier returns None instead, and nearest_bound_rung resolves the
-policy's choice to the best bound rung at or below it - routing, not substitution.
-
-An external review of this branch then found that the architecture was ahead of its
-recovery semantics, and was right about all three blocking findings. Each one was a
-promise theSix.toml made that the runtime did not keep:
-
-- A cancelled set had no RAII guard on its commit intent, so a future dropped at any
-  await in between left the key Prepared with an owner nobody would release. The
-  symptom was narrower than first reported: set was never wedged, because prepare
-  has no claimability precondition, and get was never wedged either. Only
-  get_or_fetch was, since it must claim the entry to populate it - so the assertion
-  a reviewer would naturally reach for would have passed against the broken code.
-- A failed write left the rung holding a value the control plane had aborted. On a
-  previously-populated key the rung silently became the new value while the control
-  plane still described the old one: not an orphan, which is at least invisible, but
-  a plausible-looking wrong answer.
-- Move recovery, above.
-
-The fix for the second one is the instructive part. The obvious design - gate the
-cleanup on a new per-tier capability flag claiming write-or-error atomicity - is
-wrong, and an existing test proved it immediately. A blanket per-tier claim cannot
-distinguish a rejected write from an accepted one, so it removes the key in both
-cases and destroys a good committed value in one of them. Only the tier knows
-whether its bytes landed, so the tier has to say so per operation:
-CacheError::WriteIndeterminate. The capability flag survives as reported capability,
-documented as not governing the decision.
-
-The same review noted that the contract gate only ever compared theSix.toml to the
-runner and the test inventory, never to runtime behaviour - which is precisely why
-all three findings survived a green gate run. tests/contract now asserts at least one
-declared invariant against the runtime (the move recovery direction), and
-cargo xtask run merge_readiness reads bugs.toml and fails while any blocks_merge
-finding is open. The expected finding counts live in theSix.toml, not in the tracker:
-a tracker that grades its own homework can be defused by editing itself, and the
-tests written against that gate caught it passing on an emptied tracker and on a
-self-consistent severity downgrade. xtask had no tests at all until this, so the
-logic deciding which gates run was unverified; it now has its own gate.
-
-Verification: twenty-five mandatory gates in ~2min on a warm cache, plus deferred
-performance, soak and fuzz. nextest per-test processes, sccache, and clang + mold.
-Build profiles moved to debug = 0 after debuginfo filled the disk mid-matrix and
-produced nineteen failures that had nothing to do with the code.
-
-A second review of the landed head then found that B2's fix had a recovery
-cousin, and it was right about that too. `abort` restored the state the intent
-interrupted, which on an already-populated key meant `Ready` over a rung whose
-contents nobody had checked: a write that stored its bytes and then failed
-became readable again. The justification in the code — the read path consults the
-control plane first, so residue is unreachable — held only while the entry stayed
-`Prepared`, and restoring `Ready` is what ended `Prepared`. `abort` now assumes
-residue and leaves the entry unservable; the restoring behaviour survives as
-`abort_proven_clean`, used only for the two errors decided before any bytes are
-sent. The cost is one extra repopulation, not a wrong answer.
-
-The root cause is that `CacheError` is asymmetric. `WriteIndeterminate` says "my
-bytes may have landed" and nothing says the converse, so `TierUnavailable` and
-`Timeout` cannot be read as "they definitely did not". Three tests asserted the
-old behaviour on inputs that could not support it and were rewritten; one of them
-asserted the bug outright, requiring abort to restore `Ready`.
-
-The same review found the CI fuzz job's shell block had an unmatched `done`, so
-the smoke loop was a syntax error and had never run — behind `continue-on-error`,
-which is exactly the mechanism designed to hide it.
-
-The two should-fix integrity findings went at the same time. The blanket
-`IntegrityCheck` digest hashed through two identically-seeded `DefaultHasher`s, so
-its 128 bits were one hash twice; a seeded FNV `Hasher` replaced them. `Cachelito`
-identified entries by a bare `u64` that was both slot selector and identity, which
-`integrity.rs` had explicitly warned against; `KeyAddress` now splits the two and
-`Placement` became injectable, which is what turned `no_cross_key_corruption` in
-the control plane from asserted into demonstrated.
-
-Known limitations, in rough order of how much they will bite. Eviction policy:
-FixedTierStub reports CapacityExhausted when full and CacheManager degrades down the
-ladder, but nothing evicts, so a cache whose whole ladder is full refuses new writes.
-Move recovery, as above: a swept move intent stays Prepared forever, which wedges the
-population path for that key with no automatic remedy. Both are named in
-pending_work rather than worked around.
-Six declared invariants have no proving test and are waived with reasons in
-[[verification.invariant_waiver]]: unbounded_retry, silent_stale_data_acceptance,
-recovering_from_available, blocking_runtime_thread, nested_block_on, and
-promotion_eviction_races. Two of those cannot be tested without something the crate
-does not have - a blocking backend, and eviction.
-The invariant registry proves a test is named and exists, not that it exercises the
-clause. That residual limit is a review judgement, and it is the same one
-testkit::declare_cases! documents.
-CI cannot check its own action refs. Three build steps referenced a tag or a binary
-that did not exist and reported success having done nothing - sccache, cargo-fuzz, and
-a guessed sccache-action@v0.8. Only executing CI found them, and no local gate can,
-because a ref that cannot be resolved is indistinguishable from one that can until
-something tries to run it.
-The authorship gate reads history through `git log --all`, so it sees only the refs the
-clone carries. A commit that is unreachable from every fetched ref - deleted, or left
-only in a reflog on another machine - is not scanned. That is the same blind spot the
-gate has as any other history check, and it is why the seven rewritten commits needed
-a force-push rather than only a local rebase: until the remote ref moved, the gate
-correctly kept reporting them.
-
-The last pass closed three gaps that were all the same shape: a declaration nobody was
-made responsible for.
-
-CI could not run for this PR at all. Both workflow triggers were filtered to
-`branches: [main]`, so a stacked branch produced no checks, no aggregator and no
-required status - `main` protection and a branch that cannot raise a check are
-independent features that compose into nothing. The trigger is now unfiltered and
-main requires exactly one check, `Verification (all gates)`, with `if: always()` on it.
-That `if` is load-bearing: without it a failed dependency makes the aggregator
-`skipped`, and GitHub scores a skipped required check as passing, so the protection
-would have been satisfied by the failure it exists to catch.
-
-The authorship gate arrived by way of its own failure. It forbids attribution
-trailers by key, and it caught this repository's own commit messages - including one
-added while writing the fix, by habit, in a commit whose whole subject was the
-trailer. The rule is on the key and does not read the value, which is the property
-that makes it usable: a trailer claiming to attribute nobody is still a trailer. Its
-fixtures were then found to be environment-dependent - they set `--author`, which is
-only the author, and took the committer from whatever global git config the host
-carried. They passed on the developer machine and failed on the runner, in a helper
-that piped stderr into a pipe it never read, so the failure said only `git commit
-failed`.
-
-The declared-cases gap was the subtler one. `[testing.property].invariants` declares
-nine invariants and `[testing.fault_injection].faults` declares twelve faults; both
-were checked against a `coverage.rs` name list for set equality, which proves the two
-lists agree and not that a test exists. All twenty-one were covered. The property
-binding lived in two comments - `// no_deadlock / no_lock_across_await` and
-`// no_capability_misreporting / no_false_durability` - so two `proptest!` blocks each
-claimed two invariants, and deleting or renaming either left every gate green while
-theSix.toml still asserted `no_deadlock`. `PROPERTY_CASE_PROOFS` and
-`FAULT_CASE_PROOFS` now bind each declared name to a `path::fn`, which is checked to
-exist. Writing that check found that the check itself was defeatable: it matched
-`fn <name>` as a substring, so `no_authority_inversion_RENAMED` satisfied a claim on
-`no_authority_inversion` - renaming a test aside kept its coverage alive, which is the
-most obvious route to defeating the registry being added.
+The crate is 0.4.0 and unpublished, and the last version on crates.io is 0.2.3.
+Nothing has been published from this branch, and `cargo publish --dry-run` has not
+been run against the final head.
 """
 
 pending_work = """
@@ -253,7 +97,8 @@ pending_work = """
   references in the workflow are tags; only `sccache-action` is SHA-pinned. SHA-pinning every action is the
   consistent end state; the SHAs resolve the same way this one did, it has just not
   been done for all of them.
-- **B16.** The six waived invariants are the honest remainder of the audit and are the next
+- **B16.** The waived invariants are the honest remainder of the audit. Four of the original six
+  were closed in the 0.4.0 backlog pass and are the next
   thing worth closing. Two of the six are not test-authoring work: one needs a
   genuinely blocking backend, the other is blocked on **B17**. `unbounded_retry` (nothing counts retries), `silent_stale_data_
   acceptance` (nothing distinguishes silent from explicit stale service),
@@ -328,16 +173,15 @@ decisions = [
 blockers = []
 
 [handover.next_agent]
-focus = "PR3 is green and CLEAN, and needs RE-REVIEW rather than more work. The external approval was of 99d1c70; the head is now 624f11b with the verification architecture rebuilt on top of it. CI is green end to end for the first time in this repo's history - 26 gates, 25 CI jobs, all of them executing the contract-declared gates - including the fuzz smoke-run that had never run. main is protected and requires the aggregated gate, so merge cannot bypass it. No open blocking findings across 9 tracked. The substantive remaining work is in pending_work and none of it is mechanical: move recovery (a contract change), the six waived invariants, eviction, the unverified peek/get concurrency caveat, and SHA-pinning the remaining action refs."
+focus = "main is green at 99b4a5f with 21 of 22 findings resolved. Two things remain and only one of them is code. B21: main has no required status check, so every gate result in the 0.4.0 series is advisory; restoring it needs a token with effective Administration write and cannot be done from inside the repository. Release: 0.4.0 is unpublished, the last version on crates.io is 0.2.3, and cargo publish --dry-run has not been run against the final head. B16's concurrency.blocking_runtime_thread stays waived, with the waiver recording that the missing thing is a mechanism rather than a test -- spawn_blocking appears nowhere in src/ and the contract has no clause requiring one."
 tasks = [
-    "RE-REVIEW is the blocking task, not code. The approval on record is of 99d1c70. Everything since - the workflow rewrite, the invariant proof registry, the attribution gate and its forced history rewrite, the case-proof registries - is unreviewed. Do not read the green gate run as evidence that any of it is correct: a green run is evidence that every declared clause is bound to a proving test or an explicit waiver, which is a weaker and different claim.",
-    "Do NOT cache, memoise or short-circuit a gate verdict. A replayed pass is the B5 shape one level up, and merge_readiness in particular exists to judge the branch rather than the change - a cached judgement of the branch is the exact thing it must not read.",
-    "Every proof registry now shares one residual limit: it proves a function is named and exists, not that it exercises the clause. `missing_locators` is deliberately word-bounded so a test cannot be renamed out of the way, but a row pointing at a real, irrelevant function still passes. The instrument that closes this is per-row fault-ledger assertion, not a stricter string match.",
-    "The one unverified correctness claim left is the peek/get race: `peek` observes without claiming and `CacheTier::get` returns a bare `V`, so a value read across an await cannot be revalidated against the generation it was read at, and an abort landing in that window leaves the caller holding a value the control plane has stopped describing. It needs a test that forces the interleaving before it can be called safe.",
-    "merge_readiness is a required CI job with no continue-on-error, so a new blocks_merge finding turns the branch red immediately. That is intentional - fixing the finding is what turns it green - but do not silence it with continue-on-error.",
-    "Move recovery is the largest known gap: a swept Move intent wedges the population path for that key with no automatic remedy. Option (b) in pending_work (commit before source removal, then allow the sweep to abort) is the cheaper of the two and needs a test pinning the reorder.",
-    "PR #2 (feat/async-tiers-l6-graph-backends, v0.3.0) is open against main and was allowed to land first deliberately. This branch is built on top of it, so merge order matters. Neither is merged, and nothing here is published.",
-    "0.4.0 is a breaking release and invalidates every cached key, because tenant is now part of the key. It has not been published; the crates.io version is still 0.2.3. Publishing is deliberately NOT automated - see the note in the changelog entries about the release order.",
+    "B21 is the only open finding and it is not closable from here. It needs a token with effective Administration write; the available one can read and delete branch protection but its create/update calls return 404 despite reporting admin: true. Required check name is 'Verification (all gates)', GitHub Actions app id 15368, strict=true.",
+    "Before publishing: run cargo publish --dry-run against the final head. 0.4.0 is a breaking release because tenant is now part of the key, which invalidates every previously cached key; the 0.4.0 release notes must say so.",
+    "Do NOT treat a green gate run as evidence that the change is correct. It is evidence that every declared clause is bound to something responsible for it. B15, B19 and B20 were each invisible to a green run and each was a real defect.",
+    "B20 changed what a proof registry proves: a cited test must now declare the clause via testkit::proves!. The irreducible remainder is a test that declares the right clause while asserting the wrong thing. Do not close that by strengthening the string match -- a stricter match does not address it and will look like progress.",
+    "concurrency.blocking_runtime_thread needs a decision, not a test. Either narrow the clause to what the crate guarantees (it introduces no blocking call) and prove that by source scan plus control-plane responsiveness, or add a real offload path and a blocking in-tree backend and prove the work reaches spawn_blocking. Rewriting the clause to make the gate pass is the thing to avoid.",
+    "merge_readiness counts entries by blocks_merge, not status. Resolving a finding does not reduce the expected counts in theSix.toml; adding or promoting one requires bumping them in the same change.",
+    "Do not cache, memoise or short-circuit a gate verdict. A replayed pass is the B5 shape one level up.",
 ]
 
 [session]
@@ -443,7 +287,7 @@ entries = [
     { type = "changed", description = "recovery_direction_prepare_move = external-reconciliation (was complete-forward)", scope = "theSix.toml" },
     { type = "changed", description = "BackendKind::is_native() replaced by is_implemented(); the old predicate returned true for five absent backends", scope = "src/tier/trait.rs" },
     { type = "changed", description = "Build profiles use debug = 0; debuginfo filled the disk mid-matrix", scope = "Cargo.toml" },
-    { type = "added", description = "Every declared invariant is bound to a proving test or an explicit waiver. 89 proofs, 6 waivers, checked for exact set equality so an invariant cannot be declared without something responsible for it", scope = "testkit/src/coverage.rs, tests/contract/invariant.rs, theSix.toml" },
+    { type = "added", description = "Every declared invariant is bound to a proving test or an explicit waiver. 94 proofs, 1 waiver, checked for exact set equality (was 89/6; the split moved in the 0.4.0 backlog pass) so an invariant cannot be declared without something responsible for it", scope = "testkit/src/coverage.rs, tests/contract/invariant.rs, theSix.toml" },
     { type = "added", description = "PROPERTY_CASE_PROOFS and FAULT_CASE_PROOFS bind each of the 9 declared property invariants and 12 declared faults to a path::fn that must exist. Both were previously checked as name lists for set equality, which proves two lists agree and not that a test exists; the property binding lived in two comments", scope = "testkit/src/coverage.rs, tests/contract/main.rs" },
     { type = "added", description = "missing_locators / unclaimed / overclaimed move the existence and coverage rules into testkit so one rule has one spelling; tests/contract/invariant.rs had its own copy of the locator walk", scope = "testkit/src/coverage.rs, tests/contract/invariant.rs" },
     { type = "added", description = "authorship gate: forbids attribution trailer KEYS across every commit message on every ref, reporting commit and subject without reprinting the trailer value. Unavailable (exit 3) on a shallow clone, so a depth-1 checkout cannot pass as a clean history", scope = "xtask/src/gates.rs, theSix.toml, .github/workflows/ci.yml" },
