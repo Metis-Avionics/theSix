@@ -173,10 +173,24 @@ pub struct RecoveryReport {
     pub recovered: usize,
     /// Intents this sweep tried and could not resolve, for a reason of its own.
     pub failed: usize,
-    /// Intents left in place because only something outside this process can
-    /// finish them — a move, which needs key bytes the control plane does not
+    /// Intents this sweep could not finish, because only something outside this
+    /// process can — a move, which needs key bytes the control plane does not
     /// keep.
+    ///
+    /// The claim is still *released* for these (see
+    /// [`RecoveryReport::released_for_reconciliation`]), so this counts an
+    /// obligation rather than a wedge. The two are different failures and
+    /// folding them together would make a stuck key look like ordinary
+    /// contention.
     pub needs_reconciliation: usize,
+    /// Swept intents whose population claim was released without the move being
+    /// resolved, so the key is usable again (B15).
+    ///
+    /// Separate from `recovered` because nothing was recovered: the value is
+    /// still wherever the interrupted move left it. Separate from
+    /// `needs_reconciliation` because that is the obligation, this is the
+    /// remedy taken for the wedge.
+    pub released_for_reconciliation: usize,
 }
 
 /// What recovery actually did. Returned rather than logged-and-dropped, because

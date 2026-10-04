@@ -552,7 +552,29 @@ where
                 // not a sweep that tried and lost — it is a job this sweep does not
                 // have the information to do, and folding the two together would
                 // make a permanently stuck key look like ordinary contention.
-                IntentKind::Move => report.needs_reconciliation += 1,
+                //
+                // The claim is nevertheless released (B15). Leaving it held
+                // wedged the key's population path permanently: `acquire`
+                // declines while an owner is set, so nothing could ever write
+                // or populate it again, and only an external reconciler that
+                // never arrived could clear it.
+                //
+                // Releasing is safe precisely because this does *not* resolve
+                // the move. The entry is marked `Failed` with its generation
+                // advanced and its intent cleared, so nothing points at the
+                // emptied source: reads report a miss and a later write
+                // supersedes whatever the interrupted move left behind. For a
+                // cache entry that is recoverable; a permanently unusable key is
+                // not. The obligation stays visible in `needs_reconciliation`,
+                // so releasing the wedge never hides it.
+                IntentKind::Move => {
+                    report.needs_reconciliation += 1;
+                    match self.cachelito.release_population_claim(address) {
+                        Ok(true) => report.released_for_reconciliation += 1,
+                        Ok(false) => {}
+                        Err(_) => report.failed += 1,
+                    }
+                }
             }
         }
         report

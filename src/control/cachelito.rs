@@ -883,6 +883,53 @@ impl Cachelito {
     /// Refusing is a normal outcome, not an error: an entry that has become
     /// `InFlight` since nomination is simply not evictable yet, and the caller
     /// moves on to another candidate.
+    /// Release the population claim on an intent this process cannot resolve,
+    /// while **keeping the intent itself** as evidence (B15).
+    ///
+    /// The distinction from `abort_intent_by_address` is the point. Aborting
+    /// clears the intent, which for a move destroys the only record that one was
+    /// in flight -- and the control plane keeps only a key hash, so the report
+    /// can say "one move needs reconciliation" without saying which key.
+    ///
+    /// This instead marks the entry `Failed`, advances the generation, and drops
+    /// the population owner. That is enough to unblock the key, because `acquire`
+    /// accepts a `Failed` entry (it accepts `Absent | Failed | Stale`), whereas a
+    /// `Prepared` entry with an owner is declined by both `acquire` and the write
+    /// path -- the permanent wedge B15 describes.
+    ///
+    /// `Failed` rather than the restored pre-intent state is what makes this safe
+    /// for a move: restoring would point the control plane at a source rung the
+    /// interrupted move had already emptied, and a read would serve that
+    /// emptiness as though it were the value. `Failed` points nowhere -- reads
+    /// miss, and a later write supersedes whatever the move left behind.
+    ///
+    /// Retaining the intent does not block later writes: `prepare` overwrites an
+    /// existing intent rather than refusing, so the key is genuinely usable again
+    /// while the evidence survives until the key is next written.
+    ///
+    /// Returns whether a claim was actually released.
+    pub fn release_population_claim(
+        &self,
+        address: crate::integrity::KeyAddress,
+    ) -> Result<bool, CacheError> {
+        let shard_idx = self.shard_for_address(address);
+        let shard = &self.shards[shard_idx];
+        let guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
+        let Some(entry) = guard.find_entry(address) else {
+            return Ok(false);
+        };
+        // Only an entry actually holding a claim can have one released.
+        if entry.state() != EntryState::Prepared || !entry.is_population_owner() {
+            return Ok(false);
+        }
+        entry.set_state(EntryState::Failed);
+        entry.increment_generation();
+        entry.set_population_owner(false);
+        // Deliberately NOT clear_intent(): see the doc comment.
+        entry.notify();
+        Ok(true)
+    }
+
     pub fn reserve_eviction(
         &self,
         address: crate::integrity::KeyAddress,
