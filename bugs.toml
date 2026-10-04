@@ -20,8 +20,8 @@ review_date = "2026-10-04"
 verdict_architecture = 9.0
 verdict_verification_strategy = 9.5
 verdict_implementation_correctness = 7.5
-merge_ready = false
-findings_blocking = 3
+merge_ready = true
+findings_blocking = 5
 findings_should_fix = 2
 findings_praised = 4
 independently_verified = true
@@ -315,8 +315,9 @@ source is still authoritative.
 id = "B4"
 title = "The blanket IntegrityCheck digest is not 128-bit; its own comment claims it is"
 severity = "should-fix"
-status = "open"
-verified = true
+status = "resolved"
+resolved_at = "105bf05"
+accepted_by = "user"
 blocks_merge = false
 locations = ["src/integrity.rs:98", "src/integrity.rs:104", "src/integrity.rs:56", "src/integrity.rs:131"]
 violates = []
@@ -348,13 +349,37 @@ A digest test that asserts two distinct values produce distinct digests is not
 sufficient — it passes today. Assert the *stated* entropy instead, or drop the
 128-bit claim from the doc comment so nothing depends on it.
 """
+rationale = """
+`SeededFnv`, a seeded FNV-1a `Hasher`, now backs the blanket impl, and the two
+lanes are started from `FNV_OFFSET_A` and `FNV_OFFSET_B`. `DefaultHasher` cannot
+be seeded, which is what made the honest construction impossible to express
+before: two of them, built the same way and fed the same bytes, finished
+identically. This also removes the `Self2` shim, which existed only to name the
+return type.
+
+The first candidate test was wrong in an instructive way. "The two lanes differ"
+looks like it proves independence and does not: the broken impl stored
+`high ^ high.rotate_left(32)`, which differs from `high` for every hash except
+zero, so that assertion passed against code carrying 64 bits of entropy. Two
+derived quantities being numerically unequal says nothing about whether they were
+computed independently. The test that actually discriminates
+(`blanket_digest_is_two_seeded_fnv_lanes_over_the_hash_stream`) records the exact
+byte stream a `Hash` impl emits and pins the digest to the documented
+construction.
+
+Both `blanket_digest_is_two_seeded_fnv_lanes_over_the_hash_stream` and
+`blanket_digest_lanes_are_not_a_rotate_and_xor` were run against the old
+construction and fail; the rest pass either way, which is why they are corpus and
+lane-variety checks rather than the regression test.
+"""
 
 [[bug]]
 id = "B5"
 title = "Cachelito identifies control-plane entries by a bare 64-bit hash"
 severity = "should-fix"
-status = "open"
-verified = true
+status = "resolved"
+resolved_at = "105bf05"
+accepted_by = "user"
 blocks_merge = false
 locations = ["src/control/cachelito.rs:106", "src/control/cachelito.rs:419", "src/control/cachelito.rs:504"]
 violates = ["no_cross_key_corruption = true", "theSix.toml:341"]
@@ -390,6 +415,24 @@ does for the stub.
 required_test = """
 Force two distinct keys onto one placement hash in Cachelito and assert they hold
 independent state — separate generations, separate owners, separate intents.
+"""
+rationale = """
+`KeyAddress` now bundles a 128-bit `KeyFingerprint` (identity) with a 64-bit
+placement hash, bundled rather than passed separately so no call site can hold a
+placement without the fingerprint that justifies it. `ControlEntry` and
+`CommitToken` carry the address; `find_slot` compares fingerprints and uses the
+placement only to pick the start slot, mirroring `FixedTierStub`.
+
+`Cachelito` gained `with_placement`, sharing `integrity::Placement` with the data
+plane. That is what converts the finding from "untestable" to testable, and it is
+the part that matters: the property was previously asserted for the control plane
+with no way to produce the adversarial case.
+
+`a_placement_collision_does_not_alias_two_control_entries` and
+`a_chosen_collision_pair_stays_distinct` were run against the old conflated
+comparison and fail — committing one key resolved the other to `Ready`, and two
+colliding keys produced one entry instead of two. That is B5 demonstrated rather
+than asserted, which is what the finding asked for and could not previously get.
 """
 
 # ---------------------------------------------------------------------------
@@ -472,4 +515,124 @@ not_done = """
 None of the above are implemented. They are recorded as options because
 `bugs.toml` is currently a note, and a note that silently grew enforcement
 semantics would misrepresent what the gates actually check.
+"""
+
+[[bug]]
+id = "B6"
+title = "abort restores Ready over a rung of unknown contents, so an uncommitted write becomes readable"
+severity = "blocking"
+status = "resolved"
+resolved_at = "105bf05"
+accepted_by = "user"
+verified = true
+blocks_merge = true
+locations = ["src/control/cachelito.rs:abort", "src/control/cachelito.rs:abort_intent_by_address", "src/manager.rs:IntentGuard"]
+violates = ["partial_commit_visible = false", "no_silent_data_loss = true"]
+source = "second external review of PR3, at 105bf05"
+summary = """
+The live `WriteIndeterminate` path B2 fixed left the recovery and cancellation
+paths with the same defect. On an already-populated key:
+
+    Ready("old") -> Prepared -> tier.set("new") -> cancel -> IntentGuard::drop
+                 -> abort -> Ready
+
+The rung holds "new" and the control plane says `Ready`, so the next read serves a
+value nobody authorised. The old justification — "the read path consults the
+control plane first, so residue is unreachable" — held only while the entry stayed
+`Prepared`, and restoring `Ready` is exactly what ended `Prepared`. The same window
+existed on the recovery sweep, which has no tier handle and so cannot remove
+residue even in principle.
+"""
+wider_than_reported = """
+Two things the review did not have. First, `abort`'s own doc comment claimed it
+"advance[d] the generation to invalidate anything that did land" while an inline
+comment twelve lines below said the generation was deliberately not advanced. The
+function did not do what its documentation said, in either direction.
+
+Second, the root cause is that `CacheError` is asymmetric. B2 added
+`WriteIndeterminate` for "my bytes may have landed" and no converse, so no other
+error may be read as "they definitely did not" — including `TierUnavailable` and
+`Timeout`, which are both compatible with a write that landed. `CacheError` has no
+variant that means "provably stored nothing", which is why the control plane
+cannot classify and must assume the worst.
+"""
+rationale = """
+`abort` is now conservative by default: it sets `Failed` (the one state the read
+path will not serve) and advances the generation, instead of restoring
+`intent_prev_state`. `abort_intent_by_address` does the same, since a sweep has no
+tier handle.
+
+The restoring behaviour is preserved where it is sound, as
+`abort_proven_clean`, used only for `SerializationFailed` and `CapacityExhausted`
+— the two errors decided before any bytes are sent. This is a separate method
+rather than a `bool` argument because the caller is what knows which errors carry
+the guarantee, and a boolean eventually gets passed `true` by someone who had not
+proved it.
+
+Reviewer's option 3 (versioned writes validated on read) was not taken:
+`CacheTier::get` returns bare `V`, so it would mean changing the trait across every
+tier and backend. The cost of the chosen fix is one extra repopulation, not data
+loss — the rung still holds whatever is there and repopulation reads it back.
+"""
+required_test = """
+Cancellation after a write has landed, and recovery sweeping such an intent, must
+both leave the entry unservable. A tier that fails cleanly proves nothing here: it
+stores no residue. The test needs a tier that writes and *then* reports a failure
+nobody can classify.
+"""
+test_note = """
+`testkit::MisreportingTier` was added for this and is deliberately not a
+`FaultClass`: every fault class is contract-named, and the contract already has an
+honest answer (`WriteIndeterminate`, which `FaultyTier` reports via
+`PartialWrite`). What the contract has no name for is a backend that returns a
+clean-looking error *after* storing. Asserting against a well-behaved tier would
+have proved nothing about residue, which is how this gap survived.
+
+Three tests changed because their premise was unsupported rather than because
+behaviour regressed. `a_prepared_write_aborts_and_keeps_the_committed_value`
+asserted the bug: it required abort to restore `Ready`. Two fault-injection tests
+asserted that an old value stays *readable* after `TierUnavailable`, which is only
+sound for a provably-rejected write. Each was rewritten to assert what actually
+holds — the uncommitted value is never readable, no intent leaks, the key is not
+wedged — and the provably-clean case is now covered explicitly via
+`CapacityExhaustion`. All three failed against the old behaviour.
+"""
+
+[[bug]]
+id = "B7"
+title = "The CI fuzz job's shell block has an unmatched `done`, so the smoke loop has never run"
+severity = "blocking"
+status = "resolved"
+resolved_at = "105bf05"
+accepted_by = "user"
+verified = true
+blocks_merge = true
+locations = [".github/workflows/ci.yml:fuzz"]
+violates = ["verification gates must be executable"]
+source = "second external review of PR3, at 105bf05"
+summary = """
+The fuzz job's `run:` block ended with an `echo "::endgroup::"` and a `done` after
+the closing `fi` of an `if`. GitHub runs a multiline `run:` as one shell script, so
+the block is a syntax error: the step fails before the loop executes. The job is
+`continue-on-error: true`, so the failure was reported as an allowed advisory
+failure rather than a red job — meaning every fuzz target the job claims to
+smoke-run has never actually been run in CI.
+"""
+why_it_matters_here = """
+A branch whose stated purpose is making verification incapable of lying shipped a
+verification step that could not run, hidden behind the one mechanism designed to
+hide failures. The local `fuzz` gate only builds the targets; the smoke loop is
+CI-only, so no local gate could have caught it.
+"""
+rationale = """
+Removed the stray `echo`/`done`. All 22 `run:` blocks in the workflow were then
+parsed with `bash -n` and are valid.
+
+Not converted into a permanent gate, which is the real fix and is recorded as
+follow-up: `xtask` would need a YAML dependency to extract the blocks, and
+`xtask_unit` already runs its test suite, so a lint there would be picked up
+without a contract change. Left undone rather than rushed.
+"""
+required_test = """
+A check that every `run:` block parses. Not added — see resolution.
 """

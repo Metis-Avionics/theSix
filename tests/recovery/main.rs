@@ -193,9 +193,21 @@ async fn one_failing_rung_does_not_cascade() {
 // Intent recovery
 // ---------------------------------------------------------------------------
 
-/// A prepared write resolves by aborting, and the committed value survives.
+/// An aborted write leaves the entry unservable, never `Ready`.
+///
+/// This is the control-plane half of the R1 regression, and it used to assert
+/// the opposite. `RecoveryDirection::Abort` is what the recovery sweep applies to
+/// a stale `Write` intent, and the sweep has no tier handle: it cannot know
+/// whether the data step landed, and it cannot remove residue even in principle.
+/// Restoring `Ready` therefore published whatever the rung happened to hold — on
+/// a key that was already committed, a write that stored its bytes and then died
+/// became readable again.
+///
+/// So the invariant is not "the committed value survives an abort". It is that
+/// the entry does not read as servable, because we cannot tell what is in the
+/// rung. The value is not lost: the next read misses and repopulates.
 #[tokio::test]
-async fn a_prepared_write_aborts_and_keeps_the_committed_value() {
+async fn an_aborted_prepared_write_is_not_left_readable() {
     let cachelito = thesix::Cachelito::new();
 
     // Establish a committed value.
@@ -203,6 +215,7 @@ async fn a_prepared_write_aborts_and_keeps_the_committed_value() {
         .prepare(b"k", None, TierId::L1, IntentKind::Write)
         .expect("seed");
     cachelito.commit(&seed, None).expect("commit");
+    assert_eq!(cachelito.peek(b"k").expect("peek").state, EntryState::Ready);
 
     // A second write that never commits.
     let doomed = cachelito
@@ -215,9 +228,6 @@ async fn a_prepared_write_aborts_and_keeps_the_committed_value() {
         "an uncommitted write was readable"
     );
 
-    let (recovered, failed) = (0, 0);
-    assert_eq!((recovered, failed), (0, 0));
-
     let outcome = cachelito
         .resolve_intent(
             b"k",
@@ -229,13 +239,58 @@ async fn a_prepared_write_aborts_and_keeps_the_committed_value() {
     assert!(!outcome.is_committed());
 
     let after = cachelito.peek(b"k").expect("peek");
+    assert_ne!(
+        after.state,
+        EntryState::Ready,
+        "abort restored Ready over a rung whose contents are unknown"
+    );
+    assert!(
+        !after.state.is_readable(),
+        "an aborted write left the entry readable: {:?}",
+        after.state
+    );
+    assert!(after.intent.is_none());
+    assert!(!after.population_owner);
+    let _ = doomed;
+}
+
+/// A *provably* unreached write does restore what it interrupted.
+///
+/// The counterpart to [`an_aborted_prepared_write_is_not_left_readable`], and the
+/// reason `abort` and `abort_proven_clean` are separate. When the tier has
+/// established that nothing was written, the previously committed value is still
+/// exactly where it was, and forcing the entry unservable would turn a no-op
+/// error into an unnecessary miss.
+#[tokio::test]
+async fn a_proven_clean_abort_restores_the_committed_value() {
+    let cachelito = thesix::Cachelito::new();
+
+    let seed = cachelito
+        .prepare(b"k", None, TierId::L1, IntentKind::Write)
+        .expect("seed");
+    cachelito.commit(&seed, None).expect("commit");
+
+    let generation_before = cachelito.peek(b"k").expect("peek").generation;
+
+    let token = cachelito
+        .prepare(b"k", None, TierId::L1, IntentKind::Write)
+        .expect("prepare");
+    cachelito
+        .abort_proven_clean(&token, CacheError::CapacityExhausted)
+        .expect("abort");
+
+    let after = cachelito.peek(b"k").expect("peek");
     assert_eq!(
         after.state,
         EntryState::Ready,
-        "aborting a failed write destroyed the previously committed value"
+        "a provably unreached write must not cost the committed value"
+    );
+    assert_eq!(
+        after.generation, generation_before,
+        "a proven-clean abort must not advance the generation: it would invalidate \
+         the value it just preserved"
     );
     assert!(after.intent.is_none());
-    let _ = doomed;
 }
 
 /// Recovery is idempotent: a second pass finds nothing and reports nothing.
@@ -251,7 +306,10 @@ async fn recovery_is_idempotent() {
     }
 
     let first = m.recover_older_than(Duration::from_secs(0));
-    assert_eq!(first.recovered, 3, "the first sweep did not resolve everything");
+    assert_eq!(
+        first.recovered, 3,
+        "the first sweep did not resolve everything"
+    );
     assert_eq!(first.failed, 0, "the first sweep reported a failure");
 
     // Repeat, repeatedly. Each pass must be a no-op.
@@ -292,7 +350,9 @@ async fn concurrent_recovery_is_safe() {
 
     let mut total = 0;
     for h in handles {
-        let RecoveryReport { recovered, failed, .. } = h.await.expect("join");
+        let RecoveryReport {
+            recovered, failed, ..
+        } = h.await.expect("join");
         assert_eq!(failed, 0, "a concurrent sweep reported a failure");
         total += recovered;
     }
@@ -397,11 +457,19 @@ async fn an_unresolvable_move_is_reported_separately_from_a_failure() {
     // And the distinction is real, not cosmetic: a write in the same sweep is
     // resolved, a move is not, and the report says which happened.
     m.cachelito()
-        .prepare(&testkit::framed_key(&ctx, "w"), None, TierId::L2, IntentKind::Write)
+        .prepare(
+            &testkit::framed_key(&ctx, "w"),
+            None,
+            TierId::L2,
+            IntentKind::Write,
+        )
         .expect("prepare a write");
     let both = m.recover_older_than(Duration::from_secs(0));
     assert_eq!(both.recovered, 1, "the write was not resolved");
-    assert_eq!(both.needs_reconciliation, 1, "the move was resolved or lost");
+    assert_eq!(
+        both.needs_reconciliation, 1,
+        "the move was resolved or lost"
+    );
     assert_eq!(both.failed, 0);
 }
 

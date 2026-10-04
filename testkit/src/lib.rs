@@ -710,3 +710,89 @@ pub fn faulty_corrupting<V: Clone + Send + Sync + 'static + thesix::IntegrityChe
     let ledger = tier.ledger();
     (tier, ledger)
 }
+
+/// A tier that stores the value and *then* reports a failure that does not admit
+/// the write might have landed.
+///
+/// This models the backend behaviour that made `partial_commit_visible = false`
+/// reachable, and it is deliberately **not** a [`FaultClass`]. Every
+/// `FaultClass` is a contract-named misbehaviour with a declared error, and the
+/// contract's answer to "my bytes may have landed" is already
+/// `CacheError::WriteIndeterminate` — which [`FaultyTier`] reports honestly via
+/// `PartialWrite`. This tier is the case the contract has no name for: a backend
+/// that returns an error indistinguishable from a clean rejection *after*
+/// storing the value.
+///
+/// It exists because a manager that trusts such an error will serve the residue,
+/// and only a test that leaves real bytes behind can prove it does not. A tier
+/// that fails cleanly stores nothing, so asserting against one proves nothing
+/// about residue at all — which is how the original gap survived: the write path
+/// was tested only with tiers that kept their promises.
+pub struct MisreportingTier {
+    inner: Arc<dyn CacheTier<String>>,
+    misreport_next: AtomicBool,
+    stored: Arc<AtomicU64>,
+}
+
+impl MisreportingTier {
+    #[must_use]
+    pub fn wrap(inner: Arc<dyn CacheTier<String>>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            misreport_next: AtomicBool::new(false),
+            stored: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    /// Misreport the next `set`, and only that one.
+    pub fn misreport_next(&self) {
+        self.misreport_next.store(true, Ordering::SeqCst);
+    }
+
+    /// How many writes actually reached the inner tier while misreporting.
+    ///
+    /// Assert this is non-zero before claiming residue was left behind.
+    #[must_use]
+    pub fn stored(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.stored)
+    }
+}
+
+#[async_trait::async_trait]
+impl CacheTier<String> for MisreportingTier {
+    fn name(&self) -> String {
+        format!("misreporting-{}", self.inner.name())
+    }
+    fn backend(&self) -> BackendKind {
+        BackendKind::Test
+    }
+    async fn get(&self, key: &KeyRef<'_>) -> Result<Option<String>, CacheError> {
+        self.inner.get(key).await
+    }
+    async fn set(
+        &self,
+        key: &KeyRef<'_>,
+        value: String,
+        ttl: Option<Duration>,
+    ) -> Result<(), CacheError> {
+        if self.misreport_next.swap(false, Ordering::SeqCst) {
+            // Store first, then report the cleanest possible failure.
+            self.inner.set(key, value, ttl).await?;
+            self.stored.fetch_add(1, Ordering::SeqCst);
+            return Err(CacheError::TierUnavailable);
+        }
+        self.inner.set(key, value, ttl).await
+    }
+    async fn remove(&self, key: &KeyRef<'_>) -> Result<(), CacheError> {
+        self.inner.remove(key).await
+    }
+    async fn contains(&self, key: &KeyRef<'_>) -> Result<bool, CacheError> {
+        self.inner.contains(key).await
+    }
+    fn health(&self) -> TierHealth {
+        self.inner.health()
+    }
+    fn tier_id(&self) -> TierId {
+        self.inner.tier_id()
+    }
+}

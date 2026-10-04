@@ -1,5 +1,57 @@
 # CHANGELOG
 
+## Unreleased — second review remediation
+
+The three original findings were addressed, and a second review of that head found
+the recovery path still carried B2's defect, plus a CI job that could not run.
+
+### Fixed
+
+- **An aborted write could become readable again.** `abort` restored the state the
+  intent interrupted, which on an already-populated key meant `Ready` over a rung
+  whose contents nobody had checked. A write that stored its bytes and then failed
+  was served on the next read. The in-code justification — the read path consults
+  the control plane first — held only while the entry stayed `Prepared`, and
+  restoring `Ready` is what ended `Prepared`. `abort` now assumes residue and
+  leaves the entry unservable; `abort_proven_clean` preserves the restoring
+  behaviour for the two errors decided before any bytes are sent.
+- **`CacheError` is asymmetric.** `WriteIndeterminate` says "my bytes may have
+  landed" and no variant says the converse, so `TierUnavailable` and `Timeout`
+  cannot be read as "they definitely did not". This is why the control plane must
+  assume the worst rather than classify.
+- **The blanket `IntegrityCheck` digest was one 64-bit hash run twice.** Two
+  identically-seeded `DefaultHasher`s finish identically, so the 128-bit result was
+  a deterministic transformation of one hash while the comment claimed two
+  independent hashers. Replaced with two seeded FNV lanes.
+- **The control plane identified entries by the number that chose their slot.**
+  `integrity.rs` separates identity from placement precisely to avoid this, and the
+  data plane followed; `Cachelito` did not. `KeyAddress` now holds a 128-bit
+  fingerprint and a 64-bit placement hash, bundled so neither can be held without
+  the other.
+- **The CI fuzz job's shell block had an unmatched `done`.** GitHub runs a
+  multiline `run:` as one script, so the step failed before the smoke loop started
+  — and `continue-on-error: true` reported that as an allowed advisory failure.
+  Every fuzz target the job claims to smoke-run had never actually run in CI.
+
+### Changed
+
+- An abort of a write whose outcome is unknown now costs one repopulation.
+  Deliberate, and cheaper than serving a value nobody authorised.
+
+### Tests
+
+- `testkit::MisreportingTier`: stores bytes, then reports a failure that cannot be
+  classified. Deliberately not a `FaultClass` — the contract already has an honest
+  answer (`WriteIndeterminate`); this is the case it has no name for. A tier that
+  fails cleanly stores no residue, so testing against one proves nothing, which is
+  how the gap survived.
+- `Cachelito::with_placement`, plus collision tests that fail against the conflated
+  comparison: committing one key used to resolve the other, and two colliding keys
+  produced one entry instead of two.
+- Three tests rewritten because their premise was unsupported rather than because
+  behaviour regressed — one of them required `abort` to restore `Ready`, i.e. it
+  asserted the bug.
+
 ## v2.0.0 — architectural revision
 
 The architecture is now stated as a machine-checked contract. [`theSix.toml`](./theSix.toml)

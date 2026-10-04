@@ -88,25 +88,62 @@ pub trait IntegrityCheck {
     fn content_digest(&self) -> ContentDigest;
 }
 
-impl<T: Hash + ?Sized> IntegrityCheck for T {
-    fn content_digest(&self) -> ContentDigest {
-        // Two independent hashers over the same value. `DefaultHasher` is fine
-        // here precisely because this digest never leaves the process: it is
-        // written and read within one run, so cross-version stability is not
-        // required. (Contrast `KeyIdentity` in `telemetry`, which does end up in
-        // logs and therefore uses FNV.)
-        let mut a = std::collections::hash_map::DefaultHasher::new();
-        self.hash(&mut a);
-        let mut b = std::collections::hash_map::DefaultHasher::new();
-        self.hash(&mut b);
-        // Mix the two so a value whose two hashes correlate does not collapse.
-        let mixed = a.finish() ^ b.finish().rotate_left(32);
-        Self2::from_hashes(a.finish(), mixed)
+/// A seeded FNV-1a [`std::hash::Hasher`].
+///
+/// `DefaultHasher` cannot be seeded, which is what made the blanket digest
+/// below impossible to construct honestly. Two `DefaultHasher`s built the same
+/// way, fed the same bytes, and finished identically — so `a == b` for every
+/// input, and the 128-bit result was a deterministic transformation of one
+/// 64-bit hash. The comment above it claimed "two independent hashers", which
+/// was false.
+///
+/// Seeding is the whole point: two lanes over one byte stream, started from
+/// different offsets, give two streams that are independent in the same sense
+/// [`ContentDigest::of_bytes`] already relies on. This keeps the module's stated
+/// principle — two lanes so a structural weakness in one need not apply to both
+/// — instead of asserting it in a comment.
+struct SeededFnv {
+    state: u64,
+}
+
+impl SeededFnv {
+    const fn new(seed: u64) -> Self {
+        Self { state: seed }
     }
 }
 
-// Small shim so the blanket impl can name its own return type.
-type Self2 = ContentDigest;
+impl std::hash::Hasher for SeededFnv {
+    fn finish(&self) -> u64 {
+        self.state
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // Identical to `fnv1a` with a caller-chosen starting state, which is
+        // what makes these two lanes FNV rather than something else.
+        for b in bytes {
+            self.state ^= u64::from(*b);
+            self.state = self.state.wrapping_mul(FNV_PRIME);
+        }
+    }
+}
+
+impl<T: Hash + ?Sized> IntegrityCheck for T {
+    fn content_digest(&self) -> ContentDigest {
+        // Two lanes, two seeds, one pass each. Both see the same `Hash` byte
+        // stream, which is unavoidable for a blanket impl over arbitrary `Hash`
+        // types — what makes them independent is the starting state, not the
+        // input.
+        //
+        // A hand-rolled `Hasher` is used rather than `DefaultHasher` because
+        // `DefaultHasher` offers no way to vary the seed, and hashing twice
+        // through it is precisely the defect this replaces.
+        let mut a = SeededFnv::new(FNV_OFFSET_A);
+        self.hash(&mut a);
+        let mut b = SeededFnv::new(FNV_OFFSET_B);
+        self.hash(&mut b);
+        ContentDigest::from_hashes(a.finish(), b.finish())
+    }
+}
 
 impl ContentDigest {
     fn from_hashes(a: u64, b: u64) -> Self {
@@ -143,6 +180,52 @@ impl KeyFingerprint {
 impl std::fmt::Display for KeyFingerprint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:032x}", self.0)
+    }
+}
+
+/// A key's identity *and* where it is placed, kept as two separate things.
+///
+/// The data plane learned this the hard way: `FixedTierStub` compares a full
+/// [`KeyFingerprint`] for identity and uses the placement hash only to pick a
+/// start slot, because a placement collision is expected and harmless under open
+/// addressing while an identity collision is data loss.
+///
+/// The control plane then failed to apply the lesson, holding a bare `u64` that
+/// was both at once — so `find_slot` decided identity by comparing the number
+/// that chose the slot, and two keys colliding on it became one entry sharing a
+/// generation, an owner, an intent and a rung. That is `no_cross_key_corruption`
+/// failing by construction, and unlike the stub it had no injection point, so the
+/// property could be asserted but never demonstrated.
+///
+/// Bundled into one `Copy` value so the pair cannot be separated at a call site:
+/// there is no way to hold a placement without also holding the fingerprint that
+/// justifies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct KeyAddress {
+    fingerprint: KeyFingerprint,
+    placement: u64,
+}
+
+impl KeyAddress {
+    /// Address `key` under a placement strategy.
+    #[must_use]
+    pub fn of(key: &[u8], placement_strategy: Placement) -> Self {
+        Self {
+            fingerprint: KeyFingerprint::of(key),
+            placement: placement_strategy.hash(key),
+        }
+    }
+
+    /// Identity. Compared in full; never derived from the placement.
+    #[must_use]
+    pub const fn fingerprint(self) -> KeyFingerprint {
+        self.fingerprint
+    }
+
+    /// Slot-selection only. Two keys may share this and still be distinct keys.
+    #[must_use]
+    pub const fn placement(self) -> u64 {
+        self.placement
     }
 }
 
@@ -244,6 +327,112 @@ mod tests {
         let v: Vec<u8> = vec![1, 2, 3];
         let w: Vec<u8> = vec![1, 2, 3];
         assert_eq!(v.content_digest(), w.content_digest());
+    }
+
+    /// Captures the exact byte stream a `Hash` impl produces.
+    ///
+    /// Used to check the blanket digest against the construction it documents
+    /// without having to hard-code what `Hash` writes for any particular type —
+    /// `String` appends a `0xff`, slices write a length prefix, and getting that
+    /// wrong by one byte would make a correct digest look broken.
+    #[derive(Default)]
+    struct StreamRecorder {
+        bytes: Vec<u8>,
+    }
+
+    impl std::hash::Hasher for StreamRecorder {
+        fn finish(&self) -> u64 {
+            0
+        }
+        fn write(&mut self, bytes: &[u8]) {
+            self.bytes.extend_from_slice(bytes);
+        }
+    }
+
+    /// The stated entropy, asserted rather than asserted-about.
+    ///
+    /// "Two distinct values produce distinct digests" is worthless here: it passes
+    /// against the broken implementation, because one 64-bit hash still separates two
+    /// values. So this pins the *construction* — two seeded FNV lanes over the value's
+    /// `Hash` stream — which is the thing the doc comment claims and the old code did
+    /// not do.
+    ///
+    /// Note what this test deliberately is not. "The two lanes differ" looks like it
+    /// proves independence and does not: the old code stored `high ^ high.rotate_left(32)`,
+    /// which differs from `high` for every hash except zero, so a lane-difference
+    /// assertion passed against code with 64 bits of entropy. Asserting that two
+    /// derived quantities are numerically unequal says nothing about whether they were
+    /// computed independently.
+    #[test]
+    fn blanket_digest_is_two_seeded_fnv_lanes_over_the_hash_stream() {
+        for i in 0..1_000_u32 {
+            let value = i.to_le_bytes();
+
+            let mut recorder = StreamRecorder::default();
+            value.as_slice().hash(&mut recorder);
+            let stream = &recorder.bytes;
+
+            let expected = ContentDigest::from_hashes(
+                fnv1a(stream, FNV_OFFSET_A),
+                fnv1a(stream, FNV_OFFSET_B),
+            );
+            assert_eq!(
+                value.as_slice().content_digest(),
+                expected,
+                "the blanket digest is not two seeded FNV lanes over the Hash stream \
+             (input {i})"
+            );
+        }
+    }
+
+    /// The old mixing is named here so a regression cannot reintroduce it unnoticed.
+    #[test]
+    fn blanket_digest_lanes_are_not_a_rotate_and_xor() {
+        for i in 0..1_000_u32 {
+            let d = i.to_le_bytes().as_slice().content_digest();
+            let high = (d.value() >> 64) as u64;
+            let low = d.value() as u64;
+            assert_ne!(
+                low,
+                high ^ high.rotate_left(32),
+                "the lanes are the old rotate-and-xor of a single hash ({i})"
+            );
+        }
+    }
+
+    /// Both lanes must vary across inputs, so neither is a constant or a zero-fill
+    /// that would halve the effective width.
+    #[test]
+    fn blanket_digest_uses_both_lanes_across_a_corpus() {
+        let mut highs = std::collections::HashSet::new();
+        let mut lows = std::collections::HashSet::new();
+        let mut digests = std::collections::HashSet::new();
+        for i in 0..5_000_u32 {
+            let d = i.to_le_bytes().as_slice().content_digest();
+            highs.insert((d.value() >> 64) as u64);
+            lows.insert(d.value() as u64);
+            digests.insert(d);
+        }
+        assert_eq!(digests.len(), 5_000, "digest collision across 5k values");
+        // A degenerate lane would hold one value; a good hash over 5k inputs holds
+        // 5k. Asserting the exact count would be a collision test, so this only pins
+        // that the lane varies at all.
+        assert!(
+            highs.len() > 4_000 && lows.len() > 4_000,
+            "a lane is degenerate: highs={} lows={}",
+            highs.len(),
+            lows.len()
+        );
+    }
+
+    #[test]
+    fn seeded_hasher_matches_the_byte_lane_it_mirrors() {
+        // `SeededFnv` reimplements `fnv1a` over a `Hash` stream. If the two ever
+        // diverge, the blanket digest silently stops being the documented
+        // construction, so pin them together.
+        let mut hasher = SeededFnv::new(FNV_OFFSET_A);
+        hasher.write(b"payload");
+        assert_eq!(hasher.finish(), fnv1a(b"payload", FNV_OFFSET_A));
     }
 
     #[test]

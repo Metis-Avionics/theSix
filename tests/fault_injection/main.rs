@@ -163,8 +163,22 @@ async fn read_failure_fails_a_read_only() {
     assert_eq!(ledger.fired(FaultClass::ReadFailure), 1);
 }
 
+/// An ambiguous write failure must not serve the replacement, must not leak an
+/// intent, and must not wedge the key.
+///
+/// `FaultClass::WriteFailure` maps to `TierUnavailable`, which is ambiguous: it
+/// is equally consistent with "stored nothing" and "stored the value and then
+/// failed". This test used to assert the old value stayed *readable*, which is
+/// only sound for a provably-rejected write — and `CapacityExhaustion` covers
+/// that (`a_provably_rejected_write_leaves_the_committed_value_alone`). Asserting
+/// it here made the test pass for the wrong reason and left the ambiguous case,
+/// the one that actually reaches `abort`, untested.
+///
+/// What holds for an ambiguous failure is stronger than "the old value is still
+/// there": the uncommitted value must never be *readable*. The entry is left
+/// unservable, so the next read misses and repopulates.
 #[tokio::test]
-async fn write_failure_fails_a_write_and_leaves_the_old_value() {
+async fn write_failure_never_serves_the_replacement_and_leaves_no_intent() {
     let (m, ledger, handle) = armed(FaultPlan::new());
     let key = "w".to_string();
     m.set(&key, "original".to_string(), &test_ctx())
@@ -176,17 +190,36 @@ async fn write_failure_fails_a_write_and_leaves_the_old_value() {
     assert_eq!(r, Err(CacheError::TierUnavailable));
     assert_eq!(ledger.fired(FaultClass::WriteFailure), 1);
 
-    // Post-state: the previously committed value is untouched, and no intent is
-    // outstanding. A failed write must not half-replace a committed entry.
     let snap = m
         .cachelito()
         .peek(&testkit::framed_key(&test_ctx(), &key))
         .expect("peek");
     assert!(snap.intent.is_none(), "the failed write left an intent");
+    assert!(
+        !snap.population_owner,
+        "the failed write left the entry claimed"
+    );
+    assert_ne!(
+        snap.state,
+        thesix::EntryState::Ready,
+        "an entry whose write outcome is unknown must not read as Ready: the rung \
+         may hold an uncommitted value, and Ready is what makes it reachable"
+    );
+
+    let read = m.get(&key, &test_ctx()).await;
+    let served_replacement = matches!(&read, Ok(Some(v)) if v == "replacement");
+    assert!(
+        !served_replacement,
+        "the failed write became readable: {read:?}"
+    );
+
+    // Not wedged: the key still accepts and returns a value afterwards.
+    m.set(&key, "after".to_string(), &test_ctx())
+        .await
+        .expect("the key must remain writable after an aborted write");
     assert_eq!(
-        m.get(&key, &test_ctx()).await.expect("get"),
-        Some("original".to_string()),
-        "a failed write destroyed the previously committed value"
+        m.get(&key, &test_ctx()).await.expect("get after recovery"),
+        Some("after".to_string())
     );
 }
 
@@ -553,18 +586,24 @@ async fn a_failed_write_does_not_silently_replace_a_committed_value() {
     );
 }
 
-/// A *definite* write failure must leave the committed value alone.
+/// A *provably* rejected write must leave the committed value alone.
 ///
-/// The counterpart to the residue tests, and the one that keeps the compensating
-/// remove honest. `WriteIndeterminate` says the backend may have stored the
-/// bytes, so the key has to go; every other write error says it provably stored
-/// nothing, so removing the key would delete a good value for nothing.
+/// The word doing the work here is "provably". `CacheError` has a
+/// `WriteIndeterminate` variant for "my bytes may have landed" but no converse,
+/// so no other error may be read as "they definitely did not" — including
+/// `TierUnavailable`, which is what `FaultClass::WriteFailure` maps to and which
+/// a rung's health can report *after* a write landed. This test used to assert
+/// the property on `WriteFailure`, so it asserted it on an input that cannot
+/// support it: it passed for the wrong reason, and the gap it was really about —
+/// an ambiguous failure leaving the entry `Ready` over a rung of unknown
+/// contents — had no test at all.
 ///
-/// An earlier fix gated the cleanup on a per-tier capability flag instead of on
-/// the error, and this is the test that caught it: `WriteFailure` was over-cleaned
-/// and the previously committed value came back as a miss.
+/// `CapacityExhausted` is one of the two errors that *are* provable (see
+/// `write_provably_stored_nothing`): admission refused the write, so no bytes
+/// were sent. `a_misreported_write_never_serves_its_residue` covers the other
+/// side.
 #[tokio::test]
-async fn a_definite_write_failure_leaves_the_committed_value_alone() {
+async fn a_provably_rejected_write_leaves_the_committed_value_alone() {
     let tier = testkit::FaultyTier::<String>::wrap(
         Arc::new(L0Stub::<String>::new()) as Arc<dyn CacheTier<String>>
     );
@@ -578,7 +617,7 @@ async fn a_definite_write_failure_leaves_the_committed_value_alone() {
         .await
         .expect("seed a committed value");
 
-    tier.arm(FaultPlan::new().push(OpKind::Set, FaultClass::WriteFailure));
+    tier.arm(FaultPlan::new().push(OpKind::Set, FaultClass::CapacityExhaustion));
     assert!(
         manager
             .set(&key, "replacement".to_string(), &ctx)
@@ -586,7 +625,7 @@ async fn a_definite_write_failure_leaves_the_committed_value_alone() {
             .is_err()
     );
     assert_eq!(
-        ledger.fired(FaultClass::WriteFailure),
+        ledger.fired(FaultClass::CapacityExhaustion),
         1,
         "the armed fault never fired"
     );
@@ -595,8 +634,58 @@ async fn a_definite_write_failure_leaves_the_committed_value_alone() {
         manager
             .get(&key, &ctx)
             .await
-            .expect("read after failed write"),
+            .expect("read after a rejected write"),
         Some("original".to_string()),
-        "a definite write failure destroyed the committed value"
+        "a provably rejected write destroyed the committed value"
+    );
+}
+
+/// The R1 regression: a write that stored its bytes and then reported a failure
+/// nobody can classify must never have its residue served.
+///
+/// `MisreportingTier` writes through to the rung and *then* returns
+/// `TierUnavailable` — an error compatible both with "stored nothing" and
+/// "stored something". The old `abort` restored the interrupted state, so on
+/// this already-`Ready` key it went straight back to `Ready` and the next read
+/// served the replacement: `partial_commit_visible = false` reached by
+/// cancellation-or-misreport rather than by the live error path B2 fixed.
+///
+/// The entry is left unservable instead, so the read misses and the next
+/// population recovers the rung's contents.
+#[tokio::test]
+async fn a_misreported_write_never_serves_its_residue() {
+    let inner = Arc::new(L0Stub::<String>::new()) as Arc<dyn CacheTier<String>>;
+    let tier = testkit::MisreportingTier::wrap(Arc::clone(&inner));
+    let manager = single_rung(Arc::clone(&tier) as Arc<dyn CacheTier<String>>);
+    let ctx = test_ctx();
+    let key = "residue".to_string();
+
+    manager
+        .set(&key, "original".to_string(), &ctx)
+        .await
+        .expect("seed a committed value");
+
+    tier.misreport_next();
+    assert!(
+        manager
+            .set(&key, "replacement".to_string(), &ctx)
+            .await
+            .is_err(),
+        "a misreported write must surface as an error"
+    );
+
+    // Anti-vacuity: the fault only counts if bytes actually reached the rung.
+    assert_eq!(
+        tier.stored().load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the misreporting tier never stored anything, so this test proves nothing \
+         about residue"
+    );
+
+    let read = manager.get(&key, &ctx).await;
+    let served_replacement = matches!(&read, Ok(Some(v)) if v == "replacement");
+    assert!(
+        !served_replacement,
+        "an uncommitted write became readable: {read:?}"
     );
 }

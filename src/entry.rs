@@ -141,7 +141,12 @@ impl TierIdLite {
 /// what stops two racing writers from both believing they committed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommitToken {
-    pub key_hash: u64,
+    /// Identity *and* placement, kept separate inside `KeyAddress`.
+    ///
+    /// This was a bare `u64`, which meant the token could only name a key by the
+    /// hash that also chose its slot — so a control-plane collision could not be
+    /// told apart from a placement collision.
+    pub address: crate::integrity::KeyAddress,
     pub generation: Generation,
     pub kind: IntentKind,
     pub target_tier: TierIdLite,
@@ -200,7 +205,7 @@ mod tests {
     #[test]
     fn a_token_dies_when_the_generation_moves() {
         let token = CommitToken {
-            key_hash: 1,
+            address: crate::integrity::KeyAddress::of(b"k", crate::integrity::Placement::Default),
             generation: Generation::new(5),
             kind: IntentKind::Write,
             target_tier: TierIdLite::new(1),

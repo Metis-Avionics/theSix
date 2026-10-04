@@ -86,10 +86,15 @@ impl Drop for PopulationGuard<'_> {
 ///
 /// Deliberately *not* a rollback of the data write. If `tier.set` completed and
 /// the future died before `commit`, the value is on the rung and the intent is
-/// gone; recovery cannot distinguish that from an abort. The tier read path
-/// consults the control plane first, so an uncommitted value is unreachable —
-/// which is what `partial_commit_visible = false` claims — but the residue is
-/// reclaimed by the next successful write to that key, not by this guard.
+/// gone; recovery cannot distinguish that from an abort.
+///
+/// This comment previously claimed the residue was unreachable because "the
+/// tier read path consults the control plane first", which is what
+/// `partial_commit_visible = false` rests on. That was true only while the entry
+/// stayed `Prepared`. `abort` restored `Ready`, which is the thing that ended
+/// `Prepared`, so on a previously-populated key the residue became reachable
+/// again and the next read served it. So `abort` now leaves the entry unservable
+/// (`Failed`) instead: one extra repopulation, not a wrong answer.
 struct IntentGuard<'a> {
     cachelito: &'a Cachelito,
     token: CommitToken,
@@ -116,11 +121,28 @@ impl<'a> IntentGuard<'a> {
     /// panicked — and the test asserting cancellation safety is what caught it.
     /// Keeping the token and tracking liveness separately makes the mistake
     /// unrepresentable, and matches `PopulationGuard`'s shape.
+    ///
+    /// Conservative: the entry is left unservable rather than restored, because
+    /// only the tier knows whether the write landed. Use
+    /// [`Self::abort_proven_clean`] only for an error that proves otherwise.
     fn abort(&mut self, error: CacheError) {
         if !self.armed {
             return;
         }
         let _ = self.cachelito.abort(&self.token, error);
+        self.armed = false;
+    }
+
+    /// Abort an intent the tier provably never wrote, restoring what it
+    /// interrupted.
+    ///
+    /// Only for [`write_provably_stored_nothing`]. Anything else goes through
+    /// [`Self::abort`], which assumes residue and leaves the entry unservable.
+    fn abort_proven_clean(&mut self, error: CacheError) {
+        if !self.armed {
+            return;
+        }
+        let _ = self.cachelito.abort_proven_clean(&self.token, error);
         self.armed = false;
     }
 
@@ -136,10 +158,10 @@ impl Drop for IntentGuard<'_> {
         if !self.armed {
             return;
         }
-        // `abort` is idempotent, declines when a commit already won, and restores
-        // the state the intent interrupted rather than forcing `Failed`. All three
-        // matter here: a stale abort must not undo a successful commit, and a
-        // cancellation must not destroy the previously committed value.
+        // `abort` is idempotent, declines when a commit already won, and leaves
+        // the entry unservable rather than restoring it — because a cancelled
+        // write may already have landed on the rung, and a restored `Ready` would
+        // serve it. See `Cachelito::abort`.
         let _ = self.cachelito.abort(&self.token, CacheError::Cancelled);
     }
 }
@@ -148,6 +170,30 @@ impl Drop for IntentGuard<'_> {
 /// `Copy`, so this simply returns the error for the control-plane marker.
 fn error_kind(err: CacheError) -> CacheError {
     err
+}
+
+/// Whether this write error proves the tier never stored the value.
+///
+/// The whole recovery model turns on this. `CacheError` grew
+/// `WriteIndeterminate` so a tier could say "my bytes may have landed", but
+/// there is no matching variant for the converse — so nothing *else* may be read
+/// as "they definitely did not". In particular these are all compatible with a
+/// landed write:
+///
+/// * `TierUnavailable` — the rung's health flipped; the write may have been in
+///   flight when it did. This is also what `FaultClass::WriteFailure` maps to in
+///   the test harness, which makes it easy to mistake for a clean rejection.
+/// * `Timeout` — we stopped waiting. The backend did not.
+/// * `Corrupted` — a detection, not a rejection.
+///
+/// Only two are provable, and both are decided before any bytes are sent:
+/// `SerializationFailed` (the value never encoded) and `CapacityExhausted`
+/// (admission refused it). Everything else must abort conservatively.
+fn write_provably_stored_nothing(error: CacheError) -> bool {
+    matches!(
+        error,
+        CacheError::SerializationFailed | CacheError::CapacityExhausted
+    )
 }
 
 /// The rung below `rung`, or `L6` when there is none.
@@ -455,7 +501,7 @@ where
     /// As [`Self::recover`], with an explicit age threshold.
     pub fn recover_older_than(&self, age: Duration) -> RecoveryReport {
         let mut report = RecoveryReport::default();
-        for (key_hash, intent) in self.cachelito.stale_intents(age.as_nanos() as u64) {
+        for (address, intent) in self.cachelito.stale_intents(age.as_nanos() as u64) {
             match intent.kind {
                 // A write's value is reproducible, so aborting is both safe and
                 // complete. Aborting needs only the key hash, which is all the
@@ -466,7 +512,7 @@ where
                     // reports more recoveries than there were intents.
                     match self
                         .cachelito
-                        .abort_intent_by_hash(key_hash, CacheError::UncommittedIntent)
+                        .abort_intent_by_address(address, CacheError::UncommittedIntent)
                     {
                         Ok(true) => report.recovered += 1,
                         Ok(false) => {}
@@ -963,7 +1009,17 @@ where
                         | CacheError::SerializationFailed
                         | CacheError::WriteIndeterminate),
                     ) => {
-                        intent.abort(e);
+                        // Only an error that proves nothing was written may
+                        // restore the interrupted state. The rest leave the entry
+                        // unservable: `TierUnavailable` and `Timeout` in this very
+                        // arm are both compatible with a write that landed, and
+                        // restoring `Ready` over a rung of unknown contents is how
+                        // an uncommitted value became readable.
+                        if write_provably_stored_nothing(e) {
+                            intent.abort_proven_clean(e);
+                        } else {
+                            intent.abort(e);
+                        }
                         last_error = e;
                         rung = previous_rung(rung);
                         continue 'outer;
@@ -971,7 +1027,11 @@ where
                     Err(e) => {
                         // Undo phase 1 so the entry is claimable again, and report
                         // the data-plane error rather than the bookkeeping one.
-                        intent.abort(e);
+                        if write_provably_stored_nothing(e) {
+                            intent.abort_proven_clean(e);
+                        } else {
+                            intent.abort(e);
+                        }
                         return Err(e);
                     }
                 }

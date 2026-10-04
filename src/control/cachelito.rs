@@ -1,5 +1,3 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::Notify;
@@ -7,6 +5,7 @@ use tokio::sync::Notify;
 use crate::continuity::{RecoveryDirection, RecoveryOutcome};
 use crate::entry::{CommitIntent, CommitToken, EntryState, Generation, IntentKind, TierIdLite};
 use crate::error::CacheError;
+use crate::integrity::{KeyAddress, Placement};
 use crate::tier::TierId;
 use crate::tier::tier_trait::TierHealth;
 
@@ -103,12 +102,13 @@ pub struct ControlEntry {
     /// changed, and forcing `Failed` threw away a good value because a later
     /// write did not land.
     intent_prev_state: std::sync::atomic::AtomicU8,
-    key_hash: u64,
+    /// Identity and placement, held separately. See `KeyAddress`.
+    address: KeyAddress,
     notify: Arc<Notify>,
 }
 
 impl ControlEntry {
-    pub fn new(key_hash: u64) -> Self {
+    pub fn new(address: KeyAddress) -> Self {
         ControlEntry {
             state: std::sync::atomic::AtomicU8::new(EntryStateAtomic::Absent as u8),
             generation: std::sync::atomic::AtomicU64::new(0),
@@ -123,7 +123,7 @@ impl ControlEntry {
             intent_tier: std::sync::atomic::AtomicU8::new(0),
             intent_since_nanos: std::sync::atomic::AtomicU64::new(0),
             intent_prev_state: std::sync::atomic::AtomicU8::new(EntryStateAtomic::Absent as u8),
-            key_hash,
+            address,
             notify: Arc::new(Notify::new()),
         }
     }
@@ -238,8 +238,8 @@ impl ControlEntry {
         Arc::clone(&self.notify)
     }
 
-    pub fn key_hash(&self) -> u64 {
-        self.key_hash
+    pub fn address(&self) -> KeyAddress {
+        self.address
     }
 
     /// The state an outstanding intent interrupted.
@@ -408,15 +408,15 @@ impl Shard {
         Shard { entries }
     }
 
-    fn find_slot(&self, key_hash: u64) -> Option<usize> {
+    fn find_slot(&self, address: KeyAddress) -> Option<usize> {
         if self.entries.is_empty() {
             return None;
         }
-        let mut idx = (key_hash as usize) % self.entries.len();
+        let mut idx = (address.placement() as usize) % self.entries.len();
         let mut attempts = 0;
         while attempts < self.entries.len() {
             match &self.entries[idx] {
-                Some(entry) if entry.key_hash() == key_hash => return Some(idx),
+                Some(entry) if entry.address() == address => return Some(idx),
                 None => return None,
                 _ => {
                     idx = (idx + 1) % self.entries.len();
@@ -427,16 +427,16 @@ impl Shard {
         None
     }
 
-    fn find_empty(&self, key_hash: u64) -> Option<usize> {
+    fn find_empty(&self, address: KeyAddress) -> Option<usize> {
         if self.entries.is_empty() {
             return None;
         }
-        let mut idx = (key_hash as usize) % self.entries.len();
+        let mut idx = (address.placement() as usize) % self.entries.len();
         let mut attempts = 0;
         while attempts < self.entries.len() {
             match &self.entries[idx] {
                 None => return Some(idx),
-                Some(entry) if entry.key_hash() == key_hash => return Some(idx),
+                Some(entry) if entry.address() == address => return Some(idx),
                 _ => {
                     idx = (idx + 1) % self.entries.len();
                     attempts += 1;
@@ -446,14 +446,17 @@ impl Shard {
         None
     }
 
-    fn find_or_create_entry(&mut self, key_hash: u64) -> Result<&mut ControlEntry, CacheError> {
-        if let Some(idx) = self.find_slot(key_hash) {
+    fn find_or_create_entry(
+        &mut self,
+        address: KeyAddress,
+    ) -> Result<&mut ControlEntry, CacheError> {
+        if let Some(idx) = self.find_slot(address) {
             return self.entries[idx]
                 .as_mut()
                 .ok_or(CacheError::ConfigurationError);
         }
-        if let Some(idx) = self.find_empty(key_hash) {
-            self.entries[idx] = Some(ControlEntry::new(key_hash));
+        if let Some(idx) = self.find_empty(address) {
+            self.entries[idx] = Some(ControlEntry::new(address));
             return self.entries[idx]
                 .as_mut()
                 .ok_or(CacheError::ConfigurationError);
@@ -461,8 +464,8 @@ impl Shard {
         Err(CacheError::ConfigurationError)
     }
 
-    fn find_entry(&self, key_hash: u64) -> Option<&ControlEntry> {
-        let idx = self.find_slot(key_hash)?;
+    fn find_entry(&self, address: KeyAddress) -> Option<&ControlEntry> {
+        let idx = self.find_slot(address)?;
         self.entries[idx].as_ref()
     }
 }
@@ -472,6 +475,11 @@ pub struct Cachelito {
     shards: Vec<std::sync::Mutex<Shard>>,
     shard_count: usize,
     _capacity_per_shard: usize,
+    /// How keys are mapped to slots. Injectable for the same reason the data
+    /// plane's is: without it, a control-plane collision cannot be produced on
+    /// demand, so `no_cross_key_corruption` could only be asserted about the
+    /// control plane, never demonstrated.
+    placement: Placement,
 }
 
 impl Cachelito {
@@ -492,19 +500,27 @@ impl Cachelito {
             shards,
             shard_count,
             _capacity_per_shard: capacity_per_shard,
+            placement: Placement::Default,
         }
     }
 
-    fn shard_for(&self, key: &[u8]) -> usize {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        (hasher.finish() as usize) % self.shard_count
+    /// The same control plane, addressing keys with a different placement
+    /// strategy. Mirrors `FixedTierStub::with_placement`.
+    #[must_use]
+    pub fn with_placement(mut self, placement: Placement) -> Self {
+        self.placement = placement;
+        self
     }
 
-    fn compute_key_hash(key: &[u8]) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        hasher.finish()
+    /// Identity and placement for `key`, under the configured strategy.
+    fn address_of(&self, key: &[u8]) -> KeyAddress {
+        KeyAddress::of(key, self.placement)
+    }
+
+    /// Shards are chosen by placement, so two keys that collide on it share a
+    /// shard and are still told apart there by fingerprint.
+    fn shard_for(&self, address: KeyAddress) -> usize {
+        (address.placement() as usize) % self.shard_count
     }
 
     fn snapshot_of(
@@ -530,12 +546,12 @@ impl Cachelito {
     }
 
     pub fn acquire(&self, key: &[u8], tier: TierId) -> Result<ControlSnapshot, CacheError> {
-        let key_hash = Self::compute_key_hash(key);
-        let shard_idx = self.shard_for(key);
+        let address = self.address_of(key);
+        let shard_idx = self.shard_for(address);
         let shard = &self.shards[shard_idx];
         let mut guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
 
-        let Ok(entry) = guard.find_or_create_entry(key_hash) else {
+        let Ok(entry) = guard.find_or_create_entry(address) else {
             return Err(CacheError::ConfigurationError);
         };
 
@@ -641,12 +657,12 @@ impl Cachelito {
         tier: TierId,
         ttl: Option<std::time::Duration>,
     ) -> Result<(), CacheError> {
-        let key_hash = Self::compute_key_hash(key);
-        let shard_idx = self.shard_for(key);
+        let address = self.address_of(key);
+        let shard_idx = self.shard_for(address);
         let shard = &self.shards[shard_idx];
         let guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
 
-        let entry = guard.find_entry(key_hash).ok_or(CacheError::Miss)?;
+        let entry = guard.find_entry(address).ok_or(CacheError::Miss)?;
 
         let current_gen = entry.generation();
         if expected_generation.is_stale(current_gen) || expected_generation.0 != current_gen.0 {
@@ -673,12 +689,12 @@ impl Cachelito {
     /// learn why the population failed (stampede.toml
     /// `waiters_receive_population_error`).
     pub fn fail_with_error(&self, key: &[u8], error: CacheError) -> Result<(), CacheError> {
-        let key_hash = Self::compute_key_hash(key);
-        let shard_idx = self.shard_for(key);
+        let address = self.address_of(key);
+        let shard_idx = self.shard_for(address);
         let shard = &self.shards[shard_idx];
         let guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
 
-        let entry = guard.find_entry(key_hash).ok_or(CacheError::Miss)?;
+        let entry = guard.find_entry(address).ok_or(CacheError::Miss)?;
 
         entry.set_state(EntryState::Failed);
         entry.set_last_error(Some(error));
@@ -690,12 +706,12 @@ impl Cachelito {
     }
 
     pub fn release(&self, key: &[u8]) -> Result<(), CacheError> {
-        let key_hash = Self::compute_key_hash(key);
-        let shard_idx = self.shard_for(key);
+        let address = self.address_of(key);
+        let shard_idx = self.shard_for(address);
         let shard = &self.shards[shard_idx];
         let guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
 
-        let Some(entry) = guard.find_entry(key_hash) else {
+        let Some(entry) = guard.find_entry(address) else {
             return Ok(());
         };
 
@@ -711,12 +727,12 @@ impl Cachelito {
     }
 
     pub fn invalidate(&self, key: &[u8]) -> Result<(), CacheError> {
-        let key_hash = Self::compute_key_hash(key);
-        let shard_idx = self.shard_for(key);
+        let address = self.address_of(key);
+        let shard_idx = self.shard_for(address);
         let shard = &self.shards[shard_idx];
         let guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
 
-        let Some(entry) = guard.find_entry(key_hash) else {
+        let Some(entry) = guard.find_entry(address) else {
             return Ok(());
         };
 
@@ -736,39 +752,39 @@ impl Cachelito {
     }
 
     pub fn set_generation(&self, key: &[u8], generation: Generation) -> Result<(), CacheError> {
-        let key_hash = Self::compute_key_hash(key);
-        let shard_idx = self.shard_for(key);
+        let address = self.address_of(key);
+        let shard_idx = self.shard_for(address);
         let shard = &self.shards[shard_idx];
         let mut guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
 
         let entry = guard
-            .find_or_create_entry(key_hash)
+            .find_or_create_entry(address)
             .map_err(|_| CacheError::ConfigurationError)?;
         entry.set_generation(generation);
         Ok(())
     }
 
     pub fn set_tier(&self, key: &[u8], tier: TierId) -> Result<(), CacheError> {
-        let key_hash = Self::compute_key_hash(key);
-        let shard_idx = self.shard_for(key);
+        let address = self.address_of(key);
+        let shard_idx = self.shard_for(address);
         let shard = &self.shards[shard_idx];
         let mut guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
 
         let entry = guard
-            .find_or_create_entry(key_hash)
+            .find_or_create_entry(address)
             .map_err(|_| CacheError::ConfigurationError)?;
         entry.set_tier(tier);
         Ok(())
     }
 
     pub fn set_state(&self, key: &[u8], state: EntryState) -> Result<(), CacheError> {
-        let key_hash = Self::compute_key_hash(key);
-        let shard_idx = self.shard_for(key);
+        let address = self.address_of(key);
+        let shard_idx = self.shard_for(address);
         let shard = &self.shards[shard_idx];
         let mut guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
 
         let entry = guard
-            .find_or_create_entry(key_hash)
+            .find_or_create_entry(address)
             .map_err(|_| CacheError::ConfigurationError)?;
         entry.set_state(state);
         entry.notify();
@@ -790,13 +806,13 @@ impl Cachelito {
     /// `peek` answers the same question with no side effect, and does not create
     /// a slot for a key that has never been written.
     pub fn peek(&self, key: &[u8]) -> Result<ControlSnapshot, CacheError> {
-        let key_hash = Self::compute_key_hash(key);
-        let shard_idx = self.shard_for(key);
+        let address = self.address_of(key);
+        let shard_idx = self.shard_for(address);
         let shard = &self.shards[shard_idx];
         #[allow(clippy::significant_drop_tightening)]
         let guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
 
-        let Some(entry) = guard.find_entry(key_hash) else {
+        let Some(entry) = guard.find_entry(address) else {
             // Never written. Report a synthetic Absent so callers need no Option
             // branch, and do not allocate a slot for it.
             return Ok(ControlSnapshot {
@@ -832,12 +848,12 @@ impl Cachelito {
     /// read-modify-write under the guard makes it indivisible, so a concurrent
     /// bump is composed with rather than overwritten.
     pub fn bump_generation(&self, key: &[u8]) -> Result<Generation, CacheError> {
-        let key_hash = Self::compute_key_hash(key);
-        let shard_idx = self.shard_for(key);
+        let address = self.address_of(key);
+        let shard_idx = self.shard_for(address);
         let shard = &self.shards[shard_idx];
         let mut guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
         let entry = guard
-            .find_or_create_entry(key_hash)
+            .find_or_create_entry(address)
             .map_err(|_| CacheError::ConfigurationError)?;
         let next = entry.increment_generation();
         entry.notify();
@@ -863,12 +879,12 @@ impl Cachelito {
         target_tier: TierId,
         kind: IntentKind,
     ) -> Result<CommitToken, CacheError> {
-        let key_hash = Self::compute_key_hash(key);
-        let shard_idx = self.shard_for(key);
+        let address = self.address_of(key);
+        let shard_idx = self.shard_for(address);
         let shard = &self.shards[shard_idx];
         let mut guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
         let entry = guard
-            .find_or_create_entry(key_hash)
+            .find_or_create_entry(address)
             .map_err(|_| CacheError::ConfigurationError)?;
 
         let current = entry.generation();
@@ -892,7 +908,7 @@ impl Cachelito {
         entry.set_population_owner(true);
 
         Ok(CommitToken {
-            key_hash,
+            address,
             generation: current,
             kind,
             target_tier: intent.target_tier,
@@ -911,10 +927,10 @@ impl Cachelito {
         token: &CommitToken,
         ttl: Option<std::time::Duration>,
     ) -> Result<(), CacheError> {
-        let shard_idx = self.shard_for_index(token.key_hash);
+        let shard_idx = self.shard_for_address(token.address);
         let shard = &self.shards[shard_idx];
         let guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
-        let Some(entry) = guard.find_entry(token.key_hash) else {
+        let Some(entry) = guard.find_entry(token.address) else {
             return Err(CacheError::Miss);
         };
 
@@ -937,22 +953,72 @@ impl Cachelito {
         Ok(())
     }
 
-    /// Abandon a prepared intent, leaving the entry claimable again.
+    /// Abandon a prepared intent whose data step **may** have reached the tier.
     ///
-    /// This is what recovery does to a `Write` intent: the payload may or may not
-    /// have reached the tier, and either way the value is reproducible, so the
-    /// honest resolution is to make the entry look untouched and let the next
-    /// read repopulate. Advancing the generation invalidates anything that did
-    /// land, so a slow writer holding an older token cannot commit it later.
+    /// This is the safe default, and it is conservative on purpose: the control
+    /// plane has no tier handle, so it cannot know whether a write landed. Only
+    /// the backend knows, and `CacheError` has a `WriteIndeterminate` variant
+    /// precisely because that cannot be inferred from the error — both
+    /// `TierUnavailable` and `Timeout` are compatible with a write that landed.
+    /// So this assumes residue exists, and makes it unreachable.
+    ///
+    /// It used to restore `intent_prev_state` unconditionally, which is where
+    /// `partial_commit_visible = false` broke. The justification was that the
+    /// entry reads as `Prepared` during the data step, so the read path never
+    /// reaches the rung and residue is unreachable. That holds *while the entry
+    /// stays `Prepared`* — and restoring `Ready` is exactly what stops it
+    /// staying `Prepared`. On a key that was already `Ready`:
+    ///
+    /// ```text
+    /// Ready("old") -> Prepared -> tier.set("new") -> cancel -> abort -> Ready
+    /// ```
+    ///
+    /// the rung now holds `"new"` and the control plane says `Ready`, so the next
+    /// read serves a value nobody authorised. The same window existed on the
+    /// recovery sweep, which has no tier handle at all and so cannot remove
+    /// residue even in principle.
+    ///
+    /// `Failed` is not served by the read path, so the entry misses and the next
+    /// read repopulates. That is a cache missing once, not data loss: the rung
+    /// still holds whatever is there, and repopulation reads it back.
     ///
     /// Idempotent — aborting an already-aborted entry succeeds — which is what
     /// makes repeated recovery safe.
     pub fn abort(&self, token: &CommitToken, error: CacheError) -> Result<(), CacheError> {
-        let shard_idx = self.shard_for_index(token.key_hash);
+        self.abort_inner(token, error, false)
+    }
+
+    /// Abandon an intent the tier **provably** never wrote.
+    ///
+    /// Restores the interrupted state, so a previously-committed value stays
+    /// readable. Only for errors that establish the write never reached the
+    /// rung: `SerializationFailed` (the value never encoded) and
+    /// `CapacityExhausted` (admission refused it). Every other error is
+    /// compatible with a landed write — including the ones the manager infers
+    /// rather than the tier reports — so it gets [`Self::abort`].
+    ///
+    /// Split out rather than given a `bool` argument because the caller, not this
+    /// function, is what knows which errors carry that guarantee. A boolean
+    /// eventually gets passed `true` by someone who had not proved it.
+    pub fn abort_proven_clean(
+        &self,
+        token: &CommitToken,
+        error: CacheError,
+    ) -> Result<(), CacheError> {
+        self.abort_inner(token, error, true)
+    }
+
+    fn abort_inner(
+        &self,
+        token: &CommitToken,
+        error: CacheError,
+        proven_clean: bool,
+    ) -> Result<(), CacheError> {
+        let shard_idx = self.shard_for_address(token.address);
         let shard = &self.shards[shard_idx];
         #[allow(clippy::significant_drop_tightening)]
         let guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
-        let Some(entry) = guard.find_entry(token.key_hash) else {
+        let Some(entry) = guard.find_entry(token.address) else {
             // Already gone. Recovery is idempotent, so this is a success.
             return Ok(());
         };
@@ -971,20 +1037,32 @@ impl Cachelito {
             return Ok(());
         }
 
-        // Restore the interrupted state rather than forcing `Failed`.
-        //
-        // Nothing about the previously committed value changed: the write was
-        // rejected before it could replace anything. Forcing `Failed` made a
-        // failed write to a populated key render that key unreadable, which is
-        // data loss caused by an error that should have been a no-op.
-        //
-        // The generation is deliberately *not* advanced. It is what makes a
-        // second `commit` with the same token fail, but `commit` also requires
-        // the entry to still be `Prepared`, and this abort has just made it not
-        // `Prepared`. So the double-committed token is still rejected, without
-        // invalidating a good value.
-        let restored = entry.intent_prev_state();
-        entry.set_state(restored);
+        if proven_clean {
+            // Restore the interrupted state rather than forcing `Failed`.
+            //
+            // The tier provably stored nothing, so nothing about the previously
+            // committed value changed: the write was rejected before it could
+            // replace anything. Forcing `Failed` made a rejected write to a
+            // populated key render that key unreadable, which is data loss caused
+            // by an error that should have been a no-op.
+            //
+            // The generation is deliberately *not* advanced. It is what makes a
+            // second `commit` with the same token fail, but `commit` also requires
+            // the entry to still be `Prepared`, and this abort has just made it not
+            // `Prepared`. So the double-committed token is still rejected, without
+            // invalidating a good value.
+            let restored = entry.intent_prev_state();
+            entry.set_state(restored);
+        } else {
+            // The write may have landed, so `Failed` is the only state the read
+            // path will not serve, and therefore the only one that cannot expose
+            // residue. The generation advances so a value stored under this intent
+            // cannot later be mistaken for one stored under a subsequent prepare.
+            // That is what this function's old doc comment claimed it did; it did
+            // not, and nothing else invalidated what landed.
+            entry.set_state(EntryState::Failed);
+            entry.increment_generation();
+        }
         entry.set_population_owner(false);
         entry.clear_intent();
         entry.set_last_error(Some(error));
@@ -997,7 +1075,7 @@ impl Cachelito {
     /// The recovery sweep. Returns key hashes because the control plane only ever
     /// stores hashes; resolving an intent needs the key, which only the owning
     /// `CacheManager` still has.
-    pub fn stale_intents(&self, older_than_nanos: u64) -> Vec<(u64, CommitIntent)> {
+    pub fn stale_intents(&self, older_than_nanos: u64) -> Vec<(KeyAddress, CommitIntent)> {
         let cutoff = Self::now_nanos().saturating_sub(older_than_nanos);
         let mut out = Vec::new();
         for shard in &self.shards {
@@ -1007,33 +1085,32 @@ impl Cachelito {
                     continue;
                 };
                 if intent.started_nanos <= cutoff {
-                    out.push((slot.key_hash(), intent));
+                    out.push((slot.address(), intent));
                 }
             }
         }
         out
     }
 
-    /// Abort an intent by key hash, for a recovery sweep that has no key bytes.
+    /// Abort an intent by address, for a recovery sweep that has no key bytes.
     ///
-    /// The recovery sweep finds intents by hash, because the control plane
-    /// deliberately stores only hashes. Aborting needs nothing but the hash —
-    /// it clears the claim, advances the generation and invalidates anything
-    /// that landed — so the common case does not need the key at all.
+    /// The sweep needs no key: the address carries the fingerprint that decides
+    /// identity and the placement that picks the shard, so the entry is found
+    /// without ever reconstructing the bytes.
     ///
     /// The earlier version of this took a key slice and the sweep passed an empty
     /// one, which hashed to the wrong slot and aborted nothing. That failure was
     /// silent: recovery reported success and left the intent outstanding.
-    pub fn abort_intent_by_hash(
+    pub fn abort_intent_by_address(
         &self,
-        key_hash: u64,
+        address: KeyAddress,
         error: CacheError,
     ) -> Result<bool, CacheError> {
-        let shard_idx = self.shard_for_index(key_hash);
+        let shard_idx = self.shard_for_address(address);
         let shard = &self.shards[shard_idx];
         #[allow(clippy::significant_drop_tightening)]
         let guard = shard.lock().map_err(|_| CacheError::ConfigurationError)?;
-        let Some(entry) = guard.find_entry(key_hash) else {
+        let Some(entry) = guard.find_entry(address) else {
             return Ok(false);
         };
         // Report whether an intent was actually cleared.
@@ -1051,8 +1128,13 @@ impl Cachelito {
         if entry.state() != EntryState::Prepared {
             return Ok(false);
         }
-        let restored = entry.intent_prev_state();
-        entry.set_state(restored);
+        // Conservative, like `abort`: a sweep has no tier handle, so it cannot
+        // know whether the data step landed and cannot remove residue even in
+        // principle. Restoring the interrupted state here is what made a swept
+        // write's residue readable — the entry went back to `Ready` over a rung
+        // nobody had cleaned. `Failed` is not served, so the next read repopulates.
+        entry.set_state(EntryState::Failed);
+        entry.increment_generation();
         entry.set_population_owner(false);
         entry.clear_intent();
         entry.set_last_error(Some(error));
@@ -1073,7 +1155,7 @@ impl Cachelito {
         direction: RecoveryDirection,
     ) -> Result<RecoveryOutcome, CacheError> {
         let token = CommitToken {
-            key_hash: Self::compute_key_hash(key),
+            address: self.address_of(key),
             generation: intent.generation,
             kind: intent.kind,
             target_tier: intent.target_tier,
@@ -1097,8 +1179,8 @@ impl Cachelito {
         }
     }
 
-    fn shard_for_index(&self, key_hash: u64) -> usize {
-        (key_hash as usize) % self.shard_count
+    fn shard_for_address(&self, address: KeyAddress) -> usize {
+        self.shard_for(address)
     }
 
     fn now_nanos() -> u64 {
@@ -1109,5 +1191,127 @@ impl Cachelito {
 impl Default for Cachelito {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::integrity::Placement;
+
+    /// Anti-vacuity for the control-plane collision test: if these did not
+    /// collide on placement, the test using them would pass without ever
+    /// exercising the probe-conflict path.
+    #[test]
+    fn placement_strategies_really_collide_for_the_control_plane() {
+        assert_eq!(
+            Placement::AllToZero.hash(b"alpha"),
+            Placement::AllToZero.hash(b"beta")
+        );
+        let p = Placement::CollidingPair { prefix: b"k" };
+        assert_eq!(p.hash(b"k1"), p.hash(b"k2"));
+        assert_ne!(p.hash(b"k1"), p.hash(b"other"));
+    }
+
+    /// Two distinct keys forced onto one placement hash must hold independent
+    /// state.
+    ///
+    /// This is the finding that could not be tested before. `ControlEntry` stored
+    /// a bare `u64` that was simultaneously the slot selector and the identity,
+    /// so `find_slot` decided "same key" by comparing the number that chose the
+    /// slot — and `Cachelito` had no way to make two keys collide on it. The
+    /// property was asserted for the control plane and undemonstrable there.
+    ///
+    /// With `Placement::AllToZero` both keys start at slot 0 and walk the same
+    /// probe sequence, which is exactly the shared-slot case. Before the split
+    /// they resolved to one entry: one generation, one owner, one intent, and one
+    /// rung applied to both keys.
+    #[test]
+    fn a_placement_collision_does_not_alias_two_control_entries() {
+        let cachelito = Cachelito::new().with_placement(Placement::AllToZero);
+
+        // Independent state for each key, so an aliasing entry would be visible.
+        let a = cachelito
+            .prepare(b"alpha", None, TierId::L1, IntentKind::Write)
+            .expect("prepare alpha");
+        let b = cachelito
+            .prepare(b"beta", None, TierId::L2, IntentKind::Write)
+            .expect("prepare beta");
+
+        assert_ne!(
+            a.address.fingerprint(),
+            b.address.fingerprint(),
+            "the test premise is broken: the two keys have one fingerprint"
+        );
+        assert_eq!(
+            a.address.placement(),
+            b.address.placement(),
+            "the test premise is broken: the two keys did not collide on placement"
+        );
+
+        // Commit alpha, leave beta prepared. An aliased entry would make these
+        // two observations the same entry.
+        cachelito.commit(&a, None).expect("commit alpha");
+        let alpha = cachelito.peek(b"alpha").expect("peek alpha");
+        let beta = cachelito.peek(b"beta").expect("peek beta");
+        assert_eq!(alpha.state, EntryState::Ready);
+        assert_eq!(
+            beta.state,
+            EntryState::Prepared,
+            "committing one key resolved the other's entry: they share a slot"
+        );
+
+        // Committing beta is legitimate — it has its own prepared intent — and the
+        // rung each entry lands on is the decisive evidence they stayed separate.
+        // Both were prepared for *different* tiers, so an aliased entry would have
+        // collapsed them onto one rung.
+        cachelito.commit(&b, None).expect("commit beta");
+        let alpha = cachelito.peek(b"alpha").expect("peek alpha");
+        let beta = cachelito.peek(b"beta").expect("peek beta");
+        assert_eq!(alpha.tier, TierId::L1, "alpha's rung moved");
+        assert_eq!(
+            beta.tier,
+            TierId::L2,
+            "beta took alpha's rung: the two keys share one control entry"
+        );
+        assert_eq!(alpha.generation, beta.generation);
+
+        // Aborting one key must not disturb the other's committed value.
+        cachelito
+            .abort(&b, CacheError::Cancelled)
+            .expect("abort beta");
+        assert_eq!(
+            cachelito.peek(b"alpha").expect("peek alpha").state,
+            EntryState::Ready,
+            "aborting one key disturbed the other's committed value"
+        );
+    }
+
+    /// A forced 64-bit placement collision must not disturb identity, and the
+    /// specific collision pair must be the one the strategy promises.
+    #[test]
+    fn a_chosen_collision_pair_stays_distinct() {
+        let cachelito = Cachelito::new().with_placement(Placement::CollidingPair { prefix: b"k" });
+        let one = cachelito.address_of(b"k1");
+        let two = cachelito.address_of(b"k2");
+        assert_eq!(one.placement(), two.placement());
+        assert_ne!(one.fingerprint(), two.fingerprint());
+
+        cachelito
+            .prepare(b"k1", None, TierId::L1, IntentKind::Write)
+            .expect("prepare k1");
+        cachelito
+            .prepare(b"k2", None, TierId::L1, IntentKind::Write)
+            .expect("prepare k2");
+
+        // Both keys must exist independently: two entries, not one.
+        let mut intents = cachelito.stale_intents(0);
+        assert_eq!(
+            intents.len(),
+            2,
+            "two colliding keys resolved to a single control entry"
+        );
+        intents.sort_by_key(|(a, _)| a.fingerprint());
+        assert_ne!(intents[0].0.fingerprint(), intents[1].0.fingerprint());
     }
 }

@@ -227,8 +227,6 @@ jobs:
             echo "::error::at least one fuzz target crashed; artifacts are under fuzz/artifacts/"
             exit 1
           fi
-            echo "::endgroup::"
-          done
 
   # theSix is `#![forbid(unsafe_code)]`, so miri has nothing to check. The job
   # is kept only so a future `unsafe` block cannot land unnoticed, and it

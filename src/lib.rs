@@ -203,7 +203,7 @@ pub use error::CacheError;
 #[cfg(feature = "faults")]
 pub use fault::{ArmedFault, DeterministicRng, FaultClass, FaultLedger, FaultPlan, OpKind};
 pub use identity::{CacheContext, IdentityContext};
-pub use integrity::{ContentDigest, IntegrityCheck, KeyFingerprint, Placement};
+pub use integrity::{ContentDigest, IntegrityCheck, KeyAddress, KeyFingerprint, Placement};
 pub use key::{Key, KeyRef, MAX_KEY_SIZE, TENANT_SEPARATOR, frame_tenant_key};
 pub use manager::CacheManager;
 pub use policy::{

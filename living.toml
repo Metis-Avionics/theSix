@@ -103,6 +103,35 @@ performance, soak and fuzz. nextest per-test processes, sccache, and clang + mol
 Build profiles moved to debug = 0 after debuginfo filled the disk mid-matrix and
 produced nineteen failures that had nothing to do with the code.
 
+A second review of the landed head then found that B2's fix had a recovery
+cousin, and it was right about that too. `abort` restored the state the intent
+interrupted, which on an already-populated key meant `Ready` over a rung whose
+contents nobody had checked: a write that stored its bytes and then failed
+became readable again. The justification in the code — the read path consults the
+control plane first, so residue is unreachable — held only while the entry stayed
+`Prepared`, and restoring `Ready` is what ended `Prepared`. `abort` now assumes
+residue and leaves the entry unservable; the restoring behaviour survives as
+`abort_proven_clean`, used only for the two errors decided before any bytes are
+sent. The cost is one extra repopulation, not a wrong answer.
+
+The root cause is that `CacheError` is asymmetric. `WriteIndeterminate` says "my
+bytes may have landed" and nothing says the converse, so `TierUnavailable` and
+`Timeout` cannot be read as "they definitely did not". Three tests asserted the
+old behaviour on inputs that could not support it and were rewritten; one of them
+asserted the bug outright, requiring abort to restore `Ready`.
+
+The same review found the CI fuzz job's shell block had an unmatched `done`, so
+the smoke loop was a syntax error and had never run — behind `continue-on-error`,
+which is exactly the mechanism designed to hide it.
+
+The two should-fix integrity findings went at the same time. The blanket
+`IntegrityCheck` digest hashed through two identically-seeded `DefaultHasher`s, so
+its 128 bits were one hash twice; a seeded FNV `Hasher` replaced them. `Cachelito`
+identified entries by a bare `u64` that was both slot selector and identity, which
+`integrity.rs` had explicitly warned against; `KeyAddress` now splits the two and
+`Placement` became injectable, which is what turned `no_cross_key_corruption` in
+the control plane from asserted into demonstrated.
+
 Known limitations, in rough order of how much they will bite. Eviction policy:
 FixedTierStub reports CapacityExhausted when full and CacheManager degrades down the
 ladder, but nothing evicts, so a cache whose whole ladder is full refuses new writes.
@@ -125,6 +154,10 @@ pending_work = """
         the source intact and a crash after it leaves only an unreachable duplicate.
         Needs a test that pins the reorder, and a decision on whether `CommitIntent`
         may reference key material at all.
+- `xtask` has no lint over `.github/workflows`, so a malformed `run:` block is
+  caught only when CI runs it — and `continue-on-error` will report it as an
+  allowed advisory failure rather than a red job. A YAML parser is the missing
+  piece; the check itself is small. This is how B7 survived.
 - The gate-coverage gap is only partly closed. tests/contract now compares one declared
   invariant to runtime behaviour. `cancel_safe`, `partial_commit_visible` and
   `cancelled_operation_may_commit_partially` are declared true and are now true, but
@@ -178,6 +211,8 @@ decisions = [
     "A cancelled set is released by an RAII IntentGuard rather than by a compensation path, because Drop is the only construct that runs on every exit path including a dropped future. Deliberately NOT a rollback of the data write: if tier.set completed and the future died before commit, the value is on the rung and the intent is gone, and recovery cannot distinguish that from an abort. The tier read path consults the control plane first, so the value is unreachable, which is what partial_commit_visible claims",
     "Write-error cleanup is keyed on CacheError::WriteIndeterminate, per operation, NOT on a tier capability flag. Attempted the flag first; a blanket per-tier claim cannot separate a rejected write from an accepted one, so it over-removes and destroys committed values. CapabilityFlags::ATOMIC_WRITE_OR_ERROR is retained as reported capability only",
     "theSix.toml, not bugs.toml, holds the expected finding counts the merge_readiness gate checks. A tracker that declares its own expected contents can be emptied or downgraded to make the gate pass, and both happened before the count check existed",
+    "Abort of a write with an unknown outcome does NOT restore the pre-intent state; it leaves the entry Failed and advances the generation. Only abort_proven_clean restores, and only for SerializationFailed and CapacityExhausted. Restoring over a rung of unknown contents is how an uncommitted value became readable, and the cost of not restoring is one repopulation rather than a wrong answer",
+    "Control-plane identity is a 128-bit KeyFingerprint and placement is a separate 64-bit hash, bundled as KeyAddress so no call site can hold one without the other. Placement is injectable in Cachelito as well as the stub, which is what makes no_cross_key_corruption demonstrable in the control plane instead of merely declared",
     "Move recovery was resolved by redefining the contract rather than by implementing the recovery, on the grounds that persisting key bytes in CommitIntent violates the payload-free intent invariant. This is the one place the contract was changed to match reality instead of the reverse, and it is recorded as such rather than presented as a fix",
 ]
 
@@ -296,6 +331,14 @@ entries = [
     { type = "changed", description = "recovery_direction_prepare_move = external-reconciliation (was complete-forward)", scope = "theSix.toml" },
     { type = "changed", description = "BackendKind::is_native() replaced by is_implemented(); the old predicate returned true for five absent backends", scope = "src/tier/trait.rs" },
     { type = "changed", description = "Build profiles use debug = 0; debuginfo filled the disk mid-matrix", scope = "Cargo.toml" },
+    { type = "added", description = "KeyAddress: 128-bit identity and 64-bit placement held separately; Cachelito placement is now injectable", scope = "src/integrity.rs, src/control/cachelito.rs" },
+    { type = "added", description = "SeededFnv: a seeded Hasher, so the blanket digest can have two independent lanes", scope = "src/integrity.rs" },
+    { type = "added", description = "testkit::MisreportingTier - stores bytes then reports a failure nobody can classify", scope = "testkit/src/lib.rs" },
+    { type = "added", description = "abort_proven_clean, the only abort that restores the interrupted state", scope = "src/control/cachelito.rs" },
+    { type = "fixed", description = "An aborted write could become readable again: abort restored Ready over a rung of unknown contents", scope = "src/control/cachelito.rs, src/manager.rs" },
+    { type = "fixed", description = "The blanket IntegrityCheck digest was one 64-bit hash run twice, while claiming 128 bits", scope = "src/integrity.rs" },
+    { type = "fixed", description = "Cachelito identified entries by a bare 64-bit hash that was also the slot selector", scope = "src/control/cachelito.rs" },
+    { type = "fixed", description = "CI fuzz job had an unmatched done; the smoke loop had never run", scope = ".github/workflows/ci.yml" },
     { type = "fixed", description = "A cancelled set wedged the key's population path (IntentGuard)", scope = "src/manager.rs" },
     { type = "fixed", description = "A failed write left the rung holding an unauthorised value (WriteIndeterminate cleanup)", scope = "src/manager.rs" },
     { type = "fixed", description = "Move recovery promised a direction the runtime could not execute", scope = "theSix.toml, src/continuity.rs" },

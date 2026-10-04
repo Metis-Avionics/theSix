@@ -22,7 +22,7 @@ fuzz_target!(|data: &[u8]| {
     // equality, so both a stale and an ahead token are rejected.
     let offset = Generation::new(u64::from(raw).saturating_add(1));
     let stale = thesix::CommitToken {
-        key_hash: token.key_hash,
+        address: token.address,
         generation: offset,
         kind: token.kind,
         target_tier: token.target_tier,

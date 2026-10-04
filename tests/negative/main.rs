@@ -604,7 +604,7 @@ testkit::declare_cases! {
         let stale = cachelito
             .stale_intents(0)
             .into_iter()
-            .find(|(h, _)| *h == move_token.key_hash)
+            .find(|(a, _)| *a == move_token.address)
             .map(|(_, i)| i)
             .expect("the move intent was not discoverable");
 
