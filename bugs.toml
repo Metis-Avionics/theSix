@@ -1955,7 +1955,16 @@ the unfixed workflow, then the workflow was fixed and it went green."""
 residual_risk = """The new assertion matches invocation *text*. A job could in principle invoke the
 runner inside a script it generates, or under a different gate name, and still be
 correct. This is a heuristic on YAML, and it is a heuristic that has already caught
-one real hole."""
+one real hole. The first version of the fix still failed, and the failure is the
+point: the job had never run a gate, only a validator, so it had no `cargo-nextest`
+installed. The gate reported `Unavailable` and the run exited 3 -- correct, because "I
+could not verify this" must not look like "I verified this" -- but the job was red for
+a reason no local run could have shown, since every developer machine has nextest. The
+job now installs it, and the probe behind `runner: nextest` in the header no longer
+treats a present `cargo` as a present `cargo-nextest`, which are separate binaries.
+
+The general shape is worth naming: a job can be green forever without ever running the
+thing it is named after."""
 
 [[bug]]
 id = "B26"

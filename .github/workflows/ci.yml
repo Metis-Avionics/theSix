@@ -51,6 +51,12 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
+      # cargo-nextest, because the gate below is a nextest gate. Without it the
+      # runner reports `Unavailable` and exits 3 -- "I could not verify this" rather
+      # than "I verified this", which is the honest answer and still a red build.
+      # This job had never run a gate before: it called the validator, which needs
+      # no runner, and passed, so nothing ever revealed the missing dependency.
+      - uses: taiki-e/install-action@d33ae53f5400bbbd4fa744ecd206e8cea22082b9 # cargo-nextest
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: contract
