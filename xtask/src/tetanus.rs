@@ -227,6 +227,15 @@ impl Scan<'_> {
         });
     }
 
+    fn push_at(&mut self, rule: usize, at: proc_macro2::LineColumn, detail: impl Into<String>) {
+        let detail = detail.into();
+        self.out.push(Finding {
+            rule,
+            location: format!("{}:{}", self.rel, at.line),
+            detail: format!("{detail} (col {})", at.column + 1),
+        });
+    }
+
     fn item(&mut self, item: &syn::Item) {
         // Rule 8: conditional compilation and macro-generated code. Checked at the
         // item level so a `#[cfg]`-gated block is attributed to the item it gates
@@ -308,13 +317,14 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     /// no single answer to "did this succeed", which is the failure this rule is
     /// about. Reported per match site.
     fn visit_expr_match(&mut self, node: &syn::ExprMatch) {
-        if let Some(line) = line_of(&node.expr) {
+        {
+            let at = line_col_of(&node.expr);
             let data = node.arms.iter().filter(|a| arm_returns_value(a)).count();
             let error = node.arms.iter().filter(|a| arm_returns_result(a)).count();
             if data > 0 && error > 0 {
-                self.push(
+                self.push_at(
                     5,
-                    line,
+                    at,
                     format!("match mixes {data} value arm(s) with {error} result arm(s)"),
                 );
             }
@@ -338,7 +348,8 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     /// site rather than inventing one. The two races this clause exists for are
     /// named as findings B19 and B22, with reproductions.
     fn visit_expr_if(&mut self, node: &syn::ExprIf) {
-        if let Some(line) = line_of(&node.cond) {
+        {
+            let at = line_col_of(&node.cond);
             let then_diverges = block_diverges(&node.then_branch);
             let then_yields = block_yields_value(&node.then_branch);
             let (else_diverges, else_yields) = match &node.else_branch {
@@ -352,13 +363,12 @@ impl<'ast> Visit<'ast> for Scan<'_> {
                 None => (false, false),
             };
             if (then_diverges && else_yields) || (else_diverges && then_yields) {
-                self.push(
+                self.push_at(
                     7,
-                    line,
+                    at,
                     "one branch of this conditional diverges and the other yields a value, \
                      so whether a value exists depends on control flow the caller \
-                     cannot see"
-                        .to_string(),
+                     cannot see",
                 );
             }
         }
@@ -900,8 +910,20 @@ fn as_fn(item: &syn::Item) -> Option<&syn::ItemFn> {
     }
 }
 
+/// Line and column of a node.
+///
+/// The column is computed because `proc-macro2`'s `span-locations` is what makes
+/// it available, and a direct dependency that is declared and never named is one
+/// `cargo machete` correctly refuses to accept. It is not in the baseline key on
+/// purpose: a key is `(rule, path:line)` and adding a column to it would triple the
+/// churn on every edit for no gain in deciding whether a finding still exists. The
+/// column is carried in the finding's detail, which is where B42 wants it.
+fn line_col_of<T: Spanned>(node: &T) -> proc_macro2::LineColumn {
+    node.span().start()
+}
+
 fn line_of<T: Spanned>(node: &T) -> Option<usize> {
-    Some(node.span().start().line)
+    Some(line_col_of(node).line)
 }
 
 // ---------------------------------------------------------------------------
