@@ -212,7 +212,7 @@ the rules can be attributed.
   location)` set equality **in both directions**. A new violation fails; a
   justification cannot outlive the code it describes.
 * **`reported`** rules are counted and printed, never baselined. Rules 3 and 9
-  have 1011 and 89 sites. 1100 entries repeating one sentence would make the count
+  have 1033 and 89 sites. 1122 entries repeating one sentence would make the count
   the only thing anyone read, which is the failure mode a baseline exists to
   prevent.
 * A gated rule that finds **nothing** must say why in `finds_nothing_because`.
@@ -227,11 +227,28 @@ the rules can be attributed.
   refuses an empty scan. Line numbers are not stable identifiers — see B26 for
   what that costs in `bugs.toml`, where nothing checks it at all.
 
-Two drafts in this gate's first week were wrong in ways the contract layer caught:
-rule 3 detected nothing while declaring a clean crate that allocates 1011 times,
-and rule 8 reported `#[derive]` and `#[doc]` as conditional compilation, which is
-490 of its 493 original sites. `tests/contract/tetanus.rs` exists so that the
-second one cannot happen again.
+**Rule titles state what the rule forbids. Where the predicate measures something
+narrower, `as_titled` and `as_implemented` say so and are required to differ.**
+Rules 1, 2, 4, 5, 6, 7 and 10 carry the `mixed` or `review` flag, which asserts that
+the tree cannot decide part of the rule — and rule 7 is the sharpest case: it is
+titled `no check-then-act`, which is TOCTOU, and the predicate detects an early-return
+idiom instead. That gap is B32 and decision D5; it is recorded rather than papered over.
+
+Four drafts were wrong in ways this gate's own verification caught:
+
+- Rule 3 detected nothing while declaring a clean crate that allocates 1033 times.
+- Rule 8 reported `#[derive]` and `#[doc]` as conditional compilation — 490 of its 493
+  original sites. Only `cfg`/`cfg_attr` can remove code from a build.
+- Rules 1, 2, 4, 8 and 10 never fired inside an inline `mod` block (B30), because
+  `scan()` iterated `file.items` instead of entering through `visit_file`. Thirteen of
+  the sixteen inline `mod` blocks in the scan set are `#[cfg(test)] mod tests`.
+- Rule 5 counted every `Result` arm as both data and error (B31), inventing 11
+  violations out of seven-`Ok`-arm matches that mix nothing.
+
+All four passed CI. They were found by mutation-testing the gate against itself:
+plant a real violation, require the gate to fail, and try the shape in more than one
+position. `tests/contract/tetanus.rs` exists so the set of things that can be true
+about this file is asserted rather than described.
 
 ## Test layers
 

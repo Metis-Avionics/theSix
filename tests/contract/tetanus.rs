@@ -46,6 +46,8 @@ struct Rule {
     /// that finds nothing is indistinguishable from a rule that was never checked.
     #[serde(default)]
     finds_nothing_because: Option<String>,
+    as_titled: Option<String>,
+    as_implemented: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -378,6 +380,39 @@ fn the_baseline_is_not_suspiciously_small_or_round() {
     for r in s.rules.iter().filter(|r| r.disposition == "gated") {
         let count = per_rule.get(&r.id).copied().unwrap_or(0);
         if count == 0 {
+            // A rule whose title overstates its predicate has to say so in the
+            // contract, not just in a comment. Rule 7 is titled no-check-then-act,
+            // which is TOCTOU, and cannot detect TOCTOU -- a mutation-tested
+            // `let n = v.len(); if n > 0 { v[n-1] } else { 0 }` produces nothing.
+            // Both spellings must therefore be present, and they must differ.
+            if r.check == "mixed" {
+                let (Some(titled), Some(impl_)) =
+                    (r.as_titled.as_deref(), r.as_implemented.as_deref())
+                else {
+                    panic!(
+                        "rule {} is `mixed` and declares no as_titled/as_implemented pair.\n\
+                         A `mixed` rule has a clause the checker cannot decide, so the \
+                         contract must state what the published rule forbids (as_titled) \
+                         separately from what the predicate measures (as_implemented). \
+                         Rule 7 needs both: the title is TOCTOU and the predicate is an \
+                         early-return shape.",
+                        r.id
+                    );
+                };
+                assert_ne!(
+                    titled.trim(),
+                    impl_.trim(),
+                    "rule {} declares as_titled == as_implemented. The fields exist to \
+                     record a gap between the published rule and the implemented check.",
+                    r.id
+                );
+                assert!(
+                    impl_.trim().len() > 40,
+                    "rule {} declares a token as_implemented",
+                    r.id
+                );
+            }
+
             let why = r.finds_nothing_because.as_deref().unwrap_or("").trim();
             assert!(
                 why.len() > 40,

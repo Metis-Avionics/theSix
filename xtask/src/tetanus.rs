@@ -115,6 +115,13 @@ struct Rule {
     /// nothing. See the assertion in `analyse` that requires it.
     #[serde(default)]
     finds_nothing_because: Option<String>,
+    /// The rule as the published Power of Ten states it, for a rule whose
+    /// implemented predicate measures something narrower. Required together with
+    /// `as_implemented` on any `mixed` rule, so the gap is stated in the contract
+    /// rather than discovered by a reader comparing `title` to the code.
+    as_titled: Option<String>,
+    /// What the predicate actually measures. See `as_titled`.
+    as_implemented: Option<String>,
 }
 
 /// One declared existing violation.
@@ -207,9 +214,17 @@ fn scan(rel: &str, file: &syn::File) -> Vec<Finding> {
         rel,
         out: &mut found,
     };
-    for item in &file.items {
-        v.item(item);
-    }
+    // Enter through the visitor, not by iterating `file.items` and calling an
+    // inherent `item` method. syn's `visit_item_mod` recurses into
+    // `visit_item`, so a `fn`, `static` or `#[cfg]` inside an inline `mod { .. }`
+    // was invisible to every rule that is dispatched from `item` -- rules 1, 2, 4,
+    // 8 and the `unsafe fn` clause of 9. Sixteen inline `mod` blocks exist in the
+    // scan set, thirteen of them `#[cfg(test)] mod tests`.
+    // `visit_file` visits `file.attrs` -- the `#![...]` inner attributes -- before
+    // its items, so entering through it is what makes rule 10 see crate-level
+    // suppressions at all. Iterating `file.items` and calling an inherent `item`
+    // method skipped them, and `src/lib.rs:9` alone silences fourteen lints.
+    syn::visit::visit_file(&mut v, file);
     found
 }
 
@@ -312,6 +327,16 @@ impl Scan<'_> {
 }
 
 impl<'ast> Visit<'ast> for Scan<'_> {
+    /// Route every item through `Scan::item`, whichever depth it sits at.
+    ///
+    /// Without this the visitor recursed through syn's default `visit_item`, which
+    /// never calls `Scan::item`, so rules 1, 2, 4 and 8 applied only to a file's
+    /// top-level items. A `#[cfg(test)] mod tests` containing a 200-statement
+    /// function was clean.
+    fn visit_item(&mut self, node: &'ast syn::Item) {
+        self.item(node);
+    }
+
     /// Rule 5: a `match` whose arms mix error classes with data classes. A
     /// function that returns `Result` in one arm and a bare value in another has
     /// no single answer to "did this succeed", which is the failure this rule is
@@ -319,13 +344,28 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     fn visit_expr_match(&mut self, node: &syn::ExprMatch) {
         {
             let at = line_col_of(&node.expr);
-            let data = node.arms.iter().filter(|a| arm_returns_value(a)).count();
-            let error = node.arms.iter().filter(|a| arm_returns_result(a)).count();
+            // Classify an arm into exactly one bucket. The previous version counted
+            // `arm_returns_value` and `arm_returns_result` independently, and both
+            // matched `Ok(x)`, so a match whose arms were *all* `Result` was
+            // reported as mixing them -- `src/control/cachelito.rs:29` read
+            // "mixes 7 value arm(s) with 7 result arm(s)" for seven `Ok`/`Err`
+            // arms over `EntryStateAtomic`. A baseline justifying 24 sites as
+            // "error and data share a validation path" was justifying matches that
+            // mix nothing.
+            let mut data = 0usize;
+            let mut error = 0usize;
+            for arm in &node.arms {
+                if arm_returns_result(arm) {
+                    error += 1;
+                } else if arm_returns_value(arm) {
+                    data += 1;
+                }
+            }
             if data > 0 && error > 0 {
                 self.push_at(
                     5,
                     at,
-                    format!("match mixes {data} value arm(s) with {error} result arm(s)"),
+                    format!("match mixes {data} data arm(s) with {error} result arm(s)"),
                 );
             }
         }
@@ -432,6 +472,17 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     fn visit_type(&mut self, node: &syn::Type) {
         let detail = match node {
             syn::Type::TraitObject(_) => Some(format!("bare trait object `{}`", print_type(node))),
+            // The rule is titled "no dynamic dispatch AND no bare function
+            // pointers", and the second clause was unhandled: `syn::Type::BareFn`
+            // fell to `_ => None`. No bare `fn(..)` type exists in the scan set
+            // today, so this changes no count -- it makes the title true. Found by
+            // mutation-testing the clause against `-> fn(u32) -> u32`, `f: fn(u32)
+            // -> u32`, and a struct field, all of which produced zero findings.
+            syn::Type::BareFn(_) => Some(format!(
+                "bare function pointer `{}`: an indirect call the compiler cannot \
+                 inline or devirtualise",
+                print_type(node)
+            )),
             syn::Type::Path(p) => p
                 .path
                 .segments
@@ -499,6 +550,18 @@ fn item_attrs(item: &syn::Item) -> Option<&syn::Attribute> {
         syn::Item::Enum(e) => &e.attrs,
         syn::Item::Trait(t) => &t.attrs,
         syn::Item::Impl(i) => &i.attrs,
+        // A `#[cfg]` on a `use` gates the item it re-exports. Seven of the
+        // crate's feature-gated public re-exports sit on `use` declarations --
+        // `#[cfg(feature = "redis")] pub use l3_redis::L3RedisBackend;` and five
+        // like it -- so the whole conditional surface of the public API was
+        // unreported while the rule claimed to be measuring it.
+        syn::Item::Use(u) => &u.attrs,
+        syn::Item::Const(c) => &c.attrs,
+        syn::Item::Static(s) => &s.attrs,
+        syn::Item::Type(t) => &t.attrs,
+        syn::Item::Union(u) => &u.attrs,
+        syn::Item::Macro(m) => &m.attrs,
+        syn::Item::ForeignMod(f) => &f.attrs,
         _ => return None,
     };
     attrs.iter().find(|a| {
@@ -1087,6 +1150,31 @@ fn analyse(root: &Path) -> Report {
             if baselined.contains(&r.id) {
                 continue;
             }
+            // A rule that says what it is titled and what it measures must say
+            // both, and must not have them agree -- a rule whose title and
+            // predicate are the same needs neither field.
+            match (&r.as_titled, &r.as_implemented) {
+                (Some(t), Some(i)) if t.trim() == i.trim() => {
+                    clean = false;
+                    lines.push(format!(
+                        "  rule {} declares `as_titled` and `as_implemented` as the same \
+                         text. The fields exist to record a gap; identical text means \
+                         either the predicate is narrower than the title and this has \
+                         been papered over, or the fields are noise.",
+                        r.id
+                    ));
+                }
+                (Some(_), None) | (None, Some(_)) => {
+                    clean = false;
+                    lines.push(format!(
+                        "  rule {} declares only one of `as_titled` and `as_implemented`. \
+                         Both are needed: one is what the rule forbids and one is what \
+                         the checker measures.",
+                        r.id
+                    ));
+                }
+                _ => {}
+            }
             let why = r.finds_nothing_because.as_deref().unwrap_or("").trim();
             if why.len() <= 40 {
                 clean = false;
@@ -1278,9 +1366,16 @@ pub fn bless(root: &Path, prune: bool) -> Result<(), String> {
 
     let mut added = 0usize;
     let mut out = String::new();
+    // `have` is the baseline as it was before this pass, and it is not extended as
+    // entries are written. A key that appears twice in `verdict.findings` -- two
+    // findings of the same rule on one line, which rule 3's `.join()` plus
+    // `format!` produces and rule 10's double crate-level pass produced -- was
+    // therefore appended twice, and the gate then failed its own duplicate check.
+    // Extending the set as we go makes the key the identity it is documented to be.
+    let mut have = have;
     for f in &verdict.findings {
         let key = (f.rule, f.location.clone());
-        if have.contains(&key) {
+        if !have.insert(key) {
             continue;
         }
         let Some(rule) = by_id.get(&f.rule) else {
@@ -1576,26 +1671,57 @@ mod tests {
         let p = s.file("pub fn f(b: bool) -> u32 { if b { return 1; } else { 2 } }\n");
         assert!(
             rules_of(&p).contains(&7),
-            "a `return` beside a value is check-then-act"
+            "one branch diverges and the other yields, so whether a value exists \
+             depends on control flow"
         );
     }
 
+    /// What rule 7 actually is, stated as a test so the title cannot drift from it.
+    ///
+    /// The rule is titled "no check-then-act" and is described as TOCTOU, and the
+    /// previous version of this test asserted `if b { return 1 } else { 2 }` was
+    /// check-then-act. It is not: `b` is the check, and nothing acts on it. The
+    /// predicate's whole input is the last statement of two branch blocks, so it
+    /// cannot compare a check against a later act even in principle -- mutation
+    /// testing confirms `let n = v.len(); if n > 0 { v[n-1] } else { 0 }`, a real
+    /// TOCTOU, produces nothing.
+    ///
+    /// So the test now names what is detected, and the shape that is *missed* is
+    /// pinned as a known limit rather than left to be discovered.
     #[test]
-    fn rule_7_accepts_an_if_with_no_diverging_branch() {
+    fn rule_7_does_not_claim_to_detect_toctou() {
         let s = Scratch::new();
-        let p = s.file("pub fn f(b: bool) -> u32 { if b { 1 } else { 2 } }\n");
-        assert!(!rules_of(&p).contains(&7));
+        let toctou = s.file(
+            "pub fn g(v: &[u32]) -> u32 {\n    let n = v.len();\n    if n > 0 { v[n - 1] } else { 0 }\n}\n",
+        );
+        assert!(
+            !rules_of(&toctou).contains(&7),
+            "a check and a later act on the same object is the rule as titled, and \
+             the predicate cannot see it. If this now fires, the rule detects TOCTOU \
+             and `finds_nothing_because` in tetanus.toml must be rewritten to say so."
+        );
     }
 
-    /// The false positive this rule is deliberately allowed to miss. Documented as
-    /// a test so the omission stays a decision rather than becoming a bug.
+    /// The `_ => (false, true)` else arm is unreachable, and this pins why.
+    ///
+    /// `Expr::If`'s `else_branch` is only ever a block, another `if`, or -- in a
+    /// statement position -- a diverging expression. The `_` arm assumed such an
+    /// else yields, which would misreport `if c { return 1 } else return 2` as
+    /// "one branch diverges and the other yields" when both return. That shape
+    /// turns out not to reach the predicate: with a block else, both branches
+    /// diverge, so neither disjunct of
+    /// `(then_diverges && else_yields) || (else_diverges && then_yields)` holds and
+    /// nothing is reported. The arm is kept as a defensive default rather than
+    /// deleted, because a hand-written parser change could make it reachable and a
+    /// missing arm would report every else-branch as non-diverging.
     #[test]
-    fn rule_7_ignores_a_bare_early_return() {
+    fn rule_7_does_not_report_two_diverging_branches() {
         let s = Scratch::new();
-        let p = s.file("pub fn f(b: bool) -> u32 { if b { return 1; } 2 }\n");
+        let p = s.file("pub fn f(c: bool) -> u32 { if c { return 1; } else { return 2 } }\n");
         assert!(
             !rules_of(&p).contains(&7),
-            "an implicit else is out of scope by design"
+            "both branches return, so the function is total and there is no \
+             check-then-act to report"
         );
     }
 
@@ -1666,6 +1792,8 @@ mod tests {
                     disposition: Disposition::Gated,
                     review_artifact: None,
                     finds_nothing_because: None,
+                    as_titled: None,
+                    as_implemented: None,
                 })
                 .collect(),
             baseline: Vec::new(),

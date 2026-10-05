@@ -2093,3 +2093,196 @@ that it exists for out-of-tree introspection and is not load-bearing. If the sec
 say so in the trait, because today a reader cannot tell which it is."""
 rationale = """Not resolved. Low severity, but a required trait method nobody calls is the
 kind of thing that is cheap to decide now and expensive to change after release."""
+
+[[bug]]
+id = "B30"
+title = "TETANUS rules 1, 2, 4 and 8 never fired inside an inline `mod` block"
+severity = "should-fix"
+status = "resolved"
+blocks_merge = false
+verified = true
+locations = ["xtask/src/tetanus.rs", "tests/contract/tetanus.rs"]
+violates = ["verification_required = true"]
+source = "mutation testing of the TETANUS gate itself, after the gate went green"
+summary = """`scan()` iterated `file.items` and called an inherent `Scan::item` method on each.
+syn's `visit_file` calls `v.visit_item(...)`, and `Scan` did not override `visit_item`,
+so an item nested inside `mod { .. }` never reached `Scan::item`. Every rule dispatched
+from there was blind to it: rules 1, 2, 4, 8, and the `unsafe fn` clause of rule 9.
+
+Mutation testing, planting each violation at top level and inside a `mod`:
+
+| rule | top level | inside `mod` |
+|---|---|---|
+| 1 recursion | detected | **not detected** |
+| 2 unbounded loop | detected | **not detected** |
+| 8 `#[cfg]` on a fn | detected | **not detected** |
+
+Sixteen inline `mod` blocks exist in the scan set, thirteen of them `#[cfg(test)] mod
+tests`. So a 200-statement test function was invisible to rule 4, and every recursive
+helper written inside a test module was invisible to rule 1."""
+why_the_order_is_what_it_is = """The gate was green and passing mutation tests before this was found, because
+every mutation was planted at the end of a top-level file. A test that plants a
+violation inside a `mod` is the only thing that reaches it, and no such test existed."""
+required_fix = """`scan()` now calls `syn::visit::visit_file`, and `Scan` overrides `visit_item` to
+route every item through `Scan::item` at whatever depth it sits. Rule 2's count went
+from 108 to 122 and rule 10's from 17 to 34, both entirely from code inside `mod`
+blocks that had been unscanned the whole time."""
+rationale = """Resolved in the same PR that found it. The regression tests plant the same
+violation at top level and inside a `mod` and require both to be detected."""
+residual_risk = """`impl` blocks are still not dispatched to `Scan::item`, because
+`visit_impl_item_fn` is a different trait method. No rule depends on it today, and
+adding it without a finding to justify it would be speculative."""
+
+[[bug]]
+id = "B31"
+title = "TETANUS rule 5 counted every Result-returning arm as both data and error, inventing 11 violations"
+severity = "should-fix"
+status = "resolved"
+blocks_merge = false
+verified = true
+locations = ["xtask/src/tetanus.rs", "tetanus.toml"]
+violates = []
+source = "own audit, after an independent read of the rule-5 baseline found one reason asserting something false"
+summary = """`arm_returns_value` returned true for any arm that was not a diverging expression,
+which includes every `Ok(x)` and `Err(e)` arm. `arm_returns_result` also matched those
+same arms. A match whose arms were *all* `Result` was therefore counted in both buckets
+and reported as mixing them:
+
+    src/control/cachelito.rs:29  match mixes 7 value arm(s) with 7 result arm(s)
+
+That match has seven arms, every one `Ok(EntryStateAtomic::..)` or `Err(())`, over a
+`TryFrom<u8>`. Nothing is mixed. Of the 24 baselined rule-5 sites, at least 11 were of
+this form, and every one carried a justification reading "error and data share a
+validation path" -- justifying matches that mix nothing."""
+why_the_order_is_what_it_is = """The two predicates were written to be independently checkable, which is a
+reasonable instinct and is what let them overlap. A baseline cannot catch this on its
+own: the gate compares location sets, so a false positive that is baselined is
+indistinguishable from a true one."""
+required_fix = """The classification is now exclusive -- `arm_returns_result` first, then
+`arm_returns_value` -- so an arm lands in exactly one bucket. Rule 5 fell from 24
+findings to 13, and the finding text now says "data arm(s)" rather than "value arm(s)",
+which is what the clause is about. Each surviving site's justification was re-read
+against the code it points at."""
+rationale = """Resolved in the same PR. The 11 dropped entries needed no replacement."""
+residual_risk = """`arm_returns_value` still treats any non-diverging arm as a data arm, so a
+match of all-`Some` patterns reads as 2 data arms and 0 result arms, which is right. A
+match mixing `Ok(..)` and a bare value is a genuine finding and is still reported."""
+
+[[bug]]
+id = "B32"
+title = "TETANUS rule 7 is titled no-check-then-act and cannot detect check-then-act"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["xtask/src/tetanus.rs", "tetanus.toml"]
+violates = []
+source = "mutation testing of the TETANUS gate itself; the predicate was compared against the rule title"
+summary = """Rule 7 is titled "no check-then-act: a check must not be separated from the act it
+guards", which is time-of-check-to-time-of-use. The implemented predicate cannot detect
+that and never could. Its entire input is the last statement of two branch blocks plus
+the syntactic form of the `else`. It never reads the condition, never reads a `let`
+binding, and never compares identifiers appearing in two statements -- which is what
+detecting TOCTOU requires.
+
+What it detects is narrower: an `if` with an explicit `else`, where one branch's final
+statement is `return`/`break`/`panic!` and the other's is a trailing expression without
+a semicolon. That is an early-return idiom, not a race.
+
+Mutation testing confirms it from the other side:
+
+    let n = v.len();
+    if n > 0 { v[n - 1] } else { 0 }
+
+is a real TOCTOU on one buffer -- the length is read, the index derived from it is used,
+nothing stops the buffer shrinking in between -- and produces no finding."""
+why_the_order_is_what_it_is = """The previous `finds_nothing_because` gave the zero a different cause, and
+both of its claims were true while neither was the reason. It said the crate uses `?`
+and `let-else` rather than divergent conditionals, so the shape does not occur. But `?`
+parses as `syn::Expr::Try` and `let-else` as a `Stmt::Local`, so syn never routes either
+to `visit_expr_if` at all -- the two idioms named as the explanation are structurally
+invisible to this predicate whether or not this crate uses them. The zero is a property
+of the analyzer, not of the house style, and the old text presented it as the opposite."""
+required_fix = """Two options, and the first is honest today. (a) Rename the rule to what it
+measures -- "a conditional must not leave one branch diverging while the other yields" --
+and treat TOCTOU as covered by the concurrency layer, which is where B19 and B22 live.
+(b) Implement flow sensitivity: bind the operands a check reads and require every
+subsuming access to re-read them, which is a real dataflow analysis and not a predicate.
+
+Either way `finds_nothing_because` is rewritten to describe the limitation rather than a
+clean bill of health, `as_titled` and `as_implemented` are declared and required to
+differ, and the missed shape is pinned as a test."""
+rationale = """The contract and test layers are fixed in this PR. The rename or the
+dataflow analysis is not, because both change what the standard claims, which is a
+decision rather than a fix."""
+residual_risk = """Rule 7 is gated with zero findings and a prose justification, so the whole
+ratchet for that rule rests on a string no gate verifies. `rule_7_does_not_claim_to_
+detect_toctou` now pins the known miss, which means a future improvement to the predicate
+shows up as a failing test rather than as a silent change in what the rule measures.
+"""
+
+[[bug]]
+id = "B33"
+title = "TETANUS rule 9 was titled as covering bare function pointers and checked none"
+severity = "should-fix"
+status = "resolved"
+blocks_merge = false
+verified = true
+locations = ["xtask/src/tetanus.rs", "tetanus.toml"]
+violates = []
+source = "mutation testing of the TETANUS gate itself, sub-clause by sub-clause"
+summary = """The rule is titled "no dynamic dispatch and no bare function pointers". The
+predicate matched `syn::Type::TraitObject` and `Box<dyn ..>`. `syn::Type::BareFn` fell to
+`_ => None`, so the second half of the title was not measured at all.
+
+Mutation testing, one shape at a time:
+
+| shape | before |
+|---|---|
+| `fn f(x: &dyn Trait)` | +1 |
+| `fn f() -> Box<dyn Trait>` | +2 |
+| `fn f() -> fn(u32) -> u32` | **+0** |
+| `fn f(cb: fn(u32) -> u32)` | **+0** |
+| `struct S { cb: fn(u32) -> u32 }` | **+0** |
+
+No bare `fn(..)` type exists anywhere in the scan set, so the count of 89 was correct by
+accident rather than by measurement."""
+required_fix = """A `BareFn` arm was added. The reported count stays 89, which is the
+correct answer for a different reason than before: there is genuinely nothing to find.
+`tests/contract/tetanus.rs` asserts that every rule title's clauses are reachable, so a
+title naming a shape the matcher ignores now fails rather than reading as covered."""
+rationale = """Resolved in the same PR. Zero behaviour change and one fewer gap between
+a title and a predicate."""
+
+[[bug]]
+id = "B34"
+title = "TETANUS rule 10 could not see crate-level #![allow], including the widest suppression in the crate"
+severity = "should-fix"
+status = "resolved"
+blocks_merge = false
+verified = true
+locations = ["xtask/src/tetanus.rs", "tetanus.toml"]
+violates = []
+source = "mutation testing of the TETANUS gate itself; found in the same read that found B30"
+summary = """Rule 10 is titled "warnings are errors, and every suppression must say what
+it is suppressing". `scan()` iterated `file.items` and called an inherent method per item,
+so it never visited `syn::File::attrs`, which is where `#![...]` inner attributes live.
+Every crate-level suppression was invisible.
+
+The widest suppressions in the crate are exactly those. `src/lib.rs:9` alone silences
+fourteen lints:
+
+    #![allow(clippy::unused_async, clippy::missing_errors_doc, ... fourteen)]
+
+and `src/lib.rs:27` two more. Seventeen crate-level suppressions across `src/`,
+`testkit/`, `tests/` and `benches/` were unreported, against 17 item-level ones that
+were."""
+why_the_order_is_what_it_is = """Fixed by B30's fix rather than separately: entering through
+`syn::visit::visit_file` visits `file.attrs` before its items, so the one-line change
+that made rules 1, 2, 4 and 8 recurse also made rule 10 see the crate root. The first
+attempt added an explicit `crate_attrs` pass and was reverted -- it double-counted, which
+the gate's own duplicate-key check caught."""
+required_fix = """Already fixed by the B30 change. Rule 10's count went from 17 to 34."""
+rationale = """Resolved in the same PR that found it."""
+residual_risk = """None known. `#![allow]` is now reached through syn's own visitor rather
+than a hand-rolled pass, so it cannot drift out of sync with the file structure."""
