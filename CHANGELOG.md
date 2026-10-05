@@ -98,7 +98,7 @@ three more things underneath it that had never run either.
 - A `bash -n` lint over every `run:` block, with a regression test that feeds B7's
   exact stray `done` through the same path and requires it to be caught.
 - `testkit::coverage::INVARIANT_PROOFS` and `[[verification.invariant_waiver]]`:
-  all 95 declared invariants bound to a proving test (94) or waived with a stated
+  all 140 declared invariants bound to a proving test (139) or waived with a stated
   reason (1), checked for exact set equality. See the 0.4.0 section above for what
   changed the split.
 - A `Verification (all gates)` aggregator job, which is the single check branch

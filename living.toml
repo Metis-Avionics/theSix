@@ -1,5 +1,5 @@
 [handover]
-status = "backlog_closed_pending_b21_and_release"
+status = "proof_obligation_closed_pending_b21_and_release"
 phase = "release_0_4_0"
 last_updated = "2026-10-04T23:40:00+01:00"
 
@@ -146,6 +146,7 @@ decisions = [
     "`check` and `clippy` take --workspace. Both previously linted only the root package, so the gate runner and test harness were never covered, and four warnings had accumulated in xtask with no gate noticing. A gate that claims to cover the repository should ask the tool to cover the repository",
     "sccache stays in the committed .cargo/config.toml and CI installs it explicitly, rather than removing the wrapper. Local and CI should compile the same way, and the cache is worth having on the overlapping feature matrix. What changed is that the dependency is now declared in the file that needs it and in every job that uses it, instead of being inherited invisibly from a developer machine",
     "The six waived invariants are listed rather than quietly given proofs. Naming a test that does not exercise the clause would satisfy the gate and is exactly the over-promise this contract exists to prevent, so a visible waiver with a reason is the honest artefact",
+    "B23 widened the proof obligation to nine contract sections. verification.every_invariant_has_a_proof_or_waiver is declared and proven by the audit that enforces it, so the obligation is the one rule the system can no longer quietly exempt itself from. 45 clauses in [verification] and [engineering] were previously unbindable by any gate; 31 bound to tests that already existed and 14 needed new ones. Three engineering.design.* claims moved to a top-level [design] table outside the proof-bound set, because there is no mechanical form for them and a fake proof is worse than an admitted limit. 140 leaves, 139 proofs, 1 waiver",
     "CacheTier is async via #[async_trait], not native AFIT: the trait is held as Arc<dyn CacheTier<V>> and AFIT is not dyn-compatible",
     "The control plane stays SYNCHRONOUS. Cachelito is a pre-allocated sharded slot map whose acquire() returns an owned ControlSnapshot, so no shard guard is alive across an await. tests/await_safety.rs proves it rather than asserting it, and a companion test proves the watchdog would notice a block",
     "DashMap rejected for the control plane and for tier storage: it allocates after init (Rule 3) and its caller-chosen guard lifetime deadlocks a shard when held across an await - which is precisely the pattern the async trait makes possible",
@@ -173,7 +174,7 @@ decisions = [
 blockers = []
 
 [handover.next_agent]
-focus = "main is green at 99b4a5f with 21 of 22 findings resolved. Two things remain and only one of them is code. B21: main has no required status check, so every gate result in the 0.4.0 series is advisory; restoring it needs a token with effective Administration write and cannot be done from inside the repository. Release: 0.4.0 is unpublished, the last version on crates.io is 0.2.3, and cargo publish --dry-run has not been run against the final head. B16's concurrency.blocking_runtime_thread stays waived, with the waiver recording that the missing thing is a mechanism rather than a test -- spawn_blocking appears nowhere in src/ and the contract has no clause requiring one."
+focus = "main is green with 22 of 23 findings resolved; B21 is the only open one and it cannot be closed from inside the repository. The proof obligation is now real: verification.every_invariant_has_a_proof_or_waiver is declared in the contract and proven by the audit enforcing it, across nine sections and 140 leaves rather than seven and 95. What remains: B21 needs a token with effective Administration write, and 0.4.0 is unpublished with cargo publish --dry-run clean against the head before this work. concurrency.blocking_runtime_thread stays waived -- the missing thing is a mechanism, since spawn_blocking appears nowhere in src/ and the contract has no clause requiring one."
 tasks = [
     "B21 is the only open finding and it is not closable from here. It needs a token with effective Administration write; the available one can read and delete branch protection but its create/update calls return 404 despite reporting admin: true. Required check name is 'Verification (all gates)', GitHub Actions app id 15368, strict=true.",
     "Before publishing: run cargo publish --dry-run against the final head. 0.4.0 is a breaking release because tenant is now part of the key, which invalidates every previously cached key; the 0.4.0 release notes must say so.",

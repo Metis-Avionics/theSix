@@ -192,6 +192,8 @@ fn workflow() -> Workflow {
 
 #[test]
 fn every_declared_gate_is_executed_by_a_ci_job() {
+    testkit::proves!("engineering.unnecessary_dependencies");
+
     let gates = contract_gates();
     let jobs = contract_jobs();
     let covered: BTreeSet<String> = jobs.iter().flat_map(|j| j.covers.clone()).collect();
