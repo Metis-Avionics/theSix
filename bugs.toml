@@ -1676,3 +1676,207 @@ that silently wrote stale values into colder tiers under concurrency, and it
 red the only signal (`Performance + soak`) that would have caught it -- at a
 moment when `main` had no required status check to act on it (B21).
 """
+
+# ---------------------------------------------------------------------------
+# Re-audit of the external review, against 0d40e41
+# ---------------------------------------------------------------------------
+# PRs #5-#8 landed between the review being written and this re-audit, so the
+# review's claims were re-checked against the tree rather than copied. Two of its
+# eight claims are now wrong and are recorded here as closed-with-evidence rather
+# than carried forward as open work. The claims that still stand are B23-B28.
+
+[[bug]]
+id = "B23"
+title = "The `unit` gate ran no unit tests: 49 assertions inside src/ never executed"
+severity = "should-fix"
+status = "resolved"
+blocks_merge = false
+verified = true
+locations = ["theSix.toml", "xtask/src/gates.rs", "tests/contract/main.rs"]
+violates = ["verification_required = true"]
+source = "own re-audit of the external review, against 0d40e41"
+summary = """The gate named `unit` had argv
+
+    cargo nextest run ... --test integration --test hierarchy --test policy --test stampede
+
+`--test X` selects an integration-test binary and excludes the lib binary, so the 49
+`#[cfg(test)]` tests inside `src/` were compiled by `check` and `clippy` (both use
+`--all-targets`) and never run. testkit's 4 were in the same position. Nothing
+reported it, because the tests pass -- only a failure would have been visible, and
+there was no mechanism to produce one."""
+why_the_order_is_what_it_is = """Fixing this required a way to name the lib binary in the contract at all. `--lib` is
+not a `--test` flag and there is no path under `tests/` for the validator to check, so
+`lib` is now the one literal target name the runner maps to `--lib`, the contract
+validator resolves against `Cargo.toml` instead of `tests/`, and
+`every_declared_layer_is_bound_to_a_target` carries the same exception. Two of those
+three places needed editing, which is why this was not a one-line change to a filter."""
+required_fix = """`unit` targets now begin with `lib`; the gate runs 72 tests across 5 binaries,
+up from 23 across 4."""
+rationale = """Resolved in the same PR that found it. The fix is mechanical, the new tests
+pass, and the old invocation is recoverable from git history."""
+residual_risk = """`tests/loom` and any `#[cfg(test)]` in a workspace member with no gate naming
+it are still only reachable by hand. testkit's 4 inline tests are still unrun: no gate
+declares `-p testkit`. Recorded rather than fixed because adding a cross-crate test
+gate is a contract decision, not a fix."""
+
+[[bug]]
+id = "B24"
+title = "The contract CI job ran the validator, not the gate, so all of tests/contract was unrun"
+severity = "should-fix"
+status = "resolved"
+blocks_merge = false
+verified = true
+locations = [".github/workflows/ci.yml", "theSix.toml", "tests/contract/workflow.rs"]
+violates = ["verification_required = true"]
+source = "own re-audit of the external review, against 0d40e41"
+summary = """The `contract` job declared `covers = ["contract"]` and its steps were
+`cargo xtask contract` -- which parses theSix.toml and prints it -- plus
+`cargo xtask list`. The gate is `cargo xtask run contract`. `rg "xtask run contract"`
+matched nothing, on this branch and on `0d40e41` alike. All 56 assertions in
+`tests/contract` compiled, linted, and never executed in any CI run."""
+why_the_order_is_what_it_is = """This survived review because the assertion meant to catch it compares gate
+*names*. "contract" was present in a `covers` list, so it passed. The fix therefore had
+to come before the fix: the guard had to learn to resolve a `covers` entry against the
+job's actual `run:` blocks, or adding the missing CI step would have been the only
+change and the same class of defect would have recurred on the next gate."""
+required_fix = """The job now runs `cargo xtask run contract`, and
+`a_covering_job_actually_invokes_the_gate_it_claims_to_cover` requires each `covers`
+entry to be matched by either `cargo xtask run <gate>` or a nextest invocation naming
+the gate's own targets, with the matrix form resolved against `strategy.matrix` so the
+one job that runs ten gates is not rejected for naming none of them. Deleting the new
+step makes the assertion fail with the gate name and its targets; that is how it was
+verified."""
+rationale = """Both halves landed together: the assertion was written first, watched fail against
+the unfixed workflow, then the workflow was fixed and it went green."""
+residual_risk = """The new assertion matches invocation *text*. A job could in principle invoke the
+runner inside a script it generates, or under a different gate name, and still be
+correct. This is a heuristic on YAML, and it is a heuristic that has already caught
+one real hole."""
+
+[[bug]]
+id = "B25"
+title = "Nothing validates a bugs.toml `locations` entry; several are already wrong"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["xtask/src/gates.rs", "tests/contract/tetanus.rs"]
+violates = ["verification_required = true"]
+source = "external review, confirmed by own re-audit against 0d40e41"
+summary = """`BugEntry` in `xtask/src/gates.rs` declares id, title, status, blocks_merge,
+accepted_by and rationale. It does not declare `locations`, so the field is never read
+by anything. 65 entries across 26 findings cite locations; none is checked against the
+tree.
+
+The drift is not hypothetical. `bugs.toml` cites `src/manager.rs:853` for B1, which is
+now `Err(CacheError::Miss)`, and `src/manager.rs:94`, now a doc comment about `abort`.
+B3 and B5 both cite `src/control/cachelito.rs:106` for two different findings, and
+that line is now `address: KeyAddress,` inside `CommitToken`. They were stale relative
+to each other before this branch existed."""
+why_the_order_is_what_it_is = """A validator cannot be written before the field has a format. 42 of the 65 entries are
+not `file:line` at all -- they are symbolic (`src/manager.rs:IntentGuard`,
+`src/control/cachelito.rs:abort`) or bare paths (`.github/workflows/ci.yml`,
+`theSix.toml`). A straight port of the tetanus location check would fail on 42 of 65
+entries on the day it landed, which would make it a gate everyone immediately learns to
+skip."""
+required_fix = """Three stages, in order. (1) Canonicalise: parse `file[:line[:column]]`, reject
+anything else, and migrate the 42 symbolic entries to real coordinates. (2) Normalise:
+anchor each location to a symbol as well as a line, so a line drift becomes a re-anchor
+rather than a wrong pointer. (3) Validate: assert the file exists and the line is in
+range, first in `merge_readiness`, then in its own gate.
+
+Stage (1) is the blocker and is not done. The tetanus baseline already has (3) applied
+to itself, which is where the technique was proven, and it fired four times during this
+branch -- once per edit to a scanned file. That is the cost of line-keyed locations
+being paid in public, four times, rather than silently in a tracker nobody reads."""
+rationale = """Not resolved. Only stage (3) exists, and only for `tetanus.toml`."""
+
+[[bug]]
+id = "B26"
+title = "Cachelito::prepare's expected_generation is passed None at all 42 call sites, so its StaleGeneration arm is dead"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["src/control/cachelito.rs", "src/manager.rs"]
+violates = []
+source = "own re-audit -- the external review made the opposite claim"
+summary = """The review claimed `prepare` takes no generation, nonce or ownership token. That
+is wrong: `prepare` takes `expected_generation: Option<Generation>` and returns a
+four-field `CommitToken`, and `commit` refuses a token whose generation is stale or
+whose entry is no longer `Prepared`. The commit-side defence is real and correct.
+
+What the review did not find is that `expected_generation` is `None` at all 42 call
+sites in the repository, including both production ones. The `StaleGeneration` arm of
+`prepare` -- cachelito.rs:989-996 -- is therefore unreachable: no test and no production
+path exercises it. The protocol's protection against a stale prepare rests entirely on
+the `commit`-side `expired_by` check, which is a different mechanism at a different
+time."""
+why_the_order_is_what_it_is = """Passing a real generation at the two production sites changes when `set` fails,
+which is a behavioural change to the write path and not a mechanical fix. It is also
+the only way the arm gets covered: an assertion about an arm no caller can reach
+proves nothing about it."""
+required_fix = """Decide per call site whether `prepare` should demand the generation the caller
+read, or whether the parameter should be removed as a defence that nothing uses and
+nothing tests. Both are defensible; leaving it is not, because a parameter that cannot
+be non-`None` is not a check."""
+rationale = """Not resolved. Needs a behavioural decision on the write path first."""
+
+[[bug]]
+id = "B27"
+title = "The Loom model is not the real Cachelito and diverges where abort is concerned"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["tests/loom/main.rs", "src/control/cachelito.rs"]
+violates = []
+source = "external review, confirmed by own re-audit against 0d40e41"
+summary = """`tests/loom/main.rs` models a hand-written miniature, not `Cachelito`. Five
+divergences: the model locks `loom::sync::Mutex` where the code locks
+`std::sync::Mutex`; the model has four states where `EntryState` has six; and, most
+seriously, the model's `abort` restores `ABSENT` while `abort_inner` sets `Failed` and
+increments the generation. The model's stale-token test exercises a transition the real
+abort no longer performs."""
+why_the_order_is_what_it_is = """The divergence is unavoidable in the first place: loom cannot intercept
+`std::sync::Mutex` or `std::sync::atomic`, which is the whole reason a model exists.
+And it is disclosed -- `tests/loom/main.rs:33-43` states exactly what is modelled and
+why, `theSix.toml` lists `loom_excludes`, and `cachelito.rs:1124-1129` records that a
+model of this shape once found a real bug. The review was right that loom cannot
+regression-guard the real type and wrong to imply it is pretending to."""
+required_fix = """Either make the model's `abort` match `abort_inner` (state and generation) and
+add a case covering `Failed` -> `Ready`, or state in the model's own doc comment that
+`abort` is out of scope, so the next reader does not have to diff both files to learn
+it. The second is much cheaper and is the honest minimum."""
+rationale = """Not resolved. The disclosure is good; the divergence in `abort` is the part that
+would mislead."""
+
+[[bug]]
+id = "B28"
+title = "CacheTier::tier_id is a required trait method with zero production callers"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["src/tier/trait.rs", "src/manager.rs"]
+violates = []
+source = "external review, refined by own re-audit against 0d40e41"
+summary = """`CacheTier::tier_id` is a *required* method with no default. Eleven
+implementations exist across `src/`, and every one returns a constant. `rg
+"\\.tier_id\\(\\)"` finds zero call sites under `src/`, `xtask/` or `benches/`; the only
+invocations in the crate are two test assertions and nine pass-through delegations in
+testkit.
+
+`CacheManager` derives rung identity positionally instead, from
+`tiers.get(tier_id.as_usize())`."""
+why_the_order_is_what_it_is = """The review called it dead code. It is not dead in the compiler's sense -- it is
+public API on a public trait, re-exported from `src/lib.rs`, and asserted by two tests
+-- so removing it is an API break and not a cleanup. But a required method that no
+production code calls means every implementor outside this crate is made to write a
+method the framework never asks for, and there is nothing stopping the returned value
+from disagreeing with the position the manager actually uses."""
+required_fix = """Either give it a default derived from `capability()`-style data, or document
+that it exists for out-of-tree introspection and is not load-bearing. If the second,
+say so in the trait, because today a reader cannot tell which it is."""
+rationale = """Not resolved. Low severity, but a required trait method nobody calls is the
+kind of thing that is cheap to decide now and expensive to change after release."""

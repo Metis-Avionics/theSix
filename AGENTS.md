@@ -73,9 +73,13 @@ cannot be deleted — or downgraded to dodge the check — without editing the
 contract. A finding clears only by being `resolved` with a `rationale`, or
 `accepted-risk` with both `accepted_by` and `rationale`.
 
-Order matters: fmt → contract → authorship → xtask_unit → check → clippy → doc →
-tests → doctest → deny → machete → package → merge_readiness. `loom`,
+Order matters: fmt → contract → authorship → xtask_unit → check → clippy → tetanus →
+doc → tests → doctest → deny → machete → package → merge_readiness. `loom`,
 `performance`, `soak` and `fuzz` are deferred.
+
+`tetanus` runs after `clippy` because rule 10 is a lint rule: a baseline shift
+caused by a lint change should surface as a gate failure rather than as an
+unexplained edit to a data file.
 
 `authorship` is the second-cheapest gate and runs early because it judges the
 change under review, not the branch. It reads every commit message in the
@@ -195,12 +199,46 @@ tenant `a` + key `bc`. An oversized frame is **rejected, not truncated**.
 part of the key. **This invalidates every existing cached key** — see the 0.4.0
 release notes.
 
+## TETANUS — the Power of Ten as a ratchet
+
+`tetanus.toml` declares all ten rules from Holzmann's rules
+(<https://spinroot.com/p10/>). `cargo xtask run tetanus` is a mandatory gate.
+
+**The Rust mapping is this repository's own and carries no endorsement from
+Holzmann or JPL.** The source is cited so the derivation can be checked, not so
+the rules can be attributed.
+
+* **`gated`** rules compare findings against `[[baseline]]` by exact `(rule,
+  location)` set equality **in both directions**. A new violation fails; a
+  justification cannot outlive the code it describes.
+* **`reported`** rules are counted and printed, never baselined. Rules 3 and 9
+  have 1011 and 89 sites. 1100 entries repeating one sentence would make the count
+  the only thing anyone read, which is the failure mode a baseline exists to
+  prevent.
+* A gated rule that finds **nothing** must say why in `finds_nothing_because`.
+  Both the gate and `tests/contract/tetanus.rs` require it. A rule that finds zero
+  sites without saying why reads as a check that ran rather than a check with
+  nothing to say.
+* `check` is one of `mechanical`, `review`, `mixed`. A `review` or `mixed` rule
+  must name a `review_artifact`; a `mechanical` rule must name none. The
+  undecidable part of a mixed rule is recorded somewhere a human reads.
+* Editing any scanned Rust file **moves its own baseline entries**. Run
+  `cargo xtask bless --prune`, which is explicit, prints every removal, and
+  refuses an empty scan. Line numbers are not stable identifiers — see B25 for
+  what that costs in `bugs.toml`, where nothing checks it at all.
+
+Two drafts in this gate's first week were wrong in ways the contract layer caught:
+rule 3 detected nothing while declaring a clean crate that allocates 1011 times,
+and rule 8 reported `#[derive]` and `#[doc]` as conditional compilation, which is
+490 of its 493 original sites. `tests/contract/tetanus.rs` exists so that the
+second one cannot happen again.
+
 ## Test layers
 
 | Layer | Target | Demonstrates |
 |---|---|---|
 | contract | `tests/contract` | The TOML is load-bearing |
-| unit | `integration` `hierarchy` `policy` `stampede` | Core behaviour |
+| unit | `lib` `integration` `hierarchy` `policy` `stampede` | Core behaviour |
 | negative | `negative` | 21 failure modes, each by resulting state |
 | fault_injection | `fault_injection` | 12 faults, each proven to fire |
 | property | `property` | 9 invariants, randomised with shrinking |

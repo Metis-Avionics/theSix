@@ -167,10 +167,61 @@ decisions = [
     "The authorship gate's rule is on the trailer KEY and never reads the value. That is what makes it usable: a trailer attributing nobody is still a trailer, and the gate caught this repository's own history, including one written by habit while committing the fix. Fixtures set an explicit committer identity via -c user.name/-c user.email, because --author sets only the author and the committer was otherwise inherited from the host's global git config - which is why the suite passed locally and failed on the runner",
     "A gate is not done when it passes locally. The authorship fixtures failed only in CI, and the helper discarded stderr, so the failure said `git commit failed` and nothing else. The helper now reports stderr, on the same reasoning as B8: a check whose failure mode is silent is not a check",
     "Caching gate verdicts was considered and rejected. A replayed verdict is the B5 defect one level up - something that reads as the gate without being it - and it would make a 54s matrix unauditable. The gate matrix is already dominated by loom (27.6s of 54s), not by test execution (~5s for 263 tests), so there is no test-level speedup to buy",
+    "TETANUS is a ratchet, not a rewrite. Rules 1, 2, 4, 5, 6, 7, 8 and 10 are gated by exact (rule, location) set equality in both directions, so a new violation fails and a justification cannot outlive the code it describes. Rules 3 and 9 are `reported`, not gated, at 1011 and 89 sites: baselining 1100 entries repeating one sentence would make the count the only thing ever read, which is the failure mode a baseline exists to prevent. The Rust mapping of the Power of Ten is this repository's own and is not endorsed by Holzmann or JPL; the source is cited and the divergence is declared in [meta].note rather than left for a reader to discover",
+    "A rule that finds zero sites must say why in `finds_nothing_because`, enforced by both the gate and tests/contract. Rule 7 is gated and finds nothing because this crate uses `?` rather than divergent conditionals; without the field it would read as a check that ran rather than a check with nothing to say. The first draft of rule 3 had exactly this defect -- declared, detecting nothing, and reporting a clean crate that allocates 1011 times",
+    "Rule 8 matches only cfg and cfg_attr. An early version matched the first attribute of any kind and reported derive and doc as conditional compilation: 490 of 493 sites were false positives, and the count fell to 24 once the predicate was the set of attributes that can actually remove code from a build",
+    "A `covers` entry in the contract is an invocation, not a label. `every_declared_gate_is_executed_by_a_ci_job` compares gate names and passed for a job that ran `cargo xtask contract` -- a validator that prints -- while claiming to cover the `contract` gate, so 56 assertions never executed. The new `a_covering_job_actually_invokes_the_gate_it_claims_to_cover` resolves each entry against the job's actual run: blocks, accepting `cargo xtask run <gate>`, a nextest invocation naming the gate's targets, or the matrix form resolved against strategy.matrix. It is a heuristic on YAML, and it has already caught one real hole",
+    "`lib` is a gate target and is not a path. --test X selects an integration binary and excludes the lib binary, so the gate named `unit` ran four integration targets and none of the 49 tests inside src/. That is the same class of defect as a gate that reports a pass over nothing: the name was right and the coverage was not",
     "Versions are 0.3.0 (PR2) and 0.4.0 (PR3), not 1.0.0 and 2.0.0. The published version is 0.2.3, and a pre-1.0 crate signals breaking changes by bumping the minor rather than the major. Labelling these 1.0.0 and 2.0.0 would have claimed API stability twice over - once for a release that invalidates every cached key, and again on the next breaking change - and the major numbers would have carried no information a consumer could act on. 0.x keeps the promise honest and leaves 1.0.0 meaning something",
 ]
 
 blockers = []
+
+[handover.open_decisions]
+note = """These are decisions, not bugs. Nothing here is a defect, nothing here blocks
+merge, and each one changes what the contract claims. They are listed because a
+decision made silently in a commit message is indistinguishable from a decision
+nobody made."""
+
+[[handover.open_decisions.item]]
+id = "D1"
+question = "Rule 3: ratchet at 1011 sites, or satisfy it by breaking the API?"
+options = [
+    "Leave it `reported`. The number stays visible and the ratchet keeps whatever is added next.",
+    "Pursue `.kilo/plans/1789334873419-tetanus-rule3-plan.md`: a MemoryPool<V> slab and KeyRef<'_> keys, so no set/get/invalidate allocates after init. Public API break.",
+    "Middle: keep the public API and add the pool behind it, accepting that the allocation is still there and only the count of *rung-level* allocations falls.",
+]
+recommendation = "Leave it reported. The plan is a real option and it is not this gate's to settle; the cost is a semver-major redesign of every key-accepting signature, for a crate whose stated purpose is a cache where some allocations are the point."
+blocks = "nothing; it is a policy choice about what the crate claims"
+
+[[handover.open_decisions.item]]
+id = "D2"
+question = "Rule 9: 89 dynamic-dispatch sites. Same shape as D1, cheaper to answer."
+options = [
+    "Leave it `reported`.",
+    "Genuine devirtualisation: monomorphise the ladder over a concrete tier type, at the cost of the Arc<dyn CacheTier<V>> erasure the whole architecture rests on.",
+    "Narrow the clause to first-party dynamic dispatch and exempt the vtable that implements the trait, on the grounds that a crate with a tier trait has one vtable by construction.",
+]
+recommendation = "Narrow the clause. 89 of 89 sites are the tier trait's own vtable plus async_trait boxing, so the rule as written is unsatisfiable by any crate with this architecture. Recording that is more honest than baselining 89 entries to say so."
+blocks = "nothing"
+
+[[handover.open_decisions.item]]
+id = "D3"
+question = "B21: main has no required status check. Restore it?"
+recommendation = """Yes, as soon as this branch's workflow is on main. Until then every gate
+result in the series is advisory. Needs a token with effective Administration write;
+this is the one item on the list that is not a code change."""
+blocks = "nothing in this repository; needs a token"
+
+[[handover.open_decisions.item]]
+id = "D4"
+question = "B26: prepare's expected_generation is None at all 42 call sites. Enforce it or delete it?"
+options = [
+    "Pass the generation the caller read at both production sites, which makes StaleGeneration reachable and changes when `set` fails.",
+    "Remove the parameter. The commit-side `expired_by` check is the real defence and it is tested; a parameter no caller can use is not a check.",
+]
+recommendation = "Remove it. The commit-side check already prevents the stale commit, which is the harm the review was worried about. Keeping an unreachable precondition makes the protocol look defended in two places when it is defended in one."
+blocks = "a behavioural decision on the write path"
 
 [handover.next_agent]
 focus = "main is green at 99b4a5f with 21 of 22 findings resolved. Two things remain and only one of them is code. B21: main has no required status check, so every gate result in the 0.4.0 series is advisory; restoring it needs a token with effective Administration write and cannot be done from inside the repository. Release: 0.4.0 is unpublished, the last version on crates.io is 0.2.3, and cargo publish --dry-run has not been run against the final head. B16's concurrency.blocking_runtime_thread stays waived, with the waiver recording that the missing thing is a mechanism rather than a test -- spawn_blocking appears nowhere in src/ and the contract has no clause requiring one."

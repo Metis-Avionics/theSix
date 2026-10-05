@@ -1,5 +1,36 @@
 # CHANGELOG
 
+## Unreleased — TETANUS gate, and 106 tests that were not running
+
+### Added
+
+- **`cargo xtask run tetanus`**: all ten rules from Holzmann's Power of Ten
+  (<https://spinroot.com/p10/>) as a mandatory gate. Eight are gated by exact
+  `(rule, location)` set equality in both directions; two are counted and reported.
+  The Rust mapping is this repository's own and carries no endorsement from Holzmann
+  or JPL. `tetanus.toml` is the standard and is the source of truth, in the same
+  sense `theSix.toml` is.
+- `tetanus::tests` (20) and `tests/contract/tetanus.rs` (17) — the contract layer
+  asserting the standard is load-bearing rather than descriptive.
+- `a_covering_job_actually_invokes_the_gate_it_claims_to_cover` — resolves each
+  `covers` entry against the job's actual `run:` blocks. `lib` as a gate target,
+  mapping to `--lib`.
+
+### Fixed
+
+- **The gate named `unit` ran no unit tests** (B23). Its argv was four `--test`
+  flags, and `--test X` excludes the lib binary, so 49 `#[cfg(test)]` tests inside
+  `src/` were compiled by `check` and `clippy` and never executed. Nothing reported
+  it, because they pass — only a failure would have been visible, and there was no
+  mechanism to produce one. `unit` now runs 72 tests across 5 binaries.
+- **The `contract` CI job ran the validator, not the gate** (B24). It declared
+  `covers = ["contract"]` while its steps were `cargo xtask contract` (parse and
+  print) and `cargo xtask list`. All 56 assertions in `tests/contract` compiled,
+  linted, and never ran — on this branch and on `0d40e41` alike. This survived
+  because the assertion meant to catch it compared gate *names*.
+- `cargo xtask bless --prune` — baseline maintenance that removes stale entries
+  explicitly and prints every removal, instead of a hand edit.
+
 ## 0.4.0 — backlog pass (B15–B21)
 
 Seven findings closed since the verification-architecture work, one of which was a
