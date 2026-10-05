@@ -531,7 +531,7 @@ tracker = "bugs.toml"
 # each entry's `blocks_merge`, so B15-B20 are counted by the check below and do not
 # fail it. Promoting one to blocking is how that decision gets made.
 expected_blocking = 11
-expected_should_fix = 17
+expected_should_fix = 18
 
 # Commit authorship. `cargo xtask run authorship` reads every commit message in
 # the repository's history and fails on a banned trailer.

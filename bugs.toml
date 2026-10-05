@@ -33,16 +33,16 @@
 # *do* gate live in `theSix.toml` under `[verification.merge_readiness]`, so a
 # finding cannot be deleted or downgraded without editing the contract.
 branch = "main"
-commit = "99b4a5f"
-reviewed_commit = "99b4a5f"
-reviewer = "ChatGPT, external code review; then a 0.4.0 backlog pass over B15-B21"
-review_date = "2026-10-04"
+commit = "efea2fd"
+reviewed_commit = "efea2fd"
+reviewer = "ChatGPT, external code review; a 0.4.0 backlog pass over B15-B21; then an external review of PRs #4-#8 and the B23 obligation work"
+review_date = "2026-10-05"
 verdict_architecture = 9.0
 verdict_verification_strategy = 9.5
 verdict_implementation_correctness = 7.5
 merge_ready = false
 findings_blocking = 11
-findings_should_fix = 11
+findings_should_fix = 12
 findings_praised = 4
 independently_verified = true
 
@@ -51,6 +51,14 @@ independently_verified = true
 # has no required status check, so the aggregated gate is advisory until it is
 # restored with a token holding effective Administration write.
 blocking_reason = "B21: main's required_status_checks rule is disabled"
+
+# Publication state, recorded here because `merge_ready` cannot be true while B21 is
+# open and a reader would otherwise assume the release line is unfinished. 0.3.0 was
+# published from its own commit (9a075b3) and 0.4.0 from main; crates.io reports
+# max_stable 0.4.0. Both are irreversible now -- they can be yanked, never replaced.
+published = ["0.3.0", "0.4.0"]
+published_at = "2026-10-05"
+published_from = { "0.3.0" = "9a075b3", "0.4.0" = "efea2fd" }
 
 # The reviewer's summary judgement, kept verbatim in substance because it is the
 # most useful single sentence in the review:
@@ -1544,6 +1552,37 @@ itself, so it can be wrong in the same way any test can be wrong. That is what t
 mutations above bound -- not truth, but the ability of a reviewer to catch a false
 claim mechanically rather than by reading 76 tests.
 """
+do_not_evolve_into_a_parser = """
+Recorded because an external review of PR #7 raised it unprompted, and because the
+instinct to "improve" this code is the most likely way to make it worse.
+
+`function_span` and `declares_clause` are line heuristics, and they are acceptable
+*because of which way they fail*. A test that declares nothing, or that declares the
+clause in a different function, is reported as undeclared -- so the gate goes red and
+a human looks. The dangerous direction is a false positive, where a declaration is
+credited to a test that does not contain it, and that is the direction the design
+avoids: the span is per-function, literals are compared whole, and the opener must
+begin a trimmed line.
+
+So: do not replace this with a real Rust parser. A parser would be more correct and
+would fail in a new direction -- it would start *rejecting* valid declarations for
+subtle reasons, and the pressure to loosen it would reintroduce the false positive
+this shape avoids. That is humanity's traditional solution to a systems problem: add
+machinery until the original failure is nobody's memory.
+
+If stronger semantic proof is wanted, the route is explicit coupling -- per-row
+fault-ledger assertions, the instrument `fault_injection` and `declare_cases!` already
+use -- not cleverer source reading. A registry row that must also say *which assertion*
+in the test carries the proof can be checked without parsing Rust at all.
+"""
+scope_limit = """
+The parser reads `tests/` and `xtask/src/` through the same path, which is why
+`verification.merge_readiness.tracker` can be proven by an `xtask` unit test: the gate
+requires no particular file kind, only that the path resolves and the cited function
+declares the clause. Making `proves!` reachable from `xtask` needed `testkit` as an
+xtask dev-dependency, chosen over duplicating the macro so there is one definition of
+what a declaration is.
+"""
 
 [[bug]]
 id = "B21"
@@ -1677,7 +1716,172 @@ red the only signal (`Performance + soak`) that would have caught it -- at a
 moment when `main` had no required status check to act on it (B21).
 """
 
-# ---------------------------------------------------------------------------
+[[review]]
+id = "R1"
+subject = "External code review of PRs #4-#8, reviewed against the diffs and the contract"
+reviewer = "independent reviewer, after the 0.4.0 backlog pass merged at 0d40e41"
+dispositions = """
+#4 APPROVE   lost commit race + B19
+#5 APPROVE   eviction + move recovery
+#6 APPROVE   four invariant closures
+#7 APPROVE WITH COMMENT   `proves!` proof binding
+#8 APPROVE   documentation reconciliation
+"""
+
+note_on_numbering = """
+There is no PR #9. The numbering gap is a merge-order fact rather than a missing
+pull request: B16 landed in #6, B20 in #7, and the compliance reconciliation in #8,
+so the work the reviewer expected to see as a ninth PR was distributed across the
+three that closed review comments.
+"""
+
+sequence_reading = """
+The reviewer's observation, recorded because it is the most useful characterisation
+of the 0.4.0 series found so far: these were not six unrelated patches but a
+progressive tightening of one system --
+
+    runtime correctness -> recovery semantics -> eviction authority
+      -> invariant observability -> proof attribution -> documentation truth
+
+with the tests becoming instrumentation around architectural claims rather than
+coverage beside an implementation.
+"""
+
+comments_accepted = """
+PR #4 -- `WriteContented` is a second error path, so "an error only when every rung
+below refuses" is no longer literally true. Accepted and closed as
+`cia.availability.write_race_exhaustion_reports_contended`, proven by the test that
+already asserted no descent occurred. Without the clause the documentation could
+drift back and someone could "fix" the retry by descending again.
+
+PR #5 -- the contract says eviction exists while the policy remains tier-defined, and
+that should stay explicit. Accepted as `capabilities.eviction_policy_is_tier_defined`,
+proven by a test contrasting a delegating rung against a wrapper inheriting the
+default on one populated store. `blocking_runtime_thread` and the three
+`engineering.design.*` claims went the other way and were re-scoped rather than
+promised, because no proof existed.
+
+PR #6 -- `refresh()` is intentionally lossy and the `Recovering` test proves reporting
+rather than operational unavailability. Accepted: both are now stated where a reader
+meets them, since a later reader could otherwise infer that `Recovering` tiers are
+safe to serve.
+
+PR #7 -- the source parser is acceptable because it fails closed, and should not grow
+into a Rust parser. Accepted and recorded in B20: the span heuristics bias to false
+negatives, and the route to stronger proof is fault-ledger coupling.
+
+PR #8 -- B21 means the documentation correctly describes an unenforced protection
+state. Accepted; it was already the position, and `merge_ready = false` in `[meta]`
+now says so in the tracker rather than only in prose.
+"""
+
+agreed_with = """
+B21 named the release blocker. The reviewer's framing of it is the sharper one: CI
+passing and CI being enforced are different claims, and only the first was true. That
+is also the mechanism by which the unreviewed `SECURITY.md` reached `main` during
+this pass -- a commit pushed straight to a feature branch and merged unchecked. The
+review is right that a green gate run is evidence the contract is internally
+consistent and fully bound, which is a weaker and different claim from correctness.
+"""
+
+[[bug]]
+id = "B23"
+title = "The proof obligation was enforced in test code and declared nowhere, leaving 45 clauses unbindable"
+severity = "should-fix"
+status = "resolved"
+blocks_merge = false
+verified = true
+locations = [
+  "theSix.toml:verification.every_invariant_has_a_proof_or_waiver",
+  "tests/contract/invariant.rs:SEMANTIC_SECTIONS",
+  "testkit/src/coverage.rs:INVARIANT_PROOFS",
+]
+violates = []
+source = "found while scoping the PR #4-#8 review comments, from the principle that a proof obligation is itself an invariant"
+relates_to = "B9, B13, B20"
+summary = """
+Every leaf under the seven semantic sections was bound to a proving test or a stated
+waiver. Nothing enforced that for the rest of the contract: `SEMANTIC_SECTIONS` named
+only those seven, so `[verification]`'s 29 leaves and `[engineering]`'s 16 were
+normative claims no gate could reach. 45 clauses governed nothing.
+"""
+mechanism = """
+The obligation lived entirely in `tests/contract/invariant.rs`, which the contract
+cannot see. That is the shape B8 describes -- a check in a place the declaring
+artefact does not read -- and it had the same consequence B13 recorded for
+`verification.merge_readiness.tracker`: a declared setting nobody was reading.
+
+Nothing detected it because the rules were all internally consistent. The registry
+equalled the declared set; the declared set was computed from seven sections; and
+"which sections are guarantees" was a constant in a test file rather than a decision
+recorded anywhere.
+"""
+fix = """
+Three parts.
+
+The obligation is now declared: `verification.every_invariant_has_a_proof_or_waiver`,
+proven by `every_declared_invariant_has_a_proof_or_a_waiver` -- the proof is the audit
+enforcing the obligation. That needed one exemption, named rather than pattern-matched:
+a proof may not cite `tests/contract/invariant.rs` (a real invariant needs a test that
+exercises the runtime), and this clause has no runtime to exercise. Renaming it to end
+in `.required` would have satisfied the pattern while concealing the exception.
+
+`SEMANTIC_SECTIONS` now names nine sections, so `[verification]` and `[engineering]`
+are walked and their leaves must be bound. The declaration went from 95 leaves to 140.
+
+The 45 were discharged rather than waived. 31 bound to tests that already existed --
+including all three eviction clauses, which the review's PR #5 comment had noted were
+policy-light while carrying no proof obligation at all. 14 needed new tests.
+"""
+new_work = """
+`the_crates_own_source_carries_no_unsafe_and_no_blocking_calls` covers four clauses at
+once (`rust_memory_safety_required`, `unsafe_requires_justification`, `hidden_blocking`,
+`runtime_block_on`) and is the pattern B16's `nested_block_on` scan already used.
+Mutation-checked: a `std::thread::sleep` added to `src/manager.rs` fails it, naming the
+clause and the line.
+
+`every_adversarial_layer_is_enabled_and_bound_to_a_target` exists because the ten
+`verification.adversarial.*` flags were read by nothing -- the pre-existing layer check
+hardcoded its own list of layer names. Reading them found a real divergence: `fuzz` is
+adversarial but bound to no test target, because its targets live in the excluded
+`fuzz/` workspace. It is covered by the `fuzz` gate instead, so the test accepts
+target-or-gate and asserts both paths are live.
+
+`tier_topology_is_replaceable` is proven by substitutivity rather than inspection: the
+same operations against two sets of tier implementations must agree on hits, on
+misses, and on removal. Comparing only the happy path would let a topology assumption
+hide in the error path, which is where B17 and B22 both lived.
+
+`eviction_policy_is_tier_defined` is proven against one populated store. The weaker
+version -- assert `None` somewhere -- passes for the wrong reason, since `None` is also
+what a delegating rung returns when it holds nothing.
+"""
+re_scoped_rather_than_proven = """
+`engineering.design.requirements_drive_ontology`, `ontology_drives_pipeline` and
+`implementation_follows_contract` moved to a top-level `[design]` table, outside the
+proof-bound set. There is no mechanical form for "requirements drove the ontology"; a
+test would assert the manifesto's own wording and pass vacuously, which is B20's
+failure mode with extra steps. Leaving them as waived booleans would have admitted
+they are guarantees nobody checks, so the section is named and its exclusion stated.
+"""
+verification = """
+Set equality is enforced in both directions, so an added or renamed clause fails until
+the registry moves with it. 140 leaves, 139 proofs, 1 waiver
+(`concurrency.blocking_runtime_thread`, whose waiver now explains that the missing
+thing is a mechanism rather than a test).
+
+Every new test carries `testkit::proves!` and the registry requires the cited
+function's own declaration to contain the cited clause, so a mis-citation fails. The
+mechanism that would have caught a rename during this work did: seven tests already
+declared a clause for another registry row, and the "already declared" guard skipped
+adding the second name, so the gate reported them until the declarations were merged.
+"""
+rationale = """
+Fixed, because the principle that a proof obligation is itself an invariant is the
+one rule the verification system was silently exempting itself from. It is now the only
+part of the contract that cannot be quietly widened: a new clause anywhere in nine
+sections is unmergeable until something is responsible for it.
+"""
 # Re-audit of the external review, against 0d40e41
 # ---------------------------------------------------------------------------
 # PRs #5-#8 landed between the review being written and this re-audit, so the
