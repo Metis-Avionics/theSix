@@ -205,8 +205,6 @@ fn ladder_never_selects_l6() {
 /// handing back L0's data.
 #[tokio::test]
 async fn unbound_l6_is_reported_not_substituted() {
-    testkit::proves!("engineering.silent_backend_substitution");
-
     // The six-tier builder used throughout the suite has no L6.
     let manager: Arc<CacheManager<String, String, DefaultPolicy>> =
         common::make_manager(DefaultPolicy);

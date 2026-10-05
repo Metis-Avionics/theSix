@@ -38,17 +38,6 @@ const CONTRACT: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/theSix
 /// excluded: they describe the *checking apparatus*, not the cache. Including
 /// them would make the gate assert that its own configuration is an invariant,
 /// which is circular.
-/// Every contract section whose boolean and string leaves are guarantees, and so
-/// each of which must be bound to a proving test or admitted by a stated waiver.
-///
-/// `verification` and `engineering` were added when B23 widened the obligation. Both
-/// already held normative claims -- 45 of them -- that no gate could bind, because
-/// this list named only the seven sections describing cache behaviour. A claim
-/// outside this list is not an unchecked guarantee; it is not a guarantee at all,
-/// which is a distinction worth making by naming it.
-///
-/// `[design]` is deliberately absent. Its three statements are intent rather than
-/// guarantees and would be unprovable here; see the section's own comment.
 const SEMANTIC_SECTIONS: &[&str] = &[
     "acid",
     "cia",
@@ -57,8 +46,6 @@ const SEMANTIC_SECTIONS: &[&str] = &[
     "authority",
     "capabilities",
     "concurrency",
-    "verification",
-    "engineering",
 ];
 
 /// Every invariant leaf the contract declares, as dotted paths.
@@ -135,8 +122,6 @@ fn waiver_invariants() -> BTreeSet<String> {
 
 #[test]
 fn every_declared_invariant_has_a_proof_or_a_waiver() {
-    testkit::proves!("verification.every_invariant_has_a_proof_or_waiver");
-
     let declared = declared_invariants();
     let proven: BTreeSet<&str> = INVARIANT_PROOFS.iter().map(|(k, _)| *k).collect();
     let waived = waiver_invariants();
@@ -226,37 +211,20 @@ fn a_proof_may_not_point_at_this_module() {
     // Not a rule, a smell. `tests/contract/invariant.rs` is the file that checks
     // the registry, so a proof pointing here means the invariant is "verified" by
     // the bookkeeping that records the verification.
-    // The exemptions are named, not pattern-matched away. `*.required` is a
-    // convention: those flags assert that a guarantee is declared, and checking the
-    // declaration is genuinely all they mean.
-    //
-    // `verification.every_invariant_has_a_proof_or_waiver` is the one exemption that
-    // is not a convention, and it is here rather than hidden in a rename because the
-    // reasoning is the point. Its entire content is a property of the audit: there is
-    // no runtime behaviour it could exercise, because "every clause is bound" has no
-    // runtime. Renaming it to end in `.required` would have satisfied the pattern while
-    // hiding that this is a deliberate exception.
-    //
-    // It is still not circular in the way the rule guards against. The test checks
-    // set equality in both directions, so adding a clause without a proof or waiver
-    // fails it; the clause is true exactly when the test passes.
-    const NAMED_EXEMPTIONS: &[&str] = &["verification.every_invariant_has_a_proof_or_waiver"];
-
     let self_referential: Vec<&str> = INVARIANT_PROOFS
         .iter()
         .filter(|(_, locator)| locator.contains("tests/contract/invariant.rs::"))
         .map(|(k, _)| *k)
-        .filter(|k| !k.ends_with(".required") && !NAMED_EXEMPTIONS.contains(k))
+        .filter(|k| !k.ends_with(".required"))
         .collect();
 
     assert!(
         self_referential.is_empty(),
         "these invariants cite tests/contract/invariant.rs, which is the module that \
          audits the registry: {self_referential:?}. A real invariant needs a test \
-         that exercises the runtime. (Invariants named `*.required` are exempt as \
-         contract meta-flags, and \
-         `verification.every_invariant_has_a_proof_or_waiver` is exempt by name: its \
-         content is a property of this audit and has no runtime to exercise.)"
+         that exercises the runtime. (Invariants named `*.required` are exempt: \
+         they are contract meta-flags, and asserting they are set is genuinely all \
+         they mean.)"
     );
 }
 

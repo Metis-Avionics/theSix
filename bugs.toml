@@ -1882,3 +1882,407 @@ one rule the verification system was silently exempting itself from. It is now t
 part of the contract that cannot be quietly widened: a new clause anywhere in nine
 sections is unmergeable until something is responsible for it.
 """
+# Re-audit of the external review, against 0d40e41
+# ---------------------------------------------------------------------------
+# PRs #5-#8 landed between the review being written and this re-audit, so the
+# review's claims were re-checked against the tree rather than copied. Two of its
+# eight claims are now wrong and are recorded here as closed-with-evidence rather
+# than carried forward as open work. The claims that still stand are B24-B29.
+
+[[bug]]
+id = "B24"
+title = "The `unit` gate ran no unit tests: 49 assertions inside src/ never executed"
+severity = "should-fix"
+status = "resolved"
+blocks_merge = false
+verified = true
+locations = ["theSix.toml", "xtask/src/gates.rs", "tests/contract/main.rs"]
+violates = ["verification_required = true"]
+source = "own re-audit of the external review, against 0d40e41"
+summary = """The gate named `unit` had argv
+
+    cargo nextest run ... --test integration --test hierarchy --test policy --test stampede
+
+`--test X` selects an integration-test binary and excludes the lib binary, so the 49
+`#[cfg(test)]` tests inside `src/` were compiled by `check` and `clippy` (both use
+`--all-targets`) and never run. testkit's 4 were in the same position. Nothing
+reported it, because the tests pass -- only a failure would have been visible, and
+there was no mechanism to produce one."""
+why_the_order_is_what_it_is = """Fixing this required a way to name the lib binary in the contract at all. `--lib` is
+not a `--test` flag and there is no path under `tests/` for the validator to check, so
+`lib` is now the one literal target name the runner maps to `--lib`, the contract
+validator resolves against `Cargo.toml` instead of `tests/`, and
+`every_declared_layer_is_bound_to_a_target` carries the same exception. Two of those
+three places needed editing, which is why this was not a one-line change to a filter."""
+required_fix = """`unit` targets now begin with `lib`; the gate runs 72 tests across 5 binaries,
+up from 23 across 4."""
+rationale = """Resolved in the same PR that found it. The fix is mechanical, the new tests
+pass, and the old invocation is recoverable from git history."""
+residual_risk = """`tests/loom` and any `#[cfg(test)]` in a workspace member with no gate naming
+it are still only reachable by hand. testkit's 4 inline tests are still unrun: no gate
+declares `-p testkit`. Recorded rather than fixed because adding a cross-crate test
+gate is a contract decision, not a fix."""
+
+[[bug]]
+id = "B25"
+title = "The contract CI job ran the validator, not the gate, so all of tests/contract was unrun"
+severity = "should-fix"
+status = "resolved"
+blocks_merge = false
+verified = true
+locations = [".github/workflows/ci.yml", "theSix.toml", "tests/contract/workflow.rs"]
+violates = ["verification_required = true"]
+source = "own re-audit of the external review, against 0d40e41"
+summary = """The `contract` job declared `covers = ["contract"]` and its steps were
+`cargo xtask contract` -- which parses theSix.toml and prints it -- plus
+`cargo xtask list`. The gate is `cargo xtask run contract`. `rg "xtask run contract"`
+matched nothing, on this branch and on `0d40e41` alike. All 56 assertions in
+`tests/contract` compiled, linted, and never executed in any CI run."""
+why_the_order_is_what_it_is = """This survived review because the assertion meant to catch it compares gate
+*names*. "contract" was present in a `covers` list, so it passed. The fix therefore had
+to come before the fix: the guard had to learn to resolve a `covers` entry against the
+job's actual `run:` blocks, or adding the missing CI step would have been the only
+change and the same class of defect would have recurred on the next gate."""
+required_fix = """The job now runs `cargo xtask run contract`, and
+`a_covering_job_actually_invokes_the_gate_it_claims_to_cover` requires each `covers`
+entry to be matched by either `cargo xtask run <gate>` or a nextest invocation naming
+the gate's own targets, with the matrix form resolved against `strategy.matrix` so the
+one job that runs ten gates is not rejected for naming none of them. Deleting the new
+step makes the assertion fail with the gate name and its targets; that is how it was
+verified."""
+rationale = """Both halves landed together: the assertion was written first, watched fail against
+the unfixed workflow, then the workflow was fixed and it went green."""
+residual_risk = """The new assertion matches invocation *text*. A job could in principle invoke the
+runner inside a script it generates, or under a different gate name, and still be
+correct. This is a heuristic on YAML, and it is a heuristic that has already caught
+one real hole. The first version of the fix still failed, and the failure is the
+point: the job had never run a gate, only a validator, so it had no `cargo-nextest`
+installed. The gate reported `Unavailable` and the run exited 3 -- correct, because "I
+could not verify this" must not look like "I verified this" -- but the job was red for
+a reason no local run could have shown, since every developer machine has nextest. The
+job now installs it, and the probe behind `runner: nextest` in the header no longer
+treats a present `cargo` as a present `cargo-nextest`, which are separate binaries.
+
+The general shape is worth naming: a job can be green forever without ever running the
+thing it is named after."""
+
+[[bug]]
+id = "B26"
+title = "Nothing validates a bugs.toml `locations` entry; several are already wrong"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["xtask/src/gates.rs", "tests/contract/tetanus.rs"]
+violates = ["verification_required = true"]
+source = "external review, confirmed by own re-audit against 0d40e41"
+summary = """`BugEntry` in `xtask/src/gates.rs` declares id, title, status, blocks_merge,
+accepted_by and rationale. It does not declare `locations`, so the field is never read
+by anything. 65 entries across 26 findings cite locations; none is checked against the
+tree.
+
+The drift is not hypothetical. `bugs.toml` cites `src/manager.rs:853` for B1, which is
+now `Err(CacheError::Miss)`, and `src/manager.rs:94`, now a doc comment about `abort`.
+B3 and B5 both cite `src/control/cachelito.rs:106` for two different findings, and
+that line is now `address: KeyAddress,` inside `CommitToken`. They were stale relative
+to each other before this branch existed."""
+why_the_order_is_what_it_is = """A validator cannot be written before the field has a format. 42 of the 65 entries are
+not `file:line` at all -- they are symbolic (`src/manager.rs:IntentGuard`,
+`src/control/cachelito.rs:abort`) or bare paths (`.github/workflows/ci.yml`,
+`theSix.toml`). A straight port of the tetanus location check would fail on 42 of 65
+entries on the day it landed, which would make it a gate everyone immediately learns to
+skip."""
+required_fix = """Three stages, in order. (1) Canonicalise: parse `file[:line[:column]]`, reject
+anything else, and migrate the 42 symbolic entries to real coordinates. (2) Normalise:
+anchor each location to a symbol as well as a line, so a line drift becomes a re-anchor
+rather than a wrong pointer. (3) Validate: assert the file exists and the line is in
+range, first in `merge_readiness`, then in its own gate.
+
+Stage (1) is the blocker and is not done. The tetanus baseline already has (3) applied
+to itself, which is where the technique was proven, and it fired four times during this
+branch -- once per edit to a scanned file. That is the cost of line-keyed locations
+being paid in public, four times, rather than silently in a tracker nobody reads."""
+rationale = """Not resolved. Only stage (3) exists, and only for `tetanus.toml`."""
+
+[[bug]]
+id = "B27"
+title = "Cachelito::prepare's expected_generation is passed None at all 42 call sites, so its StaleGeneration arm is dead"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["src/control/cachelito.rs", "src/manager.rs"]
+violates = []
+source = "own re-audit -- the external review made the opposite claim"
+summary = """The review claimed `prepare` takes no generation, nonce or ownership token. That
+is wrong: `prepare` takes `expected_generation: Option<Generation>` and returns a
+four-field `CommitToken`, and `commit` refuses a token whose generation is stale or
+whose entry is no longer `Prepared`. The commit-side defence is real and correct.
+
+What the review did not find is that `expected_generation` is `None` at all 42 call
+sites in the repository, including both production ones. The `StaleGeneration` arm of
+`prepare` -- cachelito.rs:989-996 -- is therefore unreachable: no test and no production
+path exercises it. The protocol's protection against a stale prepare rests entirely on
+the `commit`-side `expired_by` check, which is a different mechanism at a different
+time."""
+why_the_order_is_what_it_is = """Passing a real generation at the two production sites changes when `set` fails,
+which is a behavioural change to the write path and not a mechanical fix. It is also
+the only way the arm gets covered: an assertion about an arm no caller can reach
+proves nothing about it."""
+required_fix = """Decide per call site whether `prepare` should demand the generation the caller
+read, or whether the parameter should be removed as a defence that nothing uses and
+nothing tests. Both are defensible; leaving it is not, because a parameter that cannot
+be non-`None` is not a check."""
+rationale = """Not resolved. Needs a behavioural decision on the write path first."""
+
+[[bug]]
+id = "B28"
+title = "The Loom model is not the real Cachelito and diverges where abort is concerned"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["tests/loom/main.rs", "src/control/cachelito.rs"]
+violates = []
+source = "external review, confirmed by own re-audit against 0d40e41"
+summary = """`tests/loom/main.rs` models a hand-written miniature, not `Cachelito`. Five
+divergences: the model locks `loom::sync::Mutex` where the code locks
+`std::sync::Mutex`; the model has four states where `EntryState` has six; and, most
+seriously, the model's `abort` restores `ABSENT` while `abort_inner` sets `Failed` and
+increments the generation. The model's stale-token test exercises a transition the real
+abort no longer performs."""
+why_the_order_is_what_it_is = """The divergence is unavoidable in the first place: loom cannot intercept
+`std::sync::Mutex` or `std::sync::atomic`, which is the whole reason a model exists.
+And it is disclosed -- `tests/loom/main.rs:33-43` states exactly what is modelled and
+why, `theSix.toml` lists `loom_excludes`, and `cachelito.rs:1124-1129` records that a
+model of this shape once found a real bug. The review was right that loom cannot
+regression-guard the real type and wrong to imply it is pretending to."""
+required_fix = """Either make the model's `abort` match `abort_inner` (state and generation) and
+add a case covering `Failed` -> `Ready`, or state in the model's own doc comment that
+`abort` is out of scope, so the next reader does not have to diff both files to learn
+it. The second is much cheaper and is the honest minimum."""
+rationale = """Not resolved. The disclosure is good; the divergence in `abort` is the part that
+would mislead."""
+
+[[bug]]
+id = "B29"
+title = "CacheTier::tier_id is a required trait method with zero production callers"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["src/tier/trait.rs", "src/manager.rs"]
+violates = []
+source = "external review, refined by own re-audit against 0d40e41"
+summary = """`CacheTier::tier_id` is a *required* method with no default. Eleven
+implementations exist across `src/`, and every one returns a constant. `rg
+"\\.tier_id\\(\\)"` finds zero call sites under `src/`, `xtask/` or `benches/`; the only
+invocations in the crate are two test assertions and nine pass-through delegations in
+testkit.
+
+`CacheManager` derives rung identity positionally instead, from
+`tiers.get(tier_id.as_usize())`."""
+why_the_order_is_what_it_is = """The review called it dead code. It is not dead in the compiler's sense -- it is
+public API on a public trait, re-exported from `src/lib.rs`, and asserted by two tests
+-- so removing it is an API break and not a cleanup. But a required method that no
+production code calls means every implementor outside this crate is made to write a
+method the framework never asks for, and there is nothing stopping the returned value
+from disagreeing with the position the manager actually uses."""
+required_fix = """Either give it a default derived from `capability()`-style data, or document
+that it exists for out-of-tree introspection and is not load-bearing. If the second,
+say so in the trait, because today a reader cannot tell which it is."""
+rationale = """Not resolved. Low severity, but a required trait method nobody calls is the
+kind of thing that is cheap to decide now and expensive to change after release."""
+
+[[bug]]
+id = "B30"
+title = "TETANUS rules 1, 2, 4 and 8 never fired inside an inline `mod` block"
+severity = "should-fix"
+status = "resolved"
+blocks_merge = false
+verified = true
+locations = ["xtask/src/tetanus.rs", "tests/contract/tetanus.rs"]
+violates = ["verification_required = true"]
+source = "mutation testing of the TETANUS gate itself, after the gate went green"
+summary = """`scan()` iterated `file.items` and called an inherent `Scan::item` method on each.
+syn's `visit_file` calls `v.visit_item(...)`, and `Scan` did not override `visit_item`,
+so an item nested inside `mod { .. }` never reached `Scan::item`. Every rule dispatched
+from there was blind to it: rules 1, 2, 4, 8, and the `unsafe fn` clause of rule 9.
+
+Mutation testing, planting each violation at top level and inside a `mod`:
+
+| rule | top level | inside `mod` |
+|---|---|---|
+| 1 recursion | detected | **not detected** |
+| 2 unbounded loop | detected | **not detected** |
+| 8 `#[cfg]` on a fn | detected | **not detected** |
+
+Sixteen inline `mod` blocks exist in the scan set, thirteen of them `#[cfg(test)] mod
+tests`. So a 200-statement test function was invisible to rule 4, and every recursive
+helper written inside a test module was invisible to rule 1."""
+why_the_order_is_what_it_is = """The gate was green and passing mutation tests before this was found, because
+every mutation was planted at the end of a top-level file. A test that plants a
+violation inside a `mod` is the only thing that reaches it, and no such test existed."""
+required_fix = """`scan()` now calls `syn::visit::visit_file`, and `Scan` overrides `visit_item` to
+route every item through `Scan::item` at whatever depth it sits. Rule 2's count went
+from 108 to 122 and rule 10's from 17 to 34, both entirely from code inside `mod`
+blocks that had been unscanned the whole time."""
+rationale = """Resolved in the same PR that found it. The regression tests plant the same
+violation at top level and inside a `mod` and require both to be detected."""
+residual_risk = """`impl` blocks are still not dispatched to `Scan::item`, because
+`visit_impl_item_fn` is a different trait method. No rule depends on it today, and
+adding it without a finding to justify it would be speculative."""
+
+[[bug]]
+id = "B31"
+title = "TETANUS rule 5 counted every Result-returning arm as both data and error, inventing 11 violations"
+severity = "should-fix"
+status = "resolved"
+blocks_merge = false
+verified = true
+locations = ["xtask/src/tetanus.rs", "tetanus.toml"]
+violates = []
+source = "own audit, after an independent read of the rule-5 baseline found one reason asserting something false"
+summary = """`arm_returns_value` returned true for any arm that was not a diverging expression,
+which includes every `Ok(x)` and `Err(e)` arm. `arm_returns_result` also matched those
+same arms. A match whose arms were *all* `Result` was therefore counted in both buckets
+and reported as mixing them:
+
+    src/control/cachelito.rs:29  match mixes 7 value arm(s) with 7 result arm(s)
+
+That match has seven arms, every one `Ok(EntryStateAtomic::..)` or `Err(())`, over a
+`TryFrom<u8>`. Nothing is mixed. Of the 24 baselined rule-5 sites, at least 11 were of
+this form, and every one carried a justification reading "error and data share a
+validation path" -- justifying matches that mix nothing."""
+why_the_order_is_what_it_is = """The two predicates were written to be independently checkable, which is a
+reasonable instinct and is what let them overlap. A baseline cannot catch this on its
+own: the gate compares location sets, so a false positive that is baselined is
+indistinguishable from a true one."""
+required_fix = """The classification is now exclusive -- `arm_returns_result` first, then
+`arm_returns_value` -- so an arm lands in exactly one bucket. Rule 5 fell from 24
+findings to 13, and the finding text now says "data arm(s)" rather than "value arm(s)",
+which is what the clause is about. Each surviving site's justification was re-read
+against the code it points at."""
+rationale = """Resolved in the same PR. The 11 dropped entries needed no replacement."""
+residual_risk = """`arm_returns_value` still treats any non-diverging arm as a data arm, so a
+match of all-`Some` patterns reads as 2 data arms and 0 result arms, which is right. A
+match mixing `Ok(..)` and a bare value is a genuine finding and is still reported."""
+
+[[bug]]
+id = "B32"
+title = "TETANUS rule 7 is titled no-check-then-act and cannot detect check-then-act"
+severity = "should-fix"
+status = "open"
+blocks_merge = false
+verified = true
+locations = ["xtask/src/tetanus.rs", "tetanus.toml"]
+violates = []
+source = "mutation testing of the TETANUS gate itself; the predicate was compared against the rule title"
+summary = """Rule 7 is titled "no check-then-act: a check must not be separated from the act it
+guards", which is time-of-check-to-time-of-use. The implemented predicate cannot detect
+that and never could. Its entire input is the last statement of two branch blocks plus
+the syntactic form of the `else`. It never reads the condition, never reads a `let`
+binding, and never compares identifiers appearing in two statements -- which is what
+detecting TOCTOU requires.
+
+What it detects is narrower: an `if` with an explicit `else`, where one branch's final
+statement is `return`/`break`/`panic!` and the other's is a trailing expression without
+a semicolon. That is an early-return idiom, not a race.
+
+Mutation testing confirms it from the other side:
+
+    let n = v.len();
+    if n > 0 { v[n - 1] } else { 0 }
+
+is a real TOCTOU on one buffer -- the length is read, the index derived from it is used,
+nothing stops the buffer shrinking in between -- and produces no finding."""
+why_the_order_is_what_it_is = """The previous `finds_nothing_because` gave the zero a different cause, and
+both of its claims were true while neither was the reason. It said the crate uses `?`
+and `let-else` rather than divergent conditionals, so the shape does not occur. But `?`
+parses as `syn::Expr::Try` and `let-else` as a `Stmt::Local`, so syn never routes either
+to `visit_expr_if` at all -- the two idioms named as the explanation are structurally
+invisible to this predicate whether or not this crate uses them. The zero is a property
+of the analyzer, not of the house style, and the old text presented it as the opposite."""
+required_fix = """Two options, and the first is honest today. (a) Rename the rule to what it
+measures -- "a conditional must not leave one branch diverging while the other yields" --
+and treat TOCTOU as covered by the concurrency layer, which is where B19 and B22 live.
+(b) Implement flow sensitivity: bind the operands a check reads and require every
+subsuming access to re-read them, which is a real dataflow analysis and not a predicate.
+
+Either way `finds_nothing_because` is rewritten to describe the limitation rather than a
+clean bill of health, `as_titled` and `as_implemented` are declared and required to
+differ, and the missed shape is pinned as a test."""
+rationale = """The contract and test layers are fixed in this PR. The rename or the
+dataflow analysis is not, because both change what the standard claims, which is a
+decision rather than a fix."""
+residual_risk = """Rule 7 is gated with zero findings and a prose justification, so the whole
+ratchet for that rule rests on a string no gate verifies. `rule_7_does_not_claim_to_
+detect_toctou` now pins the known miss, which means a future improvement to the predicate
+shows up as a failing test rather than as a silent change in what the rule measures.
+"""
+
+[[bug]]
+id = "B33"
+title = "TETANUS rule 9 was titled as covering bare function pointers and checked none"
+severity = "should-fix"
+status = "resolved"
+blocks_merge = false
+verified = true
+locations = ["xtask/src/tetanus.rs", "tetanus.toml"]
+violates = []
+source = "mutation testing of the TETANUS gate itself, sub-clause by sub-clause"
+summary = """The rule is titled "no dynamic dispatch and no bare function pointers". The
+predicate matched `syn::Type::TraitObject` and `Box<dyn ..>`. `syn::Type::BareFn` fell to
+`_ => None`, so the second half of the title was not measured at all.
+
+Mutation testing, one shape at a time:
+
+| shape | before |
+|---|---|
+| `fn f(x: &dyn Trait)` | +1 |
+| `fn f() -> Box<dyn Trait>` | +2 |
+| `fn f() -> fn(u32) -> u32` | **+0** |
+| `fn f(cb: fn(u32) -> u32)` | **+0** |
+| `struct S { cb: fn(u32) -> u32 }` | **+0** |
+
+No bare `fn(..)` type exists anywhere in the scan set, so the count of 89 was correct by
+accident rather than by measurement."""
+required_fix = """A `BareFn` arm was added. The reported count stays 89, which is the
+correct answer for a different reason than before: there is genuinely nothing to find.
+`tests/contract/tetanus.rs` asserts that every rule title's clauses are reachable, so a
+title naming a shape the matcher ignores now fails rather than reading as covered."""
+rationale = """Resolved in the same PR. Zero behaviour change and one fewer gap between
+a title and a predicate."""
+
+[[bug]]
+id = "B34"
+title = "TETANUS rule 10 could not see crate-level #![allow], including the widest suppression in the crate"
+severity = "should-fix"
+status = "resolved"
+blocks_merge = false
+verified = true
+locations = ["xtask/src/tetanus.rs", "tetanus.toml"]
+violates = []
+source = "mutation testing of the TETANUS gate itself; found in the same read that found B30"
+summary = """Rule 10 is titled "warnings are errors, and every suppression must say what
+it is suppressing". `scan()` iterated `file.items` and called an inherent method per item,
+so it never visited `syn::File::attrs`, which is where `#![...]` inner attributes live.
+Every crate-level suppression was invisible.
+
+The widest suppressions in the crate are exactly those. `src/lib.rs:9` alone silences
+fourteen lints:
+
+    #![allow(clippy::unused_async, clippy::missing_errors_doc, ... fourteen)]
+
+and `src/lib.rs:27` two more. Seventeen crate-level suppressions across `src/`,
+`testkit/`, `tests/` and `benches/` were unreported, against 17 item-level ones that
+were."""
+why_the_order_is_what_it_is = """Fixed by B30's fix rather than separately: entering through
+`syn::visit::visit_file` visits `file.attrs` before its items, so the one-line change
+that made rules 1, 2, 4 and 8 recurse also made rule 10 see the crate root. The first
+attempt added an explicit `crate_attrs` pass and was reverted -- it double-counted, which
+the gate's own duplicate-key check caught."""
+required_fix = """Already fixed by the B30 change. Rule 10's count went from 17 to 34."""
+rationale = """Resolved in the same PR that found it."""
+residual_risk = """None known. `#![allow]` is now reached through syn's own visitor rather
+than a hand-rolled pass, so it cannot drift out of sync with the file structure."""

@@ -54,6 +54,10 @@ struct ContractVerification {
 #[derive(Debug, Deserialize)]
 struct ContractGate {
     name: String,
+    /// Empty for gates that are not test gates; used only to match a `run:`
+    /// block against the gate it claims to cover.
+    #[serde(default)]
+    targets: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -87,6 +91,26 @@ fn contract_gates() -> BTreeSet<String> {
         .collect()
 }
 
+/// Whether this job's matrix enumerates `gate` under any key.
+fn matrix_runs_gate(matrix: &BTreeMap<String, toml::Value>, gate: &str) -> bool {
+    matrix.iter().any(|(_, value)| match value {
+        toml::Value::Array(items) => items.iter().any(|item| item.as_str() == Some(gate)),
+        toml::Value::String(s) => s == gate,
+        _ => false,
+    })
+}
+
+/// Gate name -> the targets it runs, so an invocation can be matched against it.
+fn gate_targets() -> BTreeMap<String, Vec<String>> {
+    toml::from_str::<ContractRoot>(CONTRACT)
+        .expect("theSix.toml must parse")
+        .verification
+        .gate
+        .into_iter()
+        .map(|g| (g.name, g.targets))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Workflow side
 // ---------------------------------------------------------------------------
@@ -108,6 +132,26 @@ struct WorkflowJob {
     /// aggregator report success by never running.
     #[serde(default, rename = "if")]
     if_: Option<String>,
+    /// The `strategy.matrix` block, read for the same reason `steps` is: a
+    /// matrix job invokes `cargo xtask run ${{ matrix.layer }}`, so the gate name
+    /// appears in the matrix values and not in the `run:` text. Matching only
+    /// `run:` would reject the one job in this workflow that runs ten gates.
+    #[serde(default)]
+    strategy: WorkflowStrategy,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WorkflowStrategy {
+    #[serde(default)]
+    matrix: WorkflowMatrix,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WorkflowMatrix {
+    /// Every scalar under `matrix`, flattened. A gate can live at `matrix.layer`
+    /// or `matrix.gate` depending on the job, and this does not care which.
+    #[serde(flatten)]
+    values: BTreeMap<String, toml::Value>,
 }
 
 impl WorkflowJob {
@@ -192,8 +236,6 @@ fn workflow() -> Workflow {
 
 #[test]
 fn every_declared_gate_is_executed_by_a_ci_job() {
-    testkit::proves!("engineering.unnecessary_dependencies");
-
     let gates = contract_gates();
     let jobs = contract_jobs();
     let covered: BTreeSet<String> = jobs.iter().flat_map(|j| j.covers.clone()).collect();
@@ -205,6 +247,82 @@ fn every_declared_gate_is_executed_by_a_ci_job() {
          A gate only the maintainer's machine executes is not a gate. Add a job and a \
          [[verification.ci_job]] entry that covers it."
     );
+}
+
+/// A `covers` entry is a claim about a `run:` block, not a label.
+///
+/// This assertion is the reason the previous one was not sufficient. The `contract`
+/// job listed `contract` in `covers` for its entire life while executing
+/// `cargo xtask contract`, which validates and prints, instead of
+/// `cargo xtask run contract`, which is the gate. Both strings contain "contract",
+/// so a name comparison passed and all 56 assertions in `tests/contract` compiled,
+/// linted and never ran. A coverage table that records an intention instead of an
+/// invocation is worse than no coverage table, because it is the thing reviewers
+/// read.
+///
+/// Two invocations count, matching the two shapes the workflow uses: the runner
+/// (`cargo xtask run <gate>`), or nextest naming the gate's own targets.
+#[test]
+fn a_covering_job_actually_invokes_the_gate_it_claims_to_cover() {
+    let gates = gate_targets();
+    let wf = workflow();
+    let mut failures = Vec::new();
+
+    for declaration in contract_jobs() {
+        // `covers` lives on the contract side; the steps live on the workflow side.
+        // They meet on the job key. A declaration naming a job the workflow does
+        // not have is a different defect and belongs to the other assertion.
+        let Some(job) = wf.jobs.get(&declaration.job) else {
+            continue;
+        };
+        let scripts: Vec<String> = job.steps.iter().filter_map(|s| s.run.clone()).collect();
+        for gate in &declaration.covers {
+            let Some(targets) = gates.get(gate) else {
+                continue; // named and covered; `every_covered_entry_names_a_real_gate` owns that
+            };
+            // `cargo xtask run <gate>` with the gate named literally, or the
+            // matrix form `cargo xtask run ${{ matrix.<key> }}` where this job's
+            // matrix enumerates the gate. The second form has to be resolved
+            // against the matrix values or the only job running ten gates fails.
+            let via_runner = scripts.iter().any(|s| {
+                let words: Vec<&str> = s.split_whitespace().collect();
+                words
+                    .windows(3)
+                    .any(|w| w[0] == "xtask" && w[1] == "run" && w[2] == *gate)
+                    || words.windows(3).any(|w| {
+                        w[0] == "xtask"
+                            && w[1] == "run"
+                            && w[2].starts_with("${{")
+                            && matrix_runs_gate(&job.strategy.matrix.values, gate)
+                    })
+            });
+            let via_nextest = !targets.is_empty()
+                && targets.iter().all(|t| {
+                    let flag: Vec<&str> = if t == "lib" {
+                        vec!["--lib"]
+                    } else {
+                        vec!["--test", t.as_str()]
+                    };
+                    scripts.iter().any(|s| {
+                        s.split_whitespace()
+                            .collect::<Vec<_>>()
+                            .windows(flag.len())
+                            .any(|w| w == flag)
+                    })
+                });
+            if !via_runner && !via_nextest {
+                failures.push(format!(
+                    "job {:?} covers gate {gate:?} but no step in it runs it.\n\
+                     Either invoke it (`cargo xtask run {gate}`) or name its targets \
+                     in a nextest step, or drop it from `covers` -- a coverage entry \
+                     naming a gate nobody executes is a claim, not coverage.\n\
+                     targets: {targets:?}",
+                    declaration.job
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

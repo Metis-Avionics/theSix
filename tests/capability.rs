@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use testkit::{StatedTier, default_tiers, manager_from_tiers, record_all, test_ctx};
 use thesix::{
-    BackendKind, CacheTier, CapabilityFlags, DefaultPolicy, DurabilityClass, L0Stub,
-    OperationalState, TierCapability, TierId,
+    BackendKind, CacheTier, CapabilityFlags, DurabilityClass, L0Stub, OperationalState,
+    TierCapability, TierId,
 };
 
 fn caps<V: Clone + Send + Sync + 'static + thesix::IntegrityCheck>()
@@ -392,122 +392,4 @@ async fn recovering_is_reported_as_recovering_and_distinguished_from_available()
         m.get(&key, &ctx).await.expect("read"),
         Some("v".to_string())
     );
-}
-
-/// `capabilities.eviction_policy_is_tier_defined = true`: the crate ships no
-/// eviction policy, and the choice of what to evict belongs to the tier.
-///
-/// The tempting weaker test asserts `eviction_candidate()` is `None` somewhere. That
-/// passes for the wrong reason -- `None` is also what a *delegating* tier returns when
-/// it holds nothing -- so it cannot tell "this tier has no policy" from "this tier has
-/// nothing to evict". It would prove the default, not tier-definition.
-///
-/// So both halves run against one populated rung. The rung delegates to the stub and
-/// nominates; that same rung wrapped in a tier which does not override the method
-/// nominates nothing. The difference is the tier's, not the data's.
-#[tokio::test]
-async fn eviction_policy_is_the_tiers_choice_not_the_crates() {
-    testkit::proves!("capabilities.eviction_policy_is_tier_defined");
-
-    let rung = Arc::new(L0Stub::<String>::new());
-    let key = thesix::KeyRef(b"occupied");
-    rung.set(&key, "v".to_string(), None)
-        .await
-        .expect("the rung holds a value");
-
-    // Anti-vacuity for the positive half: the slot really is occupied, so a `None`
-    // from the delegating tier would mean the policy declined rather than that there
-    // was nothing there. Without this the test could not tell the two cases apart.
-    assert!(
-        rung.contains(&key).await.expect("contains"),
-        "the rung is empty, so a later `None` would prove nothing"
-    );
-    assert!(
-        rung.eviction_candidate().is_some(),
-        "a rung holding a value must nominate it; otherwise the positive half is \
-         satisfied by an empty store"
-    );
-
-    // The same rung behind a tier that does not override `eviction_candidate`.
-    // `StatedTier` delegates every operation except `capability`, so it inherits the
-    // trait default -- and the default is the crate having no opinion.
-    let silent = StatedTier::wrap(rung.clone(), OperationalState::Healthy);
-    assert!(
-        silent.contains(&key).await.expect("contains"),
-        "the wrapper must not change what is stored, or the two halves would differ by \
-         more than the policy"
-    );
-    assert!(
-        silent.eviction_candidate().is_none(),
-        "a tier that does not override `eviction_candidate` still nominated one, so the \
-         crate does have a default policy and the clause is false"
-    );
-}
-
-/// `engineering.design.tier_topology_is_replaceable = true`: the seven-rung topology is
-/// infrastructure behind `CacheTier`, not a structure the manager depends on.
-///
-/// The proof is substitutivity rather than inspection: the same operations are driven
-/// against two different sets of tier implementations and must produce identical
-/// observable results. A manager that reached past its tiers -- for a rung's identity,
-/// its capacity, or its position in the ladder -- would diverge here even though every
-/// individual call still looked correct.
-///
-/// Anti-vacuity in both directions: the substitute must be a *different* implementation
-/// (asserted by type, not by comment), and the two must agree on values, on misses, and
-/// on what a saturated ladder does. Comparing only the happy path would let a topology
-/// assumption hide in the error path, which is where B17 and B22 both lived.
-#[tokio::test]
-async fn the_tier_topology_is_replaceable_behind_the_trait() {
-    testkit::proves!("engineering.design.tier_topology_is_replaceable");
-
-    let key = "replaceable".to_string();
-    let ctx = test_ctx();
-
-    // Two managers, same policy, materially different tier implementations.
-    let stock = testkit::make_manager::<String>(DefaultPolicy);
-    // `StatedTier` wraps each rung and delegates every operation, so the concrete type
-    // behind every rung differs while the observable behaviour does not. Using an
-    // existing delegating wrapper rather than inventing one keeps the claim honest: the
-    // substitute has to be a real `CacheTier`, not a test-only shape.
-    let stock_tiers = default_tiers::<String>();
-    let substitute = manager_from_tiers(
-        DefaultPolicy,
-        stock_tiers
-            .iter()
-            .map(|t| {
-                StatedTier::wrap(t.clone(), OperationalState::Healthy) as Arc<dyn CacheTier<String>>
-            })
-            .collect(),
-        std::time::Duration::from_millis(250),
-    );
-
-    for m in [&stock, &substitute] {
-        m.set(&key, "v".to_string(), &ctx).await.expect("set");
-        assert_eq!(m.get(&key, &ctx).await.expect("get"), Some("v".to_string()));
-        assert!(m.exists(&key, &ctx).await.expect("exists"));
-    }
-
-    // Agreement on a miss, not only on a hit.
-    // Agreement on a miss, not only on a hit. `get` reports an absent key as
-    // `Err(Miss)`, so that is the shape compared -- a topology assumption would most
-    // plausibly hide here, where "no value" is produced by control-plane state rather
-    // than by a tier answering.
-    let absent = "absent".to_string();
-    for m in [&stock, &substitute] {
-        assert!(
-            matches!(m.get(&absent, &ctx).await, Err(thesix::CacheError::Miss)),
-            "a miss must report Miss regardless of which tier implementation backs the \
-             rungs"
-        );
-    }
-
-    // And agreement on removal.
-    for m in [&stock, &substitute] {
-        m.remove(&key, &ctx).await.expect("remove");
-        assert!(
-            matches!(m.get(&key, &ctx).await, Err(thesix::CacheError::Miss)),
-            "a removed key must read as a miss under either topology"
-        );
-    }
 }

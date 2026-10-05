@@ -1,5 +1,76 @@
 # CHANGELOG
 
+## Unreleased — TETANUS gate, 106 tests that were not running, and four holes in the gate itself
+
+### Added
+
+- **`cargo xtask run tetanus`**: all ten rules from Holzmann's Power of Ten
+  (<https://spinroot.com/p10/>) as a mandatory gate. Eight are gated by exact
+  `(rule, location)` set equality in both directions; two are counted and reported.
+  The Rust mapping is this repository's own and carries no endorsement from Holzmann
+  or JPL. `tetanus.toml` is the standard and is the source of truth, in the same
+  sense `theSix.toml` is.
+- `tetanus::tests` (20) and `tests/contract/tetanus.rs` (17) — the contract layer
+  asserting the standard is load-bearing rather than descriptive.
+- `a_covering_job_actually_invokes_the_gate_it_claims_to_cover` — resolves each
+  `covers` entry against the job's actual `run:` blocks. `lib` as a gate target,
+  mapping to `--lib`.
+
+### Fixed
+
+- **The gate named `unit` ran no unit tests** (B24). Its argv was four `--test`
+  flags, and `--test X` excludes the lib binary, so 49 `#[cfg(test)]` tests inside
+  `src/` were compiled by `check` and `clippy` and never executed. Nothing reported
+  it, because they pass — only a failure would have been visible, and there was no
+  mechanism to produce one. `unit` now runs 72 tests across 5 binaries.
+- **The `contract` CI job ran the validator, not the gate** (B25). It declared
+  `covers = ["contract"]` while its steps were `cargo xtask contract` (parse and
+  print) and `cargo xtask list`. All 56 assertions in `tests/contract` compiled,
+  linted, and never ran — on this branch and on `0d40e41` alike. This survived
+  because the assertion meant to catch it compared gate *names*.
+- `cargo xtask bless --prune` — baseline maintenance that removes stale entries
+  explicitly and prints every removal, instead of a hand edit.
+
+### Fixed, in the gate that was being added
+
+Found by mutation-testing the gate against itself: planting a real violation and
+requiring the gate to fail. Every one of these passed CI, because all of them are
+cases where the gate reported a pass it had not earned.
+
+- **Rules 1, 2, 4 and 8 were blind inside inline `mod` blocks** (B30). `scan()`
+  iterated `file.items` and called an inherent method per item, so an item nested in
+  `mod { .. }` never reached the rules dispatched from there — while the seventeen
+  visible `#[allow]` sites were checked. Thirteen of the sixteen inline `mod` blocks
+  in the scan set are `#[cfg(test)] mod tests`. Rule 2's count went 108 → 122 and
+  rule 10's 17 → 34, entirely from code that had never been scanned.
+- **Rule 10 could not see crate-level `#![allow]`** (B34), which is where the widest
+  suppression in the crate lives: `src/lib.rs:9` silences fourteen lints. Fixed by the
+  same change as B30 — `visit_file` visits `file.attrs` before its items.
+- **Rule 5 counted every `Result`-returning arm as both data and error** (B31),
+  inventing 11 violations. `src/control/cachelito.rs:29` read "mixes 7 value arm(s)
+  with 7 result arm(s)" for seven `Ok`/`Err` arms that mix nothing, and each of the 24
+  baselined sites carried a justification asserting a hazard that was not there. The
+  classification is now exclusive; rule 5 fell 24 → 13.
+- **Rule 9 was titled as covering bare function pointers and checked none** (B33).
+  `syn::Type::BareFn` fell to `_ => None`. No bare `fn(..)` type exists in the tree, so
+  the count of 89 was right by accident rather than by measurement.
+- **`bless` could write a duplicate baseline entry** (found by the gate's own
+  duplicate-key check). Two findings of one rule on one line were appended twice
+  because the "already have this key" set was not extended as entries were written.
+
+### Still open, in the gate
+
+- **Rule 7 is titled no-check-then-act and cannot detect check-then-act** (B32,
+  decision D5). The predicate's entire input is the last statement of two branch
+  blocks; it never reads the condition and never compares identifiers across
+  statements, so a real TOCTOU — `let n = v.len(); if n > 0 { v[n - 1] } else { 0 }`
+  — produces nothing. What it detects is an early-return idiom. The previous
+  `finds_nothing_because` blamed the crate's house style and named `?` and `let-else`
+  as the reason, when syn routes neither to `visit_expr_if` at all; the zero was a
+  property of the analyzer. Rewritten to say so, with `as_titled` and
+  `as_implemented` declared as separate required fields, and the missed shape pinned
+  by `rule_7_does_not_claim_to_detect_toctou`.
+
 ## 0.4.0 — backlog pass (B15–B21)
 
 Seven findings closed since the verification-architecture work, one of which was a
@@ -98,7 +169,7 @@ three more things underneath it that had never run either.
 - A `bash -n` lint over every `run:` block, with a regression test that feeds B7's
   exact stray `done` through the same path and requires it to be caught.
 - `testkit::coverage::INVARIANT_PROOFS` and `[[verification.invariant_waiver]]`:
-  all 140 declared invariants bound to a proving test (139) or waived with a stated
+  all 95 declared invariants bound to a proving test (94) or waived with a stated
   reason (1), checked for exact set equality. See the 0.4.0 section above for what
   changed the split.
 - A `Verification (all gates)` aggregator job, which is the single check branch

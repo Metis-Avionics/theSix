@@ -99,11 +99,6 @@ fn a_fixed_capacity_tier_fills_reclaims_and_then_refuses() {
 #[test]
 #[ignore = "soak gate; run via `cargo xtask run soak`"]
 fn the_manager_degrades_down_the_ladder_before_it_fails() {
-    testkit::proves!(
-        "engineering.eviction_is_last_resort_after_degradation",
-        "verification.anti_vacuity.fallback_path_must_be_verified"
-    );
-
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()

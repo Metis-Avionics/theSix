@@ -73,9 +73,13 @@ cannot be deleted — or downgraded to dodge the check — without editing the
 contract. A finding clears only by being `resolved` with a `rationale`, or
 `accepted-risk` with both `accepted_by` and `rationale`.
 
-Order matters: fmt → contract → authorship → xtask_unit → check → clippy → doc →
-tests → doctest → deny → machete → package → merge_readiness. `loom`,
+Order matters: fmt → contract → authorship → xtask_unit → check → clippy → tetanus →
+doc → tests → doctest → deny → machete → package → merge_readiness. `loom`,
 `performance`, `soak` and `fuzz` are deferred.
+
+`tetanus` runs after `clippy` because rule 10 is a lint rule: a baseline shift
+caused by a lint change should surface as a gate failure rather than as an
+unexplained edit to a data file.
 
 `authorship` is the second-cheapest gate and runs early because it judges the
 change under review, not the branch. It reads every commit message in the
@@ -137,9 +141,6 @@ nothing.
 `CacheManager<K, V, P>` enforces authentication, delegates tier selection to
 policy, and coordinates through `Cachelito`.
 
-* Eviction is **mechanics, not policy**. `CacheTier::eviction_candidate` defaults to
-  `None`, so the crate ships no eviction policy; each tier nominates under its own
-  rule. Declared as `capabilities.eviction_policy_is_tier_defined`.
 * `bound_tier(id) -> Option<..>` is the only rung accessor. There is no
   substitution: an unbound rung returns `None`, never another rung's tier.
 * `nearest_bound_rung(wanted)` resolves a *policy choice* to the best bound rung
@@ -155,12 +156,8 @@ policy, and coordinates through `Cachelito`.
   pre-intent state: restoring would point at a source rung the move already
   emptied, and a read would serve that emptiness as a value.
 * `set` walks down the ladder on any rung-level failure (full, unavailable,
-  timed out, corrupt) and retries a lost commit race **on the same rung**. It
-  returns an error when every rung below refuses, with one declared exception:
-  an exhausted race budget returns `WriteContended` without descending. A lost
-  race is not evidence the rung cannot store the value, so treating it as
-  rung-level failure is what put losing, older values into colder rungs (B22).
-  Declared as `cia.availability.write_race_exhaustion_reports_contended`.
+  timed out, corrupt) and retries a lost commit race. It returns an error only
+  when every rung below refuses.
 * `wait_for_population` registers with `Notified::enable()` **before** deciding
   to wait, and re-reads afterwards. `notify` is `notify_waiters`; the two halves
   pair to close the lost-wakeup window without stranding other waiters.
@@ -202,12 +199,63 @@ tenant `a` + key `bc`. An oversized frame is **rejected, not truncated**.
 part of the key. **This invalidates every existing cached key** — see the 0.4.0
 release notes.
 
+## TETANUS — the Power of Ten as a ratchet
+
+`tetanus.toml` declares all ten rules from Holzmann's rules
+(<https://spinroot.com/p10/>). `cargo xtask run tetanus` is a mandatory gate.
+
+**The Rust mapping is this repository's own and carries no endorsement from
+Holzmann or JPL.** The source is cited so the derivation can be checked, not so
+the rules can be attributed.
+
+* **`gated`** rules compare findings against `[[baseline]]` by exact `(rule,
+  location)` set equality **in both directions**. A new violation fails; a
+  justification cannot outlive the code it describes.
+* **`reported`** rules are counted and printed, never baselined. Rules 3 and 9
+  have 1033 and 89 sites. 1122 entries repeating one sentence would make the count
+  the only thing anyone read, which is the failure mode a baseline exists to
+  prevent.
+* A gated rule that finds **nothing** must say why in `finds_nothing_because`.
+  Both the gate and `tests/contract/tetanus.rs` require it. A rule that finds zero
+  sites without saying why reads as a check that ran rather than a check with
+  nothing to say.
+* `check` is one of `mechanical`, `review`, `mixed`. A `review` or `mixed` rule
+  must name a `review_artifact`; a `mechanical` rule must name none. The
+  undecidable part of a mixed rule is recorded somewhere a human reads.
+* Editing any scanned Rust file **moves its own baseline entries**. Run
+  `cargo xtask bless --prune`, which is explicit, prints every removal, and
+  refuses an empty scan. Line numbers are not stable identifiers — see B26 for
+  what that costs in `bugs.toml`, where nothing checks it at all.
+
+**Rule titles state what the rule forbids. Where the predicate measures something
+narrower, `as_titled` and `as_implemented` say so and are required to differ.**
+Rules 1, 2, 4, 5, 6, 7 and 10 carry the `mixed` or `review` flag, which asserts that
+the tree cannot decide part of the rule — and rule 7 is the sharpest case: it is
+titled `no check-then-act`, which is TOCTOU, and the predicate detects an early-return
+idiom instead. That gap is B32 and decision D5; it is recorded rather than papered over.
+
+Four drafts were wrong in ways this gate's own verification caught:
+
+- Rule 3 detected nothing while declaring a clean crate that allocates 1033 times.
+- Rule 8 reported `#[derive]` and `#[doc]` as conditional compilation — 490 of its 493
+  original sites. Only `cfg`/`cfg_attr` can remove code from a build.
+- Rules 1, 2, 4, 8 and 10 never fired inside an inline `mod` block (B30), because
+  `scan()` iterated `file.items` instead of entering through `visit_file`. Thirteen of
+  the sixteen inline `mod` blocks in the scan set are `#[cfg(test)] mod tests`.
+- Rule 5 counted every `Result` arm as both data and error (B31), inventing 11
+  violations out of seven-`Ok`-arm matches that mix nothing.
+
+All four passed CI. They were found by mutation-testing the gate against itself:
+plant a real violation, require the gate to fail, and try the shape in more than one
+position. `tests/contract/tetanus.rs` exists so the set of things that can be true
+about this file is asserted rather than described.
+
 ## Test layers
 
 | Layer | Target | Demonstrates |
 |---|---|---|
 | contract | `tests/contract` | The TOML is load-bearing |
-| unit | `integration` `hierarchy` `policy` `stampede` | Core behaviour |
+| unit | `lib` `integration` `hierarchy` `policy` `stampede` | Core behaviour |
 | negative | `negative` | 21 failure modes, each by resulting state |
 | fault_injection | `fault_injection` | 12 faults, each proven to fire |
 | property | `property` | 9 invariants, randomised with shrinking |

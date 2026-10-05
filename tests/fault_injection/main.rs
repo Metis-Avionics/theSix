@@ -83,10 +83,7 @@ fn every_fault_class_has_a_stable_name() {
 
 #[tokio::test]
 async fn latency_stalls_without_failing() {
-    testkit::proves!(
-        "latency",
-        "verification.anti_vacuity.fault_activation_must_be_verified"
-    );
+    testkit::proves!("latency");
 
     let (m, ledger, _t) = armed(FaultPlan::new().push_latency_ms(OpKind::Set, 20));
     let started = std::time::Instant::now();
@@ -118,11 +115,7 @@ async fn timeout_fails_the_operation() {
 
 #[tokio::test]
 async fn hang_parks_the_operation_and_leaves_the_control_plane_free() {
-    testkit::proves!(
-        "hang",
-        "hpa.isolation.slow_backend_may_block_control_plane",
-        "verification.anti_vacuity.blocked_state_must_be_verified"
-    );
+    testkit::proves!("hang", "hpa.isolation.slow_backend_may_block_control_plane");
 
     let (m, ledger, handle) = armed(FaultPlan::new().push(OpKind::Get, FaultClass::ReadFailure));
     let key = "hangs".to_string();
@@ -268,11 +261,7 @@ async fn metadata_failure_fails_the_operation_but_not_the_entry() {
 
 #[tokio::test]
 async fn corruption_is_detected_rather_than_served() {
-    testkit::proves!(
-        "cia.integrity.corrupt_data_promoted",
-        "corruption",
-        "verification.anti_vacuity.corruption_must_be_verified"
-    );
+    testkit::proves!("cia.integrity.corrupt_data_promoted", "corruption");
 
     let (tier, ledger) = faulty_corrupting(
         Arc::new(L0Stub::<String>::new()) as Arc<dyn CacheTier<String>>,

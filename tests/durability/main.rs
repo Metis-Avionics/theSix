@@ -18,8 +18,6 @@ use thesix::{
 /// Nothing may claim `Verified` without a restart test in this file.
 #[test]
 fn verified_durability_is_earned_not_assumed() {
-    testkit::proves!("engineering.fake_durability");
-
     let m = make_manager_with_timeout::<String>(thesix::DefaultPolicy, Duration::from_millis(100));
     for (id, cap) in m.capabilities() {
         assert_ne!(

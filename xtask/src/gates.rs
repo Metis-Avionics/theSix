@@ -49,7 +49,28 @@ impl Toolchain {
             sccache: which("sccache"),
             linker,
             mold,
-            nextest: which("cargo-nextest").is_some() || which("cargo").is_some(),
+            nextest: which("cargo-nextest").is_some(),
+        }
+    }
+
+    /// The tool a gate needs that cargo does not provide.
+    ///
+    /// A test gate reports `Unavailable` without `cargo-nextest`, and the CI job
+    /// running the `contract` gate hit exactly that on its first run: the job had
+    /// never executed a gate before, only the validator, which needs no runner, so
+    /// the missing dependency stayed invisible until a gate was added to it. The
+    /// `Unavailable` outcome and exit 3 were right -- "I could not verify this" --
+    /// but the job needs to be green, not honest, so the dependency belongs in it.
+    #[must_use]
+    pub fn missing_for(&self, gate: &Gate) -> Option<String> {
+        match gate.kind {
+            GateKind::Test | GateKind::Slow if !self.nextest => {
+                Some("`cargo-nextest` is not installed".to_string())
+            }
+            GateKind::Doctest if which_bin("cargo").is_none() => {
+                Some("`cargo` is not installed".to_string())
+            }
+            _ => None,
         }
     }
 
@@ -230,8 +251,17 @@ pub fn argv_for(gate: &Gate, _toolchain: &Toolchain) -> Vec<String> {
             ];
             inner.extend(gate.features.iter().cloned());
             for t in &gate.targets {
-                inner.push("--test".to_string());
-                inner.push(t.clone());
+                // `--lib` reaches the unit-test binary; `--test <name>` selects an
+                // integration-test binary and excludes it. They are different
+                // targets, so the distinction has to be in the contract rather than
+                // inferred, which is what the literal `lib` is for: a target named
+                // `lib` is the lib unit-test binary, anything else is a `--test`.
+                if t == "lib" {
+                    inner.push("--lib".to_string());
+                } else {
+                    inner.push("--test".to_string());
+                    inner.push(t.clone());
+                }
             }
             if gate.kind == GateKind::Slow {
                 // `#[ignore]`d gates: opt in explicitly, and only these.
@@ -240,7 +270,7 @@ pub fn argv_for(gate: &Gate, _toolchain: &Toolchain) -> Vec<String> {
             }
             cmd = inner;
         }
-        GateKind::Tracker | GateKind::Authorship => {
+        GateKind::Tracker | GateKind::Authorship | GateKind::Analysis => {
             // Not a subprocess. `--dry-run` still prints something meaningful so
             // the gate is reviewable in the matrix listing like every other one.
             cmd.push("xtask".to_string());
@@ -304,6 +334,10 @@ pub fn run(gate: &Gate, opts: &RunOptions) -> GateResult {
         return authorship(&gate.name, &opts.root, started, &opts.forbidden_trailers);
     }
 
+    if gate.kind == GateKind::Analysis {
+        return crate::tetanus::gate(&gate.name, &opts.root, started, opts.dry_run);
+    }
+
     let (program, args) = argv.split_first().expect("argv_for never returns empty");
     let mut cmd = Command::new(program);
     cmd.args(args)
@@ -324,6 +358,19 @@ pub fn run(gate: &Gate, opts: &RunOptions) -> GateResult {
         if opts.verbose { "always" } else { "never" },
     );
 
+    // Gate kind is checked before the program name, because a test gate needs
+    // `cargo-nextest` specifically. The two are separate binaries, and the probe
+    // used to be `which("cargo-nextest").is_some() || which("cargo").is_some()` --
+    // so the header claimed `runner: nextest` on a machine with cargo and no
+    // nextest, and the refusal below was already made by `missing_tool`.
+    if let Some(missing) = opts.toolchain.missing_for(gate) {
+        return GateResult {
+            name: gate.name.clone(),
+            outcome: Outcome::Unavailable,
+            duration: started.elapsed(),
+            detail: Some(missing),
+        };
+    }
     let unavailable = missing_tool(program, &argv);
     if let Some(missing) = unavailable {
         return GateResult {
@@ -478,6 +525,14 @@ pub fn resolve<'a>(
 /// True when `path` looks like a test target directory we can look for.
 #[must_use]
 pub fn test_target_exists(root: &Path, target: &str) -> bool {
+    // `lib` is the crate's own unit-test binary, not a file under `tests/`. It is
+    // the one target name that does not correspond to a path, so it is checked
+    // against the manifest instead of the directory. Without this, the contract
+    // validator would reject the one target that can reach `#[cfg(test)]` code
+    // inside `src/`, which is the defect this target exists to close.
+    if target == "lib" {
+        return root.join("Cargo.toml").is_file();
+    }
     let dir = root.join("tests").join(target);
     dir.join("main.rs").is_file() || root.join("tests").join(format!("{target}.rs")).is_file()
 }
@@ -903,6 +958,63 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Instant;
 
+    /// A test gate with no runner is refused, not attempted.
+    ///
+    /// This is the exact path CI took when the `contract` job was first given the
+    /// gate it had always claimed to cover: the job had no `cargo-nextest`, so the
+    /// gate reported `Unavailable` and the run exited 3. The outcome was correct --
+    /// "I could not verify this" is not "I verified this" -- but the assertion
+    /// below pins it, because the alternative reading is that a gate silently skips
+    /// when its runner is missing, which is the failure this repository treats as
+    /// unforgivable.
+    #[test]
+    fn a_test_gate_without_nextest_is_unavailable_and_never_spawns() {
+        let gate = Gate {
+            name: "contract".to_string(),
+            kind: GateKind::Test,
+            command: vec![],
+            args: vec![],
+            targets: vec!["contract".to_string()],
+            features: vec![],
+            env: std::collections::BTreeMap::new(),
+            description: "fixture".to_string(),
+        };
+        let mut tools = Toolchain {
+            nextest: false,
+            ..Toolchain::default()
+        };
+        assert_eq!(
+            tools.missing_for(&gate).as_deref(),
+            Some("`cargo-nextest` is not installed")
+        );
+
+        tools.nextest = true;
+        assert_eq!(
+            tools.missing_for(&gate),
+            None,
+            "a present runner changes the answer"
+        );
+    }
+
+    /// The header must not claim a runner that is not there.
+    ///
+    /// The probe used to be `which("cargo-nextest").is_some() || which("cargo")`
+    /// because every gate argv started with `cargo`, so cargo's presence implied
+    /// nextest's. It does not: they are separate binaries. With the old probe, a
+    /// machine with cargo and no nextest printed `runner: nextest` and then
+    /// reported every test gate `Unavailable`, which reads as a broken checkout
+    /// rather than a missing dependency.
+    #[test]
+    fn a_runner_is_claimed_only_when_nextest_is_present() {
+        assert!(!Toolchain::default().nextest);
+        let probed = Toolchain::probe();
+        assert_eq!(
+            probed.nextest,
+            which_bin("cargo-nextest").is_some(),
+            "the probe must report nextest, not cargo"
+        );
+    }
+
     /// A fresh directory per call, so parallel tests cannot see each other's
     /// fixtures. `cargo nextest` runs each test in its own process, but the unit
     /// tests here may also run under plain `cargo test`.
@@ -1165,8 +1277,6 @@ mod tests {
     /// rewrites the declared path and checks the loaded contract follows it.
     #[test]
     fn the_tracker_path_is_read_from_the_contract() {
-        testkit::proves!("verification.merge_readiness.tracker");
-
         let real = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("theSix.toml");

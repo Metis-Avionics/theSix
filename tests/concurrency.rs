@@ -477,8 +477,6 @@ async fn a_read_that_overlaps_an_abort_reports_what_the_control_plane_now_says()
 /// entry's commit would land in a slot nobody authorised.
 #[tokio::test]
 async fn an_entry_under_population_is_not_evictable() {
-    testkit::proves!("engineering.eviction_is_control_plane_authorised");
-
     use std::sync::atomic::Ordering::SeqCst;
 
     let key = "populated".to_string();

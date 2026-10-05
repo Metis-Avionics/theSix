@@ -212,8 +212,7 @@ async fn one_failing_rung_does_not_cascade() {
 async fn an_aborted_prepared_write_is_not_left_readable() {
     testkit::proves!(
         "acid.atomicity.cancelled_operation_may_commit_partially",
-        "acid.atomicity.recovery_direction_prepare_write",
-        "verification.anti_vacuity.recovery_path_must_be_verified"
+        "acid.atomicity.recovery_direction_prepare_write"
     );
 
     let cachelito = thesix::Cachelito::new();

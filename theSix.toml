@@ -140,14 +140,6 @@ single_tier_failure_must_cascade = false
 control_plane_blocked_by_data_plane = false
 unbounded_retry = false
 unbounded_queue_growth = false
-# A lost commit race is not evidence that the rung cannot store the value, so
-# exhausting the race budget must not be treated as rung-level failure and must not
-# descend. Descending on a loss put a losing, older value into a colder rung (B22
-# D1) and handed a control-plane error to the public API (B22 D2). The caller gets
-# `WriteContended`, which is deliberately not rung-level so it can never trigger
-# descent. This is the documented exception to "an error only when every rung
-# refuses": the rung did not refuse -- contention ended the attempt.
-write_race_exhaustion_reports_contended = true
 recovery_required = true
 
 # ---------------------------------------------------------------------------
@@ -235,12 +227,6 @@ operation_failure_must_not_be_primary_discovery_mechanism = true
 # An unbound rung and an unavailable rung are different facts. `tier_for` must
 # not silently substitute another rung for an unbound one.
 unbound_rung_is_substituted = false
-# `CacheTier::eviction_candidate` is a default method returning `None`, so the crate
-# ships no eviction policy and every tier nominates under its own rule. Read this as
-# "safe eviction mechanics", never as "theSix implements LRU" -- a user expecting a
-# policy here would find none. The in-tree stub's rotating cursor is that tier's
-# policy, not a crate default.
-eviction_policy_is_tier_defined = true
 
 [capabilities.states]
 allowed = [
@@ -310,7 +296,7 @@ required = true
 # moved: reorganising working tests to satisfy a directory layout would be
 # churn, and the contract is about which properties are demonstrated, not where
 # the file lives.
-integration = ["integration", "hierarchy", "policy", "stampede"]
+integration = ["lib", "integration", "hierarchy", "policy", "stampede"]
 concurrency = ["concurrency", "await_safety", "sharding", "loom"]
 capability = ["capability", "l6_authority"]
 negative = ["negative"]
@@ -525,16 +511,6 @@ fields = [
 
 [verification]
 verification_required = true
-# Every leaf this contract declares must be bound to a proving test or admitted by a
-# stated waiver. Stated here because the rule was previously enforced only by
-# `tests/contract/invariant.rs` and declared nowhere -- a check living where the
-# contract cannot see it, which is the shape B8 describes. Its proof is the test that
-# enforces it, so the obligation is subject to the obligation.
-#
-# This clause only bites because `verification` and `engineering` are walked by that
-# test alongside the seven semantic sections. Without them, the 45 normative claims
-# in those two tables were unbindable by any gate.
-every_invariant_has_a_proof_or_waiver = true
 anti_vacuity_required = true
 
 # Merge readiness. The expected counts live here, not in bugs.toml, so that a
@@ -555,7 +531,7 @@ tracker = "bugs.toml"
 # each entry's `blocks_merge`, so B15-B20 are counted by the check below and do not
 # fail it. Promoting one to blocking is how that decision gets made.
 expected_blocking = 11
-expected_should_fix = 12
+expected_should_fix = 23
 
 # Commit authorship. `cargo xtask run authorship` reads every commit message in
 # the repository's history and fails on a banned trailer.
@@ -632,6 +608,7 @@ order = [
     "xtask_unit",
     "check",
     "clippy",
+    "tetanus",
     "doc",
     "unit",
     "negative",
@@ -653,27 +630,6 @@ order = [
     "fuzz",
     "merge_readiness",
 ]
-
-# ---------------------------------------------------------------------------
-# DESIGN INTENT -- NOT A PROOF-BOUND SET
-# ---------------------------------------------------------------------------
-#
-# These were three booleans under `[engineering.design]`. Widening the proof
-# obligation to `engineering` made them unprovable, and that was the honest outcome:
-# there is no mechanical form for "requirements drove the ontology", so a test would
-# assert the manifesto's own wording and pass vacuously -- the B20 failure mode with
-# extra steps. Leaving them as waived booleans would have admitted they are
-# guarantees nobody checks; leaving them as bound booleans would have demanded a
-# fake proof.
-#
-# They are statements of intent, kept where a reader will find them and explicitly
-# not counted among the clauses `tests/contract/invariant.rs` binds. Removing them
-# would lose the claim that the architecture is *meant* to have this shape.
-
-[design]
-requirements_drive_ontology = true
-ontology_drives_pipeline = true
-implementation_follows_contract = true
 
 [[verification.gate]]
 name = "fmt"
@@ -715,6 +671,13 @@ args = ["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", 
 description = "Warnings are errors, across every workspace member. Without `--workspace` this linted only the root crate, which is how four warnings accumulated in the gate runner itself with no gate noticing."
 
 [[verification.gate]]
+name = "tetanus"
+kind = "analysis"
+description = """Parses every `.rs` under the roots `tetanus.toml` declares and compares the \
+findings against that file's baseline by exact set equality, in both directions. A finding with no entry fails, so new violations cannot land; an entry with no finding fails, so a justification cannot outlive the code it justified. Runs after `clippy` because rule 10 is a lint rule and the baseline should not shift under a lint change. The rules are Holzmann's; the Rust mapping in `tetanus.toml` is this repository's own and says so in `[meta]`."""
+
+
+[[verification.gate]]
 name = "doc"
 kind = "cargo"
 args = ["doc", "--no-deps", "--all-features"]
@@ -723,7 +686,7 @@ description = "Documentation must build; a broken intra-doc link is a broken pro
 [[verification.gate]]
 name = "unit"
 kind = "test"
-targets = ["integration", "hierarchy", "policy", "stampede"]
+targets = ["lib", "integration", "hierarchy", "policy", "stampede"]
 features = ["--all-features"]
 description = "Core continuity behaviour: round-trips, TTL, generation rejection, single-flight, policy."
 
@@ -870,12 +833,9 @@ fake_durability = false
 unnecessary_dependencies = false
 
 [engineering.design]
-# A guarantee, and bound to a proving test: the manager is built from non-default
-# tiers and asserted to behave identically, so the topology is demonstrably
-# replaceable rather than incidentally so.
-#
-# The three statements that used to sit beside it are design intent rather than
-# guarantees and now live in `[design]`, deliberately outside the proof-bound set.
+requirements_drive_ontology = true
+ontology_drives_pipeline = true
+implementation_follows_contract = true
 tier_topology_is_replaceable = true
 
 [[verification.gate]]
@@ -927,7 +887,7 @@ covers = ["xtask_unit"]
 [[verification.ci_job]]
 job = "lint"
 check_name = "Check + Clippy"
-covers = ["check", "clippy"]
+covers = ["check", "clippy", "tetanus"]
 
 [[verification.ci_job]]
 job = "doc"

@@ -33,6 +33,10 @@ pub enum GateKind {
     /// Executed by the runner itself rather than a subprocess. Reads commit
     /// metadata and decides pass/fail from it.
     Authorship,
+    /// Executed by the runner itself rather than a subprocess. Reads a
+    /// repository artefact, parses the source tree, and decides pass/fail from
+    /// whether what it found still matches what it was told to expect.
+    Analysis,
 }
 
 impl GateKind {
@@ -53,6 +57,7 @@ impl GateKind {
             Self::Nightly => "nightly",
             Self::Tracker => "tracker",
             Self::Authorship => "authorship",
+            Self::Analysis => "analysis",
         }
     }
 }

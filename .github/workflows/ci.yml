@@ -51,6 +51,12 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           rustc-wrapper: true
+      # cargo-nextest, because the gate below is a nextest gate. Without it the
+      # runner reports `Unavailable` and exits 3 -- "I could not verify this" rather
+      # than "I verified this", which is the honest answer and still a red build.
+      # This job had never run a gate before: it called the validator, which needs
+      # no runner, and passed, so nothing ever revealed the missing dependency.
+      - uses: taiki-e/install-action@d33ae53f5400bbbd4fa744ecd206e8cea22082b9 # cargo-nextest
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: contract
@@ -59,6 +65,15 @@ jobs:
         run: cargo xtask contract
       - name: List resolved gates
         run: cargo xtask list
+      # The job is named `contract` and `theSix.toml` lists it under `covers`,
+      # so it has to run the gate, not just the validator. `cargo xtask contract`
+      # parses the contract and prints; `cargo xtask run contract` is the gate.
+      # Only the first of those ran, which meant all 56 assertions in
+      # `tests/contract` compiled, linted, and never executed -- and nothing
+      # reported it, because the assertion that checks this compares gate *names*
+      # and both names were present.
+      - name: Run the contract gate
+        run: cargo xtask run contract
 
   # The `authorship` gate reads commit history, so it needs a full clone. The
   # default checkout is depth 1, which would make this gate report a pass over the
@@ -161,6 +176,9 @@ jobs:
       # reported success on the strength of its second attempt.
       - run: cargo xtask run check
       - run: cargo xtask run clippy
+      # After clippy, because rule 10 is a lint rule: a baseline shift caused by a
+      # lint change should show up here rather than as an unexplained baseline edit.
+      - run: cargo xtask run tetanus
 
   doc:
     name: Docs
