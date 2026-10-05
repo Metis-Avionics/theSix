@@ -224,7 +224,7 @@ the rules can be attributed.
   undecidable part of a mixed rule is recorded somewhere a human reads.
 * Editing any scanned Rust file **moves its own baseline entries**. Run
   `cargo xtask bless --prune`, which is explicit, prints every removal, and
-  refuses an empty scan. Line numbers are not stable identifiers — see B25 for
+  refuses an empty scan. Line numbers are not stable identifiers — see B26 for
   what that costs in `bugs.toml`, where nothing checks it at all.
 
 Two drafts in this gate's first week were wrong in ways the contract layer caught:

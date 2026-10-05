@@ -1683,10 +1683,10 @@ moment when `main` had no required status check to act on it (B21).
 # PRs #5-#8 landed between the review being written and this re-audit, so the
 # review's claims were re-checked against the tree rather than copied. Two of its
 # eight claims are now wrong and are recorded here as closed-with-evidence rather
-# than carried forward as open work. The claims that still stand are B23-B28.
+# than carried forward as open work. The claims that still stand are B24-B29.
 
 [[bug]]
-id = "B23"
+id = "B24"
 title = "The `unit` gate ran no unit tests: 49 assertions inside src/ never executed"
 severity = "should-fix"
 status = "resolved"
@@ -1720,7 +1720,7 @@ declares `-p testkit`. Recorded rather than fixed because adding a cross-crate t
 gate is a contract decision, not a fix."""
 
 [[bug]]
-id = "B24"
+id = "B25"
 title = "The contract CI job ran the validator, not the gate, so all of tests/contract was unrun"
 severity = "should-fix"
 status = "resolved"
@@ -1754,7 +1754,7 @@ correct. This is a heuristic on YAML, and it is a heuristic that has already cau
 one real hole."""
 
 [[bug]]
-id = "B25"
+id = "B26"
 title = "Nothing validates a bugs.toml `locations` entry; several are already wrong"
 severity = "should-fix"
 status = "open"
@@ -1792,7 +1792,7 @@ being paid in public, four times, rather than silently in a tracker nobody reads
 rationale = """Not resolved. Only stage (3) exists, and only for `tetanus.toml`."""
 
 [[bug]]
-id = "B26"
+id = "B27"
 title = "Cachelito::prepare's expected_generation is passed None at all 42 call sites, so its StaleGeneration arm is dead"
 severity = "should-fix"
 status = "open"
@@ -1823,7 +1823,7 @@ be non-`None` is not a check."""
 rationale = """Not resolved. Needs a behavioural decision on the write path first."""
 
 [[bug]]
-id = "B27"
+id = "B28"
 title = "The Loom model is not the real Cachelito and diverges where abort is concerned"
 severity = "should-fix"
 status = "open"
@@ -1852,7 +1852,7 @@ rationale = """Not resolved. The disclosure is good; the divergence in `abort` i
 would mislead."""
 
 [[bug]]
-id = "B28"
+id = "B29"
 title = "CacheTier::tier_id is a required trait method with zero production callers"
 severity = "should-fix"
 status = "open"

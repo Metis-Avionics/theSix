@@ -18,12 +18,12 @@
 
 ### Fixed
 
-- **The gate named `unit` ran no unit tests** (B23). Its argv was four `--test`
+- **The gate named `unit` ran no unit tests** (B24). Its argv was four `--test`
   flags, and `--test X` excludes the lib binary, so 49 `#[cfg(test)]` tests inside
   `src/` were compiled by `check` and `clippy` and never executed. Nothing reported
   it, because they pass — only a failure would have been visible, and there was no
   mechanism to produce one. `unit` now runs 72 tests across 5 binaries.
-- **The `contract` CI job ran the validator, not the gate** (B24). It declared
+- **The `contract` CI job ran the validator, not the gate** (B25). It declared
   `covers = ["contract"]` while its steps were `cargo xtask contract` (parse and
   print) and `cargo xtask list`. All 56 assertions in `tests/contract` compiled,
   linted, and never ran — on this branch and on `0d40e41` alike. This survived

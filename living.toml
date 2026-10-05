@@ -215,7 +215,7 @@ blocks = "nothing in this repository; needs a token"
 
 [[handover.open_decisions.item]]
 id = "D4"
-question = "B26: prepare's expected_generation is None at all 42 call sites. Enforce it or delete it?"
+question = "B27: prepare's expected_generation is None at all 42 call sites. Enforce it or delete it?"
 options = [
     "Pass the generation the caller read at both production sites, which makes StaleGeneration reachable and changes when `set` fails.",
     "Remove the parameter. The commit-side `expired_by` check is the real defence and it is tested; a parameter no caller can use is not a check.",
