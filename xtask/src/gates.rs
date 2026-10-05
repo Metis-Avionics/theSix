@@ -240,7 +240,7 @@ pub fn argv_for(gate: &Gate, _toolchain: &Toolchain) -> Vec<String> {
             }
             cmd = inner;
         }
-        GateKind::Tracker | GateKind::Authorship => {
+        GateKind::Tracker | GateKind::Authorship | GateKind::Analysis => {
             // Not a subprocess. `--dry-run` still prints something meaningful so
             // the gate is reviewable in the matrix listing like every other one.
             cmd.push("xtask".to_string());
@@ -302,6 +302,10 @@ pub fn run(gate: &Gate, opts: &RunOptions) -> GateResult {
 
     if gate.kind == GateKind::Authorship {
         return authorship(&gate.name, &opts.root, started, &opts.forbidden_trailers);
+    }
+
+    if gate.kind == GateKind::Analysis {
+        return crate::tetanus::gate(&gate.name, &opts.root, started, opts.dry_run);
     }
 
     let (program, args) = argv.split_first().expect("argv_for never returns empty");

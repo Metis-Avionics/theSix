@@ -608,6 +608,7 @@ order = [
     "xtask_unit",
     "check",
     "clippy",
+    "tetanus",
     "doc",
     "unit",
     "negative",
@@ -668,6 +669,13 @@ name = "clippy"
 kind = "cargo"
 args = ["clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
 description = "Warnings are errors, across every workspace member. Without `--workspace` this linted only the root crate, which is how four warnings accumulated in the gate runner itself with no gate noticing."
+
+[[verification.gate]]
+name = "tetanus"
+kind = "analysis"
+description = """Parses every `.rs` under the roots `tetanus.toml` declares and compares the \
+findings against that file's baseline by exact set equality, in both directions. A finding with no entry fails, so new violations cannot land; an entry with no finding fails, so a justification cannot outlive the code it justified. Runs after `clippy` because rule 10 is a lint rule and the baseline should not shift under a lint change. The rules are Holzmann's; the Rust mapping in `tetanus.toml` is this repository's own and says so in `[meta]`."""
+
 
 [[verification.gate]]
 name = "doc"

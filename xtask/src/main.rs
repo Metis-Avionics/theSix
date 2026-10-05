@@ -6,6 +6,7 @@
 
 mod contract;
 mod gates;
+mod tetanus;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -89,6 +90,15 @@ enum Command {
     Toolchain,
     /// Print the test-target-to-layer mapping the contract declares.
     Layers,
+    /// Print every TETANUS finding as `rule<TAB>location<TAB>detail`.
+    Tetanus,
+    /// Write a `tetanus.toml` baseline entry for every finding that lacks one.
+    ///
+    /// The entries it writes carry a placeholder reason that the gate rejects, so
+    /// this scaffolds and does not decide: someone still has to say why each site
+    /// is acceptable. It refuses to run on an unparseable file or an empty scan,
+    /// because either would write a baseline that silently stops checking.
+    Bless,
 }
 
 fn main() -> ExitCode {
@@ -146,6 +156,20 @@ fn main() -> ExitCode {
         }
         Command::Deferred => {
             print_gates(&contract, true);
+            ExitCode::SUCCESS
+        }
+        Command::Tetanus => {
+            if let Err(e) = tetanus::print_findings(&root) {
+                eprintln!("{RED}tetanus error{RESET}\n{e}");
+                return ExitCode::from(3);
+            }
+            ExitCode::SUCCESS
+        }
+        Command::Bless => {
+            if let Err(e) = tetanus::bless(&root) {
+                eprintln!("{RED}bless error{RESET}\n{e}");
+                return ExitCode::from(3);
+            }
             ExitCode::SUCCESS
         }
         Command::Layers => {

@@ -15,6 +15,21 @@ path = "src/main.rs"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
+# The TETANUS gate parses source rather than shelling out to a linter, because the
+# thing it must decide -- "is this finding still here" -- is a set-equality question
+# about the whole tree and no existing lint answers it.
+syn = { version = "2.0", features = [
+    "full",
+    "visit",
+    "extra-traits",
+    "parsing",
+    "printing",
+] }
+# `span-locations` is what turns a `syn::Error` from "somewhere in this file" into a
+# line and a column, which the baseline needs in order to be checkable at all.
+proc-macro2 = { version = "1.0", features = ["span-locations"] }
+# `ToTokens`, for rendering a type back to text in a finding message.
+quote = "1.0"
 # Depends on the crate it verifies so the contract's fault taxonomy can be
 # cross-checked against the real `FaultClass::ALL` rather than a copy that
 # would drift.
