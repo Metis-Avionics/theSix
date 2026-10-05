@@ -111,6 +111,10 @@ struct Rule {
     /// mechanical rule that names an artefact is claiming a review it does not do.
     #[serde(default)]
     review_artifact: Option<String>,
+    /// Why this rule currently has nothing to report, for a `gated` rule that finds
+    /// nothing. See the assertion in `analyse` that requires it.
+    #[serde(default)]
+    finds_nothing_because: Option<String>,
 }
 
 /// One declared existing violation.
@@ -227,11 +231,11 @@ impl Scan<'_> {
         // Rule 8: conditional compilation and macro-generated code. Checked at the
         // item level so a `#[cfg]`-gated block is attributed to the item it gates
         // rather than to whatever line the attribute happens to sit on.
-        if let Some(attr) = item_attrs(item) {
-            if let Some(line) = line_of(&attr.path()) {
-                let detail = describe_attr(&attr.path());
-                self.push(8, line, detail);
-            }
+        if let Some(attr) = item_attrs(item)
+            && let Some(line) = line_of(&attr.path())
+        {
+            let detail = describe_attr(attr.path());
+            self.push(8, line, detail);
         }
 
         // Rules 1, 2 and 4 all need a named function and its statements, so they
@@ -441,26 +445,26 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     /// `allow` is the thing worth noticing.
     fn visit_attribute(&mut self, node: &syn::Attribute) {
         let name = node.path().segments.last().map(|s| s.ident.to_string());
-        if let Some(kw @ ("allow" | "expect")) = name.as_deref() {
-            if let Some(line) = line_of(node) {
-                let lint = match &node.meta {
-                    syn::Meta::List(l) => quote::ToTokens::to_token_stream(&l.tokens).to_string(),
-                    other => quote::ToTokens::to_token_stream(other).to_string(),
-                }
-                .replace('"', "")
-                .trim_start_matches("allow")
-                .trim_start_matches("expect")
-                .trim()
-                .to_string();
-                self.push(
-                    10,
-                    line,
-                    format!(
-                        "`#[{kw}({lint})]` suppresses a diagnostic the gate would \
-                         otherwise treat as a finding"
-                    ),
-                );
+        if let Some(kw @ ("allow" | "expect")) = name.as_deref()
+            && let Some(line) = line_of(node)
+        {
+            let lint = match &node.meta {
+                syn::Meta::List(l) => quote::ToTokens::to_token_stream(&l.tokens).to_string(),
+                other => quote::ToTokens::to_token_stream(other).to_string(),
             }
+            .replace('"', "")
+            .trim_start_matches("allow")
+            .trim_start_matches("expect")
+            .trim()
+            .to_string();
+            self.push(
+                10,
+                line,
+                format!(
+                    "`#[{kw}({lint})]` suppresses a diagnostic the gate would \
+                         otherwise treat as a finding"
+                ),
+            );
         }
         syn::visit::visit_attribute(self, node);
     }
@@ -470,6 +474,13 @@ impl<'ast> Visit<'ast> for Scan<'_> {
 // Rule predicates
 // ---------------------------------------------------------------------------
 
+/// The item's first *conditional* attribute, if it has one.
+///
+/// Conditional, specifically. An earlier version returned the first attribute of
+/// any kind, which reported `#[derive]` and `#[doc]` as rule 8 findings -- several
+/// hundred of them, none of which affect whether code is compiled. The predicate is
+/// `cfg` or `cfg_attr` and nothing else, because those are the only two attributes
+/// that can remove code from a build.
 fn item_attrs(item: &syn::Item) -> Option<&syn::Attribute> {
     let attrs: &[syn::Attribute] = match item {
         syn::Item::Fn(f) => &f.attrs,
@@ -480,7 +491,16 @@ fn item_attrs(item: &syn::Item) -> Option<&syn::Attribute> {
         syn::Item::Impl(i) => &i.attrs,
         _ => return None,
     };
-    attrs.first()
+    attrs.iter().find(|a| {
+        matches!(
+            a.path()
+                .segments
+                .last()
+                .map(|s| s.ident.to_string())
+                .as_deref(),
+            Some("cfg" | "cfg_attr")
+        )
+    })
 }
 
 fn describe_attr(path: &syn::Path) -> String {
@@ -858,12 +878,9 @@ fn dyn_under(ty: &syn::Type) -> Option<String> {
                 return None;
             };
             args.args.iter().find_map(|a| match a {
-                syn::GenericArgument::Type(t) => match &*t {
-                    syn::Type::TraitObject(o) => {
-                        Some(print_type(&syn::Type::TraitObject(o.clone())))
-                    }
-                    _ => None,
-                },
+                syn::GenericArgument::Type(syn::Type::TraitObject(o)) => {
+                    Some(print_type(&syn::Type::TraitObject(o.clone())))
+                }
                 _ => None,
             })
         }
@@ -1033,6 +1050,34 @@ fn analyse(root: &Path) -> Report {
         }
     }
 
+    // A `gated` rule that has no baseline entry and no `finds_nothing_because` has
+    // either never been checked or had its entries deleted. Enforced here and not
+    // only in `tests/contract` because this is the gate's own file's invariant, and
+    // a gate that defers its own rules to a test in another crate is one edit away
+    // from not having them.
+    {
+        let baselined: BTreeSet<usize> = file.baseline.iter().map(|b| b.rule).collect();
+        for r in file
+            .rules
+            .iter()
+            .filter(|r| r.disposition == Disposition::Gated)
+        {
+            if baselined.contains(&r.id) {
+                continue;
+            }
+            let why = r.finds_nothing_because.as_deref().unwrap_or("").trim();
+            if why.len() <= 40 {
+                clean = false;
+                lines.push(format!(
+                    "  rule {} is gated and finds nothing, with no `finds_nothing_because`. \
+                     Either it has never been checked or its entries were deleted, and \
+                     both look identical from here.",
+                    r.id
+                ));
+            }
+        }
+    }
+
     // A `Review`/`Mixed` rule must name its artefact; a `Mechanical` one must not,
     // because that would claim a human pass the gate never asked for.
     for r in file.rules.iter() {
@@ -1182,7 +1227,7 @@ pub fn print_findings(root: &Path) -> Result<(), String> {
 /// a finding set that is *smaller*, and writing a baseline from it would delete the
 /// record of the sites it stopped checking. That is not a refactor of the baseline;
 /// it is the failure the baseline exists to catch.
-pub fn bless(root: &Path) -> Result<(), String> {
+pub fn bless(root: &Path, prune: bool) -> Result<(), String> {
     let file = load(root)?;
     let verdict = collect(root, &file)?;
 
@@ -1237,15 +1282,107 @@ pub fn bless(root: &Path) -> Result<(), String> {
         added += 1;
     }
 
-    if added == 0 {
-        println!("baseline already covers every finding; nothing to write");
+    // Entries whose finding has moved or disappeared. Removing these is the one
+    // dangerous direction, so it is opt-in and it reports every removal rather than
+    // editing silently. A stale entry is usually line drift from editing the file it
+    // points at, which is the single most common way to meet this file -- the
+    // checker scans `xtask/src/tetanus.rs`, so every edit to it moves its own
+    // baseline entries.
+    let found_keys: BTreeSet<(usize, String)> = verdict
+        .findings
+        .iter()
+        .map(|f| (f.rule, f.location.clone()))
+        .collect();
+    let stale: Vec<&Baseline> = file
+        .baseline
+        .iter()
+        .filter(|b| !found_keys.contains(&(b.rule, b.location.clone())))
+        .collect();
+    let mut pruned = 0usize;
+    for b in &stale {
+        if prune {
+            println!("pruned: rule {} at {}", b.rule, b.location);
+            pruned += 1;
+        } else {
+            println!(
+                "stale: rule {} at {} (pass --prune to remove)",
+                b.rule, b.location
+            );
+        }
+    }
+    if !prune && !stale.is_empty() {
+        return Err(format!(
+            "{} baseline entr(ies) no longer match a finding. The finding set is \
+             trustworthy, so this is line drift: the file moved, or the violation did. \
+             Re-run with --prune to drop them, and read the list first -- a stale entry \
+             can also mean the violation was fixed, which is the good case.",
+            stale.len()
+        ));
+    }
+
+    if added == 0 && pruned == 0 {
+        println!("baseline matches every finding; nothing to write");
         return Ok(());
     }
+    // Rewrite by buffering whole `[[baseline]]` blocks and rejoining them, so every
+    // comment in the file survives. Round-tripping through a TOML value would drop
+    // `[meta].note` and each rule's rationale, which is most of the file's content
+    // and the part a reader actually needs.
     let path = root.join("tetanus.toml");
-    let mut text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    text.push_str(&out);
-    fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
-    println!("wrote {added} baseline entr(ies), each with a TODO reason the gate will reject");
+    let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    const HEADER: &str = "[[baseline]]";
+    let mut head = String::new();
+    let mut blocks: Vec<(usize, String, String)> = Vec::new(); // (rule, location, block text)
+    let mut current: Option<(usize, String, String)> = None;
+    for line in text.lines() {
+        if line.trim() == HEADER {
+            if let Some(b) = current.take() {
+                blocks.push(b);
+            }
+            current = Some((0, String::new(), String::new()));
+            continue;
+        }
+        match current.as_mut() {
+            Some((rule, location, body)) => {
+                if let Some(v) = line.strip_prefix("rule = ") {
+                    *rule = v.trim().parse().unwrap_or(0);
+                } else if let Some(v) = line.strip_prefix("location = \"") {
+                    *location = v.trim_end_matches('"').to_string();
+                }
+                body.push_str(line);
+                body.push('\n');
+            }
+            None => {
+                head.push_str(line);
+                head.push('\n');
+            }
+        }
+    }
+    if let Some(b) = current.take() {
+        blocks.push(b);
+    }
+
+    let mut kept = head;
+    for (rule, location, body) in &blocks {
+        if prune && !found_keys.contains(&(*rule, location.clone())) {
+            continue;
+        }
+        kept.push_str(HEADER);
+        kept.push('\n');
+        kept.push_str(body);
+    }
+    if !kept.ends_with('\n') {
+        kept.push('\n');
+    }
+    kept.push_str(&out);
+    fs::write(&path, kept).map_err(|e| format!("{}: {e}", path.display()))?;
+    if added > 0 {
+        println!("wrote {added} baseline entr(ies), each with a TODO reason the gate will reject");
+    }
+    if pruned > 0 {
+        println!("pruned {pruned} stale entr(ies)");
+    }
+    println!("run the reason pass next: every new entry has a placeholder the gate rejects");
     Ok(())
 }
 
@@ -1350,9 +1487,8 @@ mod tests {
     #[test]
     fn rule_4_ignores_comments() {
         let s = Scratch::new();
-        let body: String = std::iter::repeat("// a line of commentary\n    ")
-            .take(300)
-            .collect::<String>();
+        let body: String =
+            std::iter::repeat_n("// a line of commentary\n    ", 300).collect::<String>();
         let p = s.file(&format!(
             "pub fn f() {{\n    {body}let x = 1;\n    let _ = x;\n}}\n"
         ));
@@ -1375,6 +1511,20 @@ mod tests {
         let s = Scratch::new();
         let p = s.file("#[cfg(feature = \"redis\")]\npub fn f() {}\n");
         assert!(rules_of(&p).contains(&8));
+    }
+
+    /// The regression from the other direction, and the one that mattered more: an
+    /// attribute that cannot remove code from a build is not conditional
+    /// compilation. Reporting `#[derive]` as rule 8 put 490 false positives into a
+    /// baseline and would have made the gate unmaintainable on sight.
+    #[test]
+    fn rule_8_ignores_attributes_that_always_compile() {
+        let s = Scratch::new();
+        let p = s.file("#[derive(Debug)]\n#[doc = \"a struct\"]\npub struct S;\n");
+        assert!(
+            !rules_of(&p).contains(&8),
+            "derive and doc attributes are present in every build"
+        );
     }
 
     #[test]
@@ -1493,6 +1643,7 @@ mod tests {
                     check: Check::Mechanical,
                     disposition: Disposition::Gated,
                     review_artifact: None,
+                    finds_nothing_because: None,
                 })
                 .collect(),
             baseline: Vec::new(),

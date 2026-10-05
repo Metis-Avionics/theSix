@@ -866,6 +866,7 @@ fn the_policy_names_keys_not_attributions() {
     }
 }
 
+mod tetanus;
 mod workflow;
 
 mod invariant;

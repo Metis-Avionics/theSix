@@ -161,6 +161,9 @@ jobs:
       # reported success on the strength of its second attempt.
       - run: cargo xtask run check
       - run: cargo xtask run clippy
+      # After clippy, because rule 10 is a lint rule: a baseline shift caused by a
+      # lint change should show up here rather than as an unexplained baseline edit.
+      - run: cargo xtask run tetanus
 
   doc:
     name: Docs

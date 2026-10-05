@@ -98,7 +98,16 @@ enum Command {
     /// this scaffolds and does not decide: someone still has to say why each site
     /// is acceptable. It refuses to run on an unparseable file or an empty scan,
     /// because either would write a baseline that silently stops checking.
-    Bless,
+    Bless {
+        /// Also drop entries whose finding has moved or disappeared.
+        ///
+        /// Removing an entry is the direction that can silently stop checking, so it
+        /// is opt-in and prints every removal. The usual cause is line drift after
+        /// editing a scanned file; the usual reason to want it is that the violation
+        /// was actually fixed.
+        #[arg(long)]
+        prune: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -165,8 +174,8 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        Command::Bless => {
-            if let Err(e) = tetanus::bless(&root) {
+        Command::Bless { prune } => {
+            if let Err(e) = tetanus::bless(&root, prune) {
                 eprintln!("{RED}bless error{RESET}\n{e}");
                 return ExitCode::from(3);
             }

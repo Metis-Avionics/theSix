@@ -887,7 +887,7 @@ covers = ["xtask_unit"]
 [[verification.ci_job]]
 job = "lint"
 check_name = "Check + Clippy"
-covers = ["check", "clippy"]
+covers = ["check", "clippy", "tetanus"]
 
 [[verification.ci_job]]
 job = "doc"
