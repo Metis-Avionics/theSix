@@ -190,12 +190,12 @@ pub const FAULT_CASE_PROOFS: &[(&str, &str)] = &[
 
 /// Every declared invariant paired with the test that proves it.
 ///
-/// The contract names 95 leaves across its seven semantic sections. Before this
-/// registry existed, *none* of them was bound to a test: the contract asserted
-/// that flags were set, that layers had targets, that negative cases had cases —
-/// and never that a declared invariant had anything exercising it. A new
-/// invariant therefore cost nothing to add, which is the over-promise the
-/// contract was supposed to make impossible.
+/// The contract names 140 leaves across nine sections. Before this registry
+/// existed, *none* of them was bound to a test: the contract asserted that flags
+/// were set, that layers had targets, that negative cases had cases — and never
+/// that a declared invariant had anything exercising it. A new invariant therefore
+/// cost nothing to add, which is the over-promise the contract was supposed to make
+/// impossible.
 ///
 /// Locators are `path::fn`, resolved against the repository root by
 /// `tests/contract/invariant.rs`. `tests/contract` proves the registry is honest;
@@ -203,13 +203,197 @@ pub const FAULT_CASE_PROOFS: &[(&str, &str)] = &[
 /// and the contract side owns what it admits to leaving uncovered. Neither file
 /// can quietly satisfy the other.
 ///
-/// The limit worth stating plainly: this proves a test is *named and exists*, not
-/// that it proves the invariant. Naming a test that does not exercise the clause
-/// satisfies the gate. That gap is the same one `declare_cases!` documents — the
-/// remaining step is a review judgement, and the anti-vacuity instruments are
-/// what make it checkable. What the gate does enforce is that an invariant cannot
-/// be added, renamed or deleted without this file changing with it.
+/// Since B20 each cited test must also **declare** the clause it is cited for, via
+/// `testkit::proves!`. Existence alone was the defect B20 closed: a row pointing at a
+/// real but irrelevant test satisfied the gate, so the registry read as coverage while
+/// proving nothing.
+///
+/// The limit that remains is irreducible: a test may declare the right clause and
+/// assert the wrong thing. A declaration is a claim by the test about itself, so it can
+/// be wrong in the same way any test can be wrong. What the gate does enforce is that a
+/// clause cannot be added, renamed or deleted without this file changing with it, and
+/// that a mis-citation fails rather than passing quietly.
 pub const INVARIANT_PROOFS: &[(&str, &str)] = &[
+    (
+        "engineering.lock_across_await",
+        "tests/property/main.rs::control_plane_survives_a_wedged_data_plane",
+    ),
+    (
+        "verification.anti_vacuity_required",
+        "tests/contract/main.rs::required_verification_flags_are_all_set",
+    ),
+    (
+        "verification.required.check_all_features",
+        "tests/contract/main.rs::required_verification_flags_are_all_set",
+    ),
+    (
+        "verification.required.check_all_targets",
+        "tests/contract/main.rs::required_verification_flags_are_all_set",
+    ),
+    (
+        "verification.required.clippy_warnings_as_errors",
+        "tests/contract/main.rs::required_verification_flags_are_all_set",
+    ),
+    (
+        "verification.required.dependency_audit",
+        "tests/contract/main.rs::required_verification_flags_are_all_set",
+    ),
+    (
+        "verification.required.dependency_hygiene",
+        "tests/contract/main.rs::required_verification_flags_are_all_set",
+    ),
+    (
+        "verification.required.doctests",
+        "tests/contract/main.rs::required_verification_flags_are_all_set",
+    ),
+    (
+        "verification.required.documentation",
+        "tests/contract/main.rs::required_verification_flags_are_all_set",
+    ),
+    (
+        "verification.required.fmt",
+        "tests/contract/main.rs::required_verification_flags_are_all_set",
+    ),
+    (
+        "verification.required.package_validation",
+        "tests/contract/main.rs::required_verification_flags_are_all_set",
+    ),
+    (
+        "verification.required.tests_all_features",
+        "tests/contract/main.rs::required_verification_flags_are_all_set",
+    ),
+    (
+        "verification.required.tests_all_targets",
+        "tests/contract/main.rs::required_verification_flags_are_all_set",
+    ),
+    (
+        "verification.verification_required",
+        "tests/contract/main.rs::required_verification_flags_are_all_set",
+    ),
+    (
+        "capabilities.eviction_policy_is_tier_defined",
+        "tests/capability.rs::eviction_policy_is_the_tiers_choice_not_the_crates",
+    ),
+    (
+        "cia.availability.write_race_exhaustion_reports_contended",
+        "tests/negative/main.rs::write_contended",
+    ),
+    (
+        "engineering.ci_actions_sha_pinned",
+        "tests/contract/main.rs::every_ci_action_reference_is_pinned_by_sha",
+    ),
+    (
+        "engineering.design.tier_topology_is_replaceable",
+        "tests/capability.rs::the_tier_topology_is_replaceable_behind_the_trait",
+    ),
+    (
+        "engineering.eviction_is_control_plane_authorised",
+        "tests/concurrency.rs::an_entry_under_population_is_not_evictable",
+    ),
+    (
+        "engineering.eviction_is_last_resort_after_degradation",
+        "tests/soak/main.rs::the_manager_degrades_down_the_ladder_before_it_fails",
+    ),
+    (
+        "engineering.eviction_may_discard_a_ready_entry",
+        "tests/negative/main.rs::eviction_reclaims_a_saturated_ladder",
+    ),
+    (
+        "engineering.fake_durability",
+        "tests/durability/main.rs::verified_durability_is_earned_not_assumed",
+    ),
+    (
+        "engineering.hidden_blocking",
+        "tests/await_safety.rs::the_crates_own_source_carries_no_unsafe_and_no_blocking_calls",
+    ),
+    (
+        "engineering.runtime_block_on",
+        "tests/await_safety.rs::the_crates_own_source_carries_no_unsafe_and_no_blocking_calls",
+    ),
+    (
+        "engineering.rust_memory_safety_required",
+        "tests/await_safety.rs::the_crates_own_source_carries_no_unsafe_and_no_blocking_calls",
+    ),
+    (
+        "engineering.silent_backend_substitution",
+        "tests/l6_authority.rs::unbound_l6_is_reported_not_substituted",
+    ),
+    (
+        "engineering.unnecessary_dependencies",
+        "tests/contract/workflow.rs::every_declared_gate_is_executed_by_a_ci_job",
+    ),
+    (
+        "engineering.unsafe_requires_justification",
+        "tests/await_safety.rs::the_crates_own_source_carries_no_unsafe_and_no_blocking_calls",
+    ),
+    (
+        "verification.adversarial.concurrency",
+        "tests/contract/main.rs::every_adversarial_layer_is_enabled_and_bound_to_a_target",
+    ),
+    (
+        "verification.adversarial.durability",
+        "tests/contract/main.rs::every_adversarial_layer_is_enabled_and_bound_to_a_target",
+    ),
+    (
+        "verification.adversarial.fault_injection",
+        "tests/contract/main.rs::every_adversarial_layer_is_enabled_and_bound_to_a_target",
+    ),
+    (
+        "verification.adversarial.fuzz",
+        "tests/contract/main.rs::every_adversarial_layer_is_enabled_and_bound_to_a_target",
+    ),
+    (
+        "verification.adversarial.negative",
+        "tests/contract/main.rs::every_adversarial_layer_is_enabled_and_bound_to_a_target",
+    ),
+    (
+        "verification.adversarial.performance",
+        "tests/contract/main.rs::every_adversarial_layer_is_enabled_and_bound_to_a_target",
+    ),
+    (
+        "verification.adversarial.property",
+        "tests/contract/main.rs::every_adversarial_layer_is_enabled_and_bound_to_a_target",
+    ),
+    (
+        "verification.adversarial.recovery",
+        "tests/contract/main.rs::every_adversarial_layer_is_enabled_and_bound_to_a_target",
+    ),
+    (
+        "verification.adversarial.security",
+        "tests/contract/main.rs::every_adversarial_layer_is_enabled_and_bound_to_a_target",
+    ),
+    (
+        "verification.adversarial.soak",
+        "tests/contract/main.rs::every_adversarial_layer_is_enabled_and_bound_to_a_target",
+    ),
+    (
+        "verification.anti_vacuity.blocked_state_must_be_verified",
+        "tests/fault_injection/main.rs::hang_parks_the_operation_and_leaves_the_control_plane_free",
+    ),
+    (
+        "verification.anti_vacuity.corruption_must_be_verified",
+        "tests/fault_injection/main.rs::corruption_is_detected_rather_than_served",
+    ),
+    (
+        "verification.anti_vacuity.fallback_path_must_be_verified",
+        "tests/soak/main.rs::the_manager_degrades_down_the_ladder_before_it_fails",
+    ),
+    (
+        "verification.anti_vacuity.fault_activation_must_be_verified",
+        "tests/fault_injection/main.rs::latency_stalls_without_failing",
+    ),
+    (
+        "verification.anti_vacuity.recovery_path_must_be_verified",
+        "tests/recovery/main.rs::an_aborted_prepared_write_is_not_left_readable",
+    ),
+    (
+        "verification.every_invariant_has_a_proof_or_waiver",
+        "tests/contract/invariant.rs::every_declared_invariant_has_a_proof_or_a_waiver",
+    ),
+    (
+        "verification.merge_readiness.tracker",
+        "xtask/src/gates.rs::the_tracker_path_is_read_from_the_contract",
+    ),
     (
         "concurrency.testing.promotion_eviction_races",
         "tests/concurrency.rs::eviction_invalidates_an_in_flight_commit",

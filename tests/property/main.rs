@@ -105,7 +105,7 @@ proptest! {
     /// *something* consistent-looking — so it has to be checked against a model.
     #[test]
     fn no_silent_data_loss(ops in prop::collection::vec(op_gen(), 1..16)) {
-    testkit::proves!("no_silent_data_loss");
+    testkit::proves!("no_silent_data_loss", "engineering.lock_across_await");
 
         let rt = runtime();
         let m = manager();
@@ -373,7 +373,7 @@ proptest! {
         stall_after in 0usize..4,
         probes in prop::collection::vec(key_gen(), 1..8),
     ) {
-    testkit::proves!("acid.isolation.deadlock_tolerance", "concurrency.deadlock_free", "no_deadlock", "no_lock_across_await");
+    testkit::proves!("acid.isolation.deadlock_tolerance", "concurrency.deadlock_free", "no_deadlock", "no_lock_across_await", "engineering.lock_across_await");
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)

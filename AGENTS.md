@@ -137,6 +137,9 @@ nothing.
 `CacheManager<K, V, P>` enforces authentication, delegates tier selection to
 policy, and coordinates through `Cachelito`.
 
+* Eviction is **mechanics, not policy**. `CacheTier::eviction_candidate` defaults to
+  `None`, so the crate ships no eviction policy; each tier nominates under its own
+  rule. Declared as `capabilities.eviction_policy_is_tier_defined`.
 * `bound_tier(id) -> Option<..>` is the only rung accessor. There is no
   substitution: an unbound rung returns `None`, never another rung's tier.
 * `nearest_bound_rung(wanted)` resolves a *policy choice* to the best bound rung
@@ -152,8 +155,12 @@ policy, and coordinates through `Cachelito`.
   pre-intent state: restoring would point at a source rung the move already
   emptied, and a read would serve that emptiness as a value.
 * `set` walks down the ladder on any rung-level failure (full, unavailable,
-  timed out, corrupt) and retries a lost commit race. It returns an error only
-  when every rung below refuses.
+  timed out, corrupt) and retries a lost commit race **on the same rung**. It
+  returns an error when every rung below refuses, with one declared exception:
+  an exhausted race budget returns `WriteContended` without descending. A lost
+  race is not evidence the rung cannot store the value, so treating it as
+  rung-level failure is what put losing, older values into colder rungs (B22).
+  Declared as `cia.availability.write_race_exhaustion_reports_contended`.
 * `wait_for_population` registers with `Notified::enable()` **before** deciding
   to wait, and re-reads afterwards. `notify` is `notify_waiters`; the two halves
   pair to close the lost-wakeup window without stranding other waiters.

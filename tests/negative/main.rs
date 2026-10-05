@@ -511,6 +511,8 @@ testkit::declare_cases! {
     /// *succeeded*; what distinguishes the fix is that L0 was never written and
     /// the entry is still claimable afterwards.
     async fn write_contended() {
+    testkit::proves!("cia.availability.write_race_exhaustion_reports_contended");
+
         use std::sync::atomic::Ordering::SeqCst;
 
         let key = "contended".to_string();
@@ -569,6 +571,8 @@ testkit::declare_cases! {
     /// value would also pass -- so this also asserts that a *read* after the
     /// flood returns either the right value or a miss.
     async fn eviction_reclaims_a_saturated_ladder() {
+    testkit::proves!("engineering.eviction_may_discard_a_ready_entry");
+
         use std::sync::atomic::Ordering::SeqCst;
 
         let m = mgr();

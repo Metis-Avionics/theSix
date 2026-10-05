@@ -1165,6 +1165,8 @@ mod tests {
     /// rewrites the declared path and checks the loaded contract follows it.
     #[test]
     fn the_tracker_path_is_read_from_the_contract() {
+        testkit::proves!("verification.merge_readiness.tracker");
+
         let real = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("theSix.toml");

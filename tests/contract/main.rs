@@ -612,6 +612,22 @@ fn every_declared_layer_is_bound_to_a_target() {
 
 #[test]
 fn required_verification_flags_are_all_set() {
+    testkit::proves!(
+        "verification.verification_required",
+        "verification.anti_vacuity_required",
+        "verification.required.fmt",
+        "verification.required.check_all_targets",
+        "verification.required.check_all_features",
+        "verification.required.tests_all_targets",
+        "verification.required.tests_all_features",
+        "verification.required.doctests",
+        "verification.required.clippy_warnings_as_errors",
+        "verification.required.documentation",
+        "verification.required.dependency_audit",
+        "verification.required.dependency_hygiene",
+        "verification.required.package_validation",
+    );
+
     let c = contract();
     assert!(c.verification.verification_required);
     assert!(c.verification.anti_vacuity_required);
@@ -882,6 +898,8 @@ mod invariant;
 /// weakening the contract weakens the check honestly instead of silently.
 #[test]
 fn every_ci_action_reference_is_pinned_by_sha() {
+    testkit::proves!("engineering.ci_actions_sha_pinned");
+
     let contract = std::fs::read_to_string("theSix.toml").expect("contract is readable");
     let declared = contract
         .lines()
@@ -928,5 +946,90 @@ fn every_ci_action_reference_is_pinned_by_sha() {
         "ci actions must be pinned by SHA; {} of {checked} are not:\n  {}",
         offenders.len(),
         offenders.join("\n  ")
+    );
+}
+
+/// `verification.adversarial.*`: every layer the contract marks adversarial must be
+/// switched on *and* bound to a real target, and switching one off must be visible.
+///
+/// The existing `every_declared_layer_is_bound_to_a_target` checks the layer table but
+/// hardcodes its own list of layer names, so it never reads `verification.adversarial`
+/// at all. Ten contract flags therefore governed nothing — the B13 shape, where a
+/// declared setting is not the one in force. This test reads the flags, which is what
+/// makes them load-bearing: a layer marked adversarial here is one the contract says
+/// must be adversarial, not one this file happens to remember.
+#[test]
+fn every_adversarial_layer_is_enabled_and_bound_to_a_target() {
+    testkit::proves!(
+        "verification.adversarial.negative",
+        "verification.adversarial.property",
+        "verification.adversarial.fuzz",
+        "verification.adversarial.concurrency",
+        "verification.adversarial.fault_injection",
+        "verification.adversarial.recovery",
+        "verification.adversarial.durability",
+        "verification.adversarial.security",
+        "verification.adversarial.performance",
+        "verification.adversarial.soak",
+    );
+
+    // Read the raw TOML: `Contract` has no field for the adversarial table, because
+    // nothing deserialised it until now.
+    let doc: toml::Value =
+        toml::from_str(include_str!("../../theSix.toml")).expect("theSix.toml must parse");
+    let adversarial = doc
+        .get("verification")
+        .and_then(|v| v.get("adversarial"))
+        .and_then(toml::Value::as_table)
+        .expect("[verification.adversarial] must be declared");
+
+    let c = contract();
+    let mut declared = Vec::new();
+    for (layer, value) in adversarial {
+        assert_eq!(
+            value.as_bool(),
+            Some(true),
+            "adversarial layer {layer:?} is switched off; an adversarial layer that is \
+             disabled is a claim the contract makes and does not keep"
+        );
+        // A layer is covered by a test target *or* by a declared gate. `fuzz` is the
+        // case that matters: its targets live in `fuzz/`, which is an excluded
+        // workspace needing nightly and libFuzzer, so it can never be a cargo test
+        // target. It is real adversarial coverage and the `fuzz` gate runs it. The
+        // pre-existing layer check hardcoded a list that omitted fuzz, which is why
+        // this divergence went unnoticed.
+        let by_target = c.testing.layers.get(layer).is_some_and(|t| !t.is_empty());
+        let by_gate = c.verification.gate.iter().any(|g| g.name == *layer);
+        assert!(
+            by_target || by_gate,
+            "adversarial layer {layer:?} is bound to neither a test target nor a \
+             declared gate, so nothing executes it"
+        );
+        declared.push(layer.clone());
+    }
+
+    // Anti-vacuity for the loop: an empty or absent table would pass every assertion
+    // above, so the count is pinned against what the contract actually declares.
+    assert_eq!(
+        declared.len(),
+        10,
+        "expected ten adversarial layers, found {declared:?}; a shrunken table must be \
+         a deliberate contract edit, not a silent pass"
+    );
+
+    // And every enabled adversarial layer must be switched on in the gate runner too,
+    // or the layer is declared adversarial and executed optionally.
+    // Both halves are real: at least one layer is target-bound and at least one is
+    // gate-bound, so the `by_target || by_gate` above cannot be satisfied by only one
+    // of the two paths being live.
+    let target_bound = declared
+        .iter()
+        .filter(|l| c.testing.layers.get(*l).is_some_and(|t| !t.is_empty()))
+        .count();
+    assert!(
+        target_bound > 0 && target_bound < declared.len(),
+        "expected a mix of target-bound and gate-bound adversarial layers, got \
+         {target_bound} of {}",
+        declared.len()
     );
 }

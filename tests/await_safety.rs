@@ -314,3 +314,97 @@ fn nested_block_on_is_absent_from_the_crate_and_would_be_caught() {
         );
     });
 }
+
+/// The four `engineering.*` clauses that describe what the crate's own source must
+/// not contain: `rust_memory_safety_required`, `unsafe_requires_justification`,
+/// `hidden_blocking` and `runtime_block_on`.
+///
+/// All four are source scans, and the reason they are scans rather than behavioural
+/// tests is worth stating, because it is the same reason B16's `nested_block_on`
+/// needed a second half: a scan proves the *text* is absent, and text is only a proxy
+/// for behaviour. Here the proxy is tight enough to be worth having — `unsafe` and
+/// `block_on` are not names a correct implementation uses incidentally — and the
+/// alternative is worse, which is the status quo B16 recorded: no mechanism and no
+/// claim.
+///
+/// Each scan skips comments, so the surrounding prose (this file, the `CacheTier`
+/// docs, `blocking_runtime_thread`'s waiver) does not trip it. A comment naming a
+/// hazard is documentation; a call to it is a defect.
+#[test]
+fn the_crates_own_source_carries_no_unsafe_and_no_blocking_calls() {
+    testkit::proves!(
+        "engineering.rust_memory_safety_required",
+        "engineering.unsafe_requires_justification",
+        "engineering.hidden_blocking",
+        "engineering.runtime_block_on",
+    );
+
+    // (token, clause, why it matters here)
+    let forbidden: &[(&str, &str, &str)] = &[
+        (
+            "unsafe ",
+            "engineering.rust_memory_safety_required",
+            "the crate root carries `#![forbid(unsafe_code)]`, so any `unsafe` here is a \
+             compile error, not a review question",
+        ),
+        (
+            "block_on(",
+            "engineering.runtime_block_on",
+            "nesting `block_on` inside async context deadlocks; B16 added a companion \
+             test proving the harness would notice",
+        ),
+        (
+            "std::thread::sleep",
+            "engineering.hidden_blocking",
+            "a sleep on a runtime worker stalls the whole reactor; blocking work belongs \
+             in `spawn_blocking`, which this crate does not call because it performs \
+             no blocking I/O",
+        ),
+        (
+            "blocking_recv(",
+            "engineering.hidden_blocking",
+            "a blocking channel receive stalls the worker it runs on",
+        ),
+        (
+            "blocking_send(",
+            "engineering.hidden_blocking",
+            "a blocking channel send stalls the worker it runs on when the channel is full",
+        ),
+        (
+            "read_to_end(",
+            "engineering.hidden_blocking",
+            "an unbuffered std file read is a blocking syscall; the crate uses no file I/O",
+        ),
+    ];
+
+    let mut offenders = Vec::new();
+    for entry in
+        std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/src")).expect("src is readable")
+    {
+        let path = entry.expect("dir entry").path();
+        if path.extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("source file is readable");
+        for (n, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("//") || trimmed.starts_with("///") {
+                continue;
+            }
+            for (token, clause, why) in forbidden {
+                if trimmed.contains(token) {
+                    offenders.push(format!(
+                        "{clause}: {}:{} contains {token:?} -- {why}",
+                        path.display(),
+                        n + 1
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the library's own source breaks a clause it declares:\n{}",
+        offenders.join("\n")
+    );
+}
