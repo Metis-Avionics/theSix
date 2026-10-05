@@ -577,51 +577,6 @@ reason = "A `loop` with no unconditional exit. The loop is bounded by a conditio
 
 [[baseline]]
 rule = 2
-location = "tests/contract/main.rs:614"
-reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
-
-[[baseline]]
-rule = 2
-location = "tests/contract/main.rs:652"
-reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
-
-[[baseline]]
-rule = 2
-location = "tests/contract/main.rs:675"
-reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
-
-[[baseline]]
-rule = 2
-location = "tests/contract/main.rs:689"
-reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
-
-[[baseline]]
-rule = 2
-location = "tests/contract/main.rs:795"
-reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
-
-[[baseline]]
-rule = 2
-location = "tests/contract/main.rs:852"
-reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
-
-[[baseline]]
-rule = 2
-location = "tests/contract/workflow.rs:247"
-reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
-
-[[baseline]]
-rule = 2
-location = "tests/contract/workflow.rs:274"
-reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
-
-[[baseline]]
-rule = 2
-location = "tests/contract/workflow.rs:459"
-reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
-
-[[baseline]]
-rule = 2
 location = "tests/durability/main.rs:20"
 reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
 
@@ -886,60 +841,9 @@ location = "xtask/src/gates.rs:205"
 reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
 
 [[baseline]]
-rule = 2
-location = "xtask/src/gates.rs:279"
-reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
-
-[[baseline]]
-rule = 5
-location = "xtask/src/gates.rs:472"
-reason = "A `match` mixing value arms with result arms. Rule 5's mechanical clause is the shape; the clause the gate cannot decide is whether this mix is intentional, and that is answered by the continuity contract rather than by the tree."
-
-[[baseline]]
-rule = 2
-location = "xtask/src/gates.rs:567"
-reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
-
-[[baseline]]
-rule = 2
-location = "xtask/src/gates.rs:772"
-reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
-
-[[baseline]]
-rule = 8
-location = "xtask/src/gates.rs:902"
-reason = "Conditional compilation. this code is not always compiled, so neither is its verification Gated because the clause is decidable and the cost is concrete: code that is not always compiled is code whose verification is not continuous."
-
-[[baseline]]
-rule = 6
-location = "xtask/src/gates.rs:914"
-reason = "`static immutable ` is static state. Rule 6's mechanical clause is the declaration itself; the clause it cannot decide is whether the scope is acceptable, which for this crate means whether the static is an immutable table or a mutable cell shared across tests. The gate checks the first and names the second rather than conflating them."
-
-[[baseline]]
-rule = 8
-location = "xtask/src/gates.rs:1205"
-reason = "Conditional compilation. this code is not always compiled, so neither is its verification Gated because the clause is decidable and the cost is concrete: code that is not always compiled is code whose verification is not continuous."
-
-[[baseline]]
-rule = 6
-location = "xtask/src/gates.rs:1286"
-reason = "`static immutable ` is static state. Rule 6's mechanical clause is the declaration itself; the clause it cannot decide is whether the scope is acceptable, which for this crate means whether the static is an immutable table or a mutable cell shared across tests. The gate checks the first and names the second rather than conflating them."
-
-[[baseline]]
-rule = 6
-location = "xtask/src/gates.rs:1478"
-reason = "`static immutable ` is static state. Rule 6's mechanical clause is the declaration itself; the clause it cannot decide is whether the scope is acceptable, which for this crate means whether the static is an immutable table or a mutable cell shared across tests. The gate checks the first and names the second rather than conflating them."
-
-
-[[baseline]]
 rule = 8
 location = "tests/capability.rs:203"
 reason = "Conditional compilation. this code is not always compiled, so neither is its verification Gated because the clause is decidable and the cost is concrete: code that is not always compiled is code whose verification is not continuous."
-
-[[baseline]]
-rule = 2
-location = "tests/contract/main.rs:885"
-reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
 
 [[baseline]]
 rule = 8
@@ -1057,4 +961,104 @@ reason = "Conditional compilation. this code is not always compiled, so neither 
 [[baseline]]
 rule = 6
 location = "xtask/src/tetanus.rs:1416"
+reason = "`static immutable ` is static state. Rule 6's mechanical clause is the declaration itself; the clause it cannot decide is whether the scope is acceptable, which for this crate means whether the static is an immutable table or a mutable cell shared across tests. The gate checks the first and names the second rather than conflating them."
+
+[[baseline]]
+rule = 2
+location = "tests/contract/main.rs:626"
+reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
+
+[[baseline]]
+rule = 2
+location = "tests/contract/main.rs:664"
+reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
+
+[[baseline]]
+rule = 2
+location = "tests/contract/main.rs:687"
+reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
+
+[[baseline]]
+rule = 2
+location = "tests/contract/main.rs:701"
+reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
+
+[[baseline]]
+rule = 2
+location = "tests/contract/main.rs:807"
+reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
+
+[[baseline]]
+rule = 2
+location = "tests/contract/main.rs:864"
+reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
+
+[[baseline]]
+rule = 2
+location = "tests/contract/main.rs:897"
+reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
+
+[[baseline]]
+rule = 2
+location = "tests/contract/workflow.rs:266"
+reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
+
+[[baseline]]
+rule = 2
+location = "tests/contract/workflow.rs:367"
+reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
+
+[[baseline]]
+rule = 2
+location = "tests/contract/workflow.rs:394"
+reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
+
+[[baseline]]
+rule = 2
+location = "tests/contract/workflow.rs:579"
+reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
+
+[[baseline]]
+rule = 2
+location = "xtask/src/gates.rs:288"
+reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
+
+[[baseline]]
+rule = 5
+location = "xtask/src/gates.rs:481"
+reason = "A `match` mixing value arms with result arms. Rule 5's mechanical clause is the shape; the clause the gate cannot decide is whether this mix is intentional, and that is answered by the continuity contract rather than by the tree."
+
+[[baseline]]
+rule = 2
+location = "xtask/src/gates.rs:584"
+reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
+
+[[baseline]]
+rule = 2
+location = "xtask/src/gates.rs:789"
+reason = "A `loop` with no unconditional exit. The loop is bounded by a condition the caller supplies and a counter it advances, or by a collection the loop is walking; the gate cannot see which, because deciding it requires a type and a value rather than a syntax tree. A per-site proof would be the honest version of this entry."
+
+[[baseline]]
+rule = 8
+location = "xtask/src/gates.rs:919"
+reason = "Conditional compilation. this code is not always compiled, so neither is its verification Gated because the clause is decidable and the cost is concrete: code that is not always compiled is code whose verification is not continuous."
+
+[[baseline]]
+rule = 6
+location = "xtask/src/gates.rs:931"
+reason = "`static immutable ` is static state. Rule 6's mechanical clause is the declaration itself; the clause it cannot decide is whether the scope is acceptable, which for this crate means whether the static is an immutable table or a mutable cell shared across tests. The gate checks the first and names the second rather than conflating them."
+
+[[baseline]]
+rule = 8
+location = "xtask/src/gates.rs:1222"
+reason = "Conditional compilation. this code is not always compiled, so neither is its verification Gated because the clause is decidable and the cost is concrete: code that is not always compiled is code whose verification is not continuous."
+
+[[baseline]]
+rule = 6
+location = "xtask/src/gates.rs:1303"
+reason = "`static immutable ` is static state. Rule 6's mechanical clause is the declaration itself; the clause it cannot decide is whether the scope is acceptable, which for this crate means whether the static is an immutable table or a mutable cell shared across tests. The gate checks the first and names the second rather than conflating them."
+
+[[baseline]]
+rule = 6
+location = "xtask/src/gates.rs:1495"
 reason = "`static immutable ` is static state. Rule 6's mechanical clause is the declaration itself; the clause it cannot decide is whether the scope is acceptable, which for this crate means whether the static is an immutable table or a mutable cell shared across tests. The gate checks the first and names the second rather than conflating them."

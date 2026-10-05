@@ -296,7 +296,7 @@ required = true
 # moved: reorganising working tests to satisfy a directory layout would be
 # churn, and the contract is about which properties are demonstrated, not where
 # the file lives.
-integration = ["integration", "hierarchy", "policy", "stampede"]
+integration = ["lib", "integration", "hierarchy", "policy", "stampede"]
 concurrency = ["concurrency", "await_safety", "sharding", "loom"]
 capability = ["capability", "l6_authority"]
 negative = ["negative"]
@@ -686,7 +686,7 @@ description = "Documentation must build; a broken intra-doc link is a broken pro
 [[verification.gate]]
 name = "unit"
 kind = "test"
-targets = ["integration", "hierarchy", "policy", "stampede"]
+targets = ["lib", "integration", "hierarchy", "policy", "stampede"]
 features = ["--all-features"]
 description = "Core continuity behaviour: round-trips, TTL, generation rejection, single-flight, policy."
 

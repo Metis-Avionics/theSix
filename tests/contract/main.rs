@@ -598,6 +598,18 @@ fn every_declared_layer_is_bound_to_a_target() {
     // Every target the layers name must be a target that exists on disk, or the
     // layer is a claim rather than a coverage statement.
     for target in &all {
+        // `lib` is the crate's own unit-test binary, not a file under `tests/`.
+        // It is the target that reaches `#[cfg(test)]` code inside `src/`, so it
+        // is checked against the manifest rather than the directory.
+        if **target == *"lib" {
+            assert!(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("Cargo.toml")
+                    .is_file(),
+                "layer names target {target:?}, but this crate has no manifest"
+            );
+            continue;
+        }
         let flat =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/{target}.rs"));
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

@@ -230,8 +230,17 @@ pub fn argv_for(gate: &Gate, _toolchain: &Toolchain) -> Vec<String> {
             ];
             inner.extend(gate.features.iter().cloned());
             for t in &gate.targets {
-                inner.push("--test".to_string());
-                inner.push(t.clone());
+                // `--lib` reaches the unit-test binary; `--test <name>` selects an
+                // integration-test binary and excludes it. They are different
+                // targets, so the distinction has to be in the contract rather than
+                // inferred, which is what the literal `lib` is for: a target named
+                // `lib` is the lib unit-test binary, anything else is a `--test`.
+                if t == "lib" {
+                    inner.push("--lib".to_string());
+                } else {
+                    inner.push("--test".to_string());
+                    inner.push(t.clone());
+                }
             }
             if gate.kind == GateKind::Slow {
                 // `#[ignore]`d gates: opt in explicitly, and only these.
@@ -482,6 +491,14 @@ pub fn resolve<'a>(
 /// True when `path` looks like a test target directory we can look for.
 #[must_use]
 pub fn test_target_exists(root: &Path, target: &str) -> bool {
+    // `lib` is the crate's own unit-test binary, not a file under `tests/`. It is
+    // the one target name that does not correspond to a path, so it is checked
+    // against the manifest instead of the directory. Without this, the contract
+    // validator would reject the one target that can reach `#[cfg(test)]` code
+    // inside `src/`, which is the defect this target exists to close.
+    if target == "lib" {
+        return root.join("Cargo.toml").is_file();
+    }
     let dir = root.join("tests").join(target);
     dir.join("main.rs").is_file() || root.join("tests").join(format!("{target}.rs")).is_file()
 }

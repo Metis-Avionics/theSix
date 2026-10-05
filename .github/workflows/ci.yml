@@ -59,6 +59,15 @@ jobs:
         run: cargo xtask contract
       - name: List resolved gates
         run: cargo xtask list
+      # The job is named `contract` and `theSix.toml` lists it under `covers`,
+      # so it has to run the gate, not just the validator. `cargo xtask contract`
+      # parses the contract and prints; `cargo xtask run contract` is the gate.
+      # Only the first of those ran, which meant all 56 assertions in
+      # `tests/contract` compiled, linted, and never executed -- and nothing
+      # reported it, because the assertion that checks this compares gate *names*
+      # and both names were present.
+      - name: Run the contract gate
+        run: cargo xtask run contract
 
   # The `authorship` gate reads commit history, so it needs a full clone. The
   # default checkout is depth 1, which would make this gate report a pass over the
