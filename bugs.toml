@@ -1544,6 +1544,37 @@ itself, so it can be wrong in the same way any test can be wrong. That is what t
 mutations above bound -- not truth, but the ability of a reviewer to catch a false
 claim mechanically rather than by reading 76 tests.
 """
+do_not_evolve_into_a_parser = """
+Recorded because an external review of PR #7 raised it unprompted, and because the
+instinct to "improve" this code is the most likely way to make it worse.
+
+`function_span` and `declares_clause` are line heuristics, and they are acceptable
+*because of which way they fail*. A test that declares nothing, or that declares the
+clause in a different function, is reported as undeclared -- so the gate goes red and
+a human looks. The dangerous direction is a false positive, where a declaration is
+credited to a test that does not contain it, and that is the direction the design
+avoids: the span is per-function, literals are compared whole, and the opener must
+begin a trimmed line.
+
+So: do not replace this with a real Rust parser. A parser would be more correct and
+would fail in a new direction -- it would start *rejecting* valid declarations for
+subtle reasons, and the pressure to loosen it would reintroduce the false positive
+this shape avoids. That is humanity's traditional solution to a systems problem: add
+machinery until the original failure is nobody's memory.
+
+If stronger semantic proof is wanted, the route is explicit coupling -- per-row
+fault-ledger assertions, the instrument `fault_injection` and `declare_cases!` already
+use -- not cleverer source reading. A registry row that must also say *which assertion*
+in the test carries the proof can be checked without parsing Rust at all.
+"""
+scope_limit = """
+The parser reads `tests/` and `xtask/src/` through the same path, which is why
+`verification.merge_readiness.tracker` can be proven by an `xtask` unit test: the gate
+requires no particular file kind, only that the path resolves and the cited function
+declares the clause. Making `proves!` reachable from `xtask` needed `testkit` as an
+xtask dev-dependency, chosen over duplicating the macro so there is one definition of
+what a declaration is.
+"""
 
 [[bug]]
 id = "B21"
