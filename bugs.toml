@@ -33,10 +33,10 @@
 # *do* gate live in `theSix.toml` under `[verification.merge_readiness]`, so a
 # finding cannot be deleted or downgraded without editing the contract.
 branch = "main"
-commit = "99b4a5f"
-reviewed_commit = "99b4a5f"
-reviewer = "ChatGPT, external code review; then a 0.4.0 backlog pass over B15-B21"
-review_date = "2026-10-04"
+commit = "efea2fd"
+reviewed_commit = "efea2fd"
+reviewer = "ChatGPT, external code review; a 0.4.0 backlog pass over B15-B21; then an external review of PRs #4-#8 and the B23 obligation work"
+review_date = "2026-10-05"
 verdict_architecture = 9.0
 verdict_verification_strategy = 9.5
 verdict_implementation_correctness = 7.5
@@ -51,6 +51,14 @@ independently_verified = true
 # has no required status check, so the aggregated gate is advisory until it is
 # restored with a token holding effective Administration write.
 blocking_reason = "B21: main's required_status_checks rule is disabled"
+
+# Publication state, recorded here because `merge_ready` cannot be true while B21 is
+# open and a reader would otherwise assume the release line is unfinished. 0.3.0 was
+# published from its own commit (9a075b3) and 0.4.0 from main; crates.io reports
+# max_stable 0.4.0. Both are irreversible now -- they can be yanked, never replaced.
+published = ["0.3.0", "0.4.0"]
+published_at = "2026-10-05"
+published_from = { "0.3.0" = "9a075b3", "0.4.0" = "efea2fd" }
 
 # The reviewer's summary judgement, kept verbatim in substance because it is the
 # most useful single sentence in the review:
