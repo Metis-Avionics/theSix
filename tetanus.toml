@@ -39,6 +39,19 @@ adaptation is recorded per rule below rather than left implicit:
 
   * Rules 3 and 9 are unsatisfiable by construction. They are `reported`, not
     `gated`. See their `disposition` below.
+
+The reported/gated split is the open question in this file, and the numbers are here
+so it can be answered with data rather than with a preference. Rule 3 has 1011 sites
+and rule 9 has 89. Neither is baselined: 1100 justifications repeating one sentence
+would make the count the only thing anyone ever read, which is the failure mode a
+baseline is supposed to prevent.
+
+`.kilo/plans/1789334873419-tetanus-rule3-plan.md` argues rule 3 should instead be
+*satisfied*, by breaking the public API to introduce a `MemoryPool<V>` slab allocator
+and `KeyRef<'_>` keys so no `set`, `get` or `invalidate` allocates after init. That
+is a real option and it is not this gate's to settle. Until it is settled, the honest
+report is the number: rule 3 is not satisfied by this crate, in 1011 places, and rule
+9 is not satisfied in 89.
 """
 
 scan_roots = ["src", "xtask/src", "testkit/src", "tests", "benches"]
