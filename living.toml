@@ -1,13 +1,16 @@
 [handover]
-status = "published_0_3_0_and_0_4_0_pending_b21"
+status = "published_0_5_0_pending_b21"
 phase = "post_release"
-last_updated = "2026-10-05T00:20:00+01:00"
+last_updated = "2026-10-16T20:00:00+01:00"
 
 summary = """
 0.3.0 and 0.4.0 are published to crates.io, closing a gap that had been open since
 0.2.3. The line is now monotonic on the registry: 0.2.0 through 0.2.3, then 0.3.0
 (async tiers, L6 authority, capability reporting), then 0.4.0 (the contract
-architecture, two-phase commit, and every finding below).
+architecture, two-phase commit, and every finding below). 0.5.0 adds the autonomy
+governor (three modes, census-bounded movement, environment-driven ladder assembly
+with valkey normalisation behind the dotenv feature) and the [autonomy] contract
+section; the full 24-gate matrix was green on the PR before publication.
 
 What 0.4.0 contains is the 0.4.0 backlog pass plus B23. Six findings closed, and
 two of them were real defects rather than missing tests.

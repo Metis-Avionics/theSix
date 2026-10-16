@@ -519,6 +519,122 @@ pub const INVARIANT_PROOFS: &[(&str, &str)] = &[
         "tests/contract/main.rs::authority_semantics_are_explicit_not_inferred",
     ),
     (
+        "authority.l6.role",
+        "tests/contract/main.rs::authority_rung_is_the_one_past_the_ladder",
+    ),
+    (
+        "autonomy.bootstrap.absent_url_binds_no_redis_backend",
+        "src/governor/bootstrap.rs::a_missing_url_binds_nothing_and_is_not_an_error",
+    ),
+    (
+        "autonomy.bootstrap.degraded_binding_is_reported_loudly",
+        "src/governor/bootstrap.rs::an_unreachable_server_degrades_loudly_and_rebindably",
+    ),
+    (
+        "autonomy.bootstrap.invalid_url_is_a_configuration_error",
+        "src/governor/bootstrap.rs::a_non_redis_url_is_a_configuration_error",
+    ),
+    (
+        "autonomy.bootstrap.required",
+        "tests/contract/invariant.rs::every_semantic_section_is_marked_required",
+    ),
+    (
+        "autonomy.bootstrap.valkey_scheme_is_normalized",
+        "src/governor/bootstrap.rs::a_valkey_url_normalizes_to_what_the_client_parses",
+    ),
+    (
+        "autonomy.fully_autonomous_task_is_cancel_safe",
+        "tests/autonomy.rs::aborting_the_spawned_governor_leaves_no_wedged_key",
+    ),
+    (
+        "autonomy.manual_mode_executes_nothing",
+        "tests/autonomy.rs::manual_tick_returns_a_plan_and_executes_nothing",
+    ),
+    (
+        "autonomy.mode_is_escalating",
+        "tests/autonomy.rs::the_modes_escalate_by_execution_surface",
+    ),
+    (
+        "autonomy.movement.acts_only_on_registered_keys",
+        "tests/autonomy.rs::only_census_keys_are_moved",
+    ),
+    (
+        "autonomy.movement.cancelled_moves_are_resolved_by_the_next_tick",
+        "tests/autonomy.rs::a_cancelled_move_is_resolved_by_the_next_tick",
+    ),
+    (
+        "autonomy.movement.has_no_key_of_its_own",
+        "src/governor/mod.rs::a_missing_census_is_a_stated_skip",
+    ),
+    (
+        "autonomy.movement.move_budget_is_enforced",
+        "src/governor/mod.rs::the_move_budget_saturates",
+    ),
+    (
+        "autonomy.movement.required",
+        "tests/contract/invariant.rs::every_semantic_section_is_marked_required",
+    ),
+    (
+        "autonomy.movement.requires_observed_heat",
+        "src/governor/mod.rs::a_missing_heat_source_is_a_stated_skip",
+    ),
+    (
+        "autonomy.movement.respects_last_cache_rung",
+        "src/governor/mod.rs::the_planner_never_targets_the_authority_rung",
+    ),
+    (
+        "autonomy.movement.runs_through_the_manager",
+        "tests/autonomy.rs::autonomous_moves_go_through_the_managers_public_api",
+    ),
+    (
+        "autonomy.rebind.rebind_preserves_capability_honesty",
+        "src/tier/hot_rung.rs::the_wrapper_forwards_the_inner_tier_identity",
+    ),
+    (
+        "autonomy.rebind.rebind_refuses_a_foreign_rung",
+        "src/tier/hot_rung.rs::a_swap_refuses_a_tier_claiming_another_rung",
+    ),
+    (
+        "autonomy.rebind.required",
+        "tests/contract/invariant.rs::every_semantic_section_is_marked_required",
+    ),
+    (
+        "autonomy.required",
+        "tests/contract/invariant.rs::every_semantic_section_is_marked_required",
+    ),
+    (
+        "autonomy.semi_mode_executes_maintenance_only",
+        "tests/autonomy.rs::semi_tick_executes_maintenance_and_leaves_movement_unapplied",
+    ),
+    (
+        "autonomy.sweeps.expired_sweep_is_control_plane_only",
+        "tests/autonomy.rs::the_expiry_sweep_touches_the_control_plane_never_data",
+    ),
+    (
+        "autonomy.sweeps.expired_sweep_spares_the_authority_rung",
+        "src/control/cachelito.rs::the_expiry_sweep_spared_nothing_until_the_authority_won_that_rule",
+    ),
+    (
+        "autonomy.sweeps.maintenance_legs_are_planned_unconditionally",
+        "src/governor/mod.rs::the_planner_never_targets_the_authority_rung",
+    ),
+    (
+        "autonomy.sweeps.required",
+        "tests/contract/invariant.rs::every_semantic_section_is_marked_required",
+    ),
+    (
+        "autonomy.sweeps.sweeps_are_idempotent",
+        "tests/autonomy.rs::sweeps_are_idempotent_across_ticks",
+    ),
+    (
+        "autonomy.stats.plane_stats_expose_no_key_or_payload",
+        "src/control/cachelito.rs::plane_stats_counts_every_entry_exactly_once_and_exposes_nothing_else",
+    ),
+    (
+        "autonomy.stats.required",
+        "tests/contract/invariant.rs::every_semantic_section_is_marked_required",
+    ),
+    (
         "authority.fallback_may_be_authoritative",
         "tests/capability.rs::only_the_authority_rung_claims_authority",
     ),
@@ -536,10 +652,6 @@ pub const INVARIANT_PROOFS: &[(&str, &str)] = &[
     ),
     (
         "authority.l6.last_cache_rung",
-        "tests/contract/main.rs::authority_rung_is_the_one_past_the_ladder",
-    ),
-    (
-        "authority.l6.role",
         "tests/contract/main.rs::authority_rung_is_the_one_past_the_ladder",
     ),
     (

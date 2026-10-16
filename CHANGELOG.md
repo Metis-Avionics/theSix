@@ -1,5 +1,46 @@
 # CHANGELOG
 
+## 0.5.0 — autonomy governor
+
+### Added
+
+- **The governor** (`src/governor`) — an autonomous maintenance loop over the
+  control plane. Three `GovernorMode`s (`Manual`, `SemiAutonomous`,
+  `FullyAutonomous`); every data-plane action runs through `CacheManager`'s
+  public `promote` / `demote`, so intents, generation guards and telemetry are
+  the consumer path's — there is no second write path. New contract section
+  `[autonomy]` with 28 machine-checked clauses, all bound to proving tests.
+- `Cachelito::plane_stats` — aggregate, payload-free control-plane statistics
+  (occupancy, per-state and per-rung histograms, expired/owned/intent counts),
+  read shard-by-shard so the scan cannot block a population.
+- `Cachelito::sweep_expired` — demotes every expired `Ready` cache-rung entry to
+  `Stale`, control-plane only, authority rung spared.
+- `HotRungTier` — a wrapper making one rung's backend replaceable at runtime
+  (swap is synchronous, clone-then-await, refuses a tier claiming another rung),
+  which is what lets autonomy repair a failed backend without rebuilding the
+  manager or weakening `bound_tier`'s no-substitution rule.
+- `CacheTier::capacity` — a pessimistic default `Option` trait method reporting
+  fixed slot capacity, the same honesty pattern as `capability()`.
+- **Environment bootstrap** (`governor::assemble_ladder`) — assembles the six
+  cache-rung ladder from `THESIX_REDIS_URL` / `THESIX_VALKEY_URL` (then
+  `REDIS_URL` / `VALKEY_URL`), loading `.env` via `dotenvy` behind the new
+  optional `dotenv` feature. `valkey://` / `valkeys://` are normalised to
+  `redis://` / `rediss://` (same RESP protocol). An absent URL binds the L3
+  stub and reports `NotConfigured`; a present-but-unreachable server degrades
+  loudly to the stub with a `HotRungTier` + `Rebinder` wired so the governor can
+  bind the real backend when it returns; a malformed URL is a
+  `ConfigurationError` at build time.
+- `KeyCensus` — the movable key set autonomy acts on. The control plane keeps
+  only hashes and the tiers no key material, so a governor cannot discover keys
+  by itself; the census is where the application declares what may move. Heat
+  comes from telemetry `KeyIdentity` digests, so nothing outside the census
+  mapping can name a key.
+- New `tests/autonomy.rs` layer (mode matrix, census-bounded movement,
+  manager-path telemetry proof, sweep idempotence, cancelled-move resolution,
+  cancel-safe spawned loop, bootstrap honesty), wired into `[testing.layers]`,
+  the gate list, and the CI matrix.
+- `examples/governor_quickstart.rs` — env bootstrap + fully-autonomous loop.
+
 ## 0.4.0 — backlog pass (B15–B21)
 
 Seven findings closed since the verification-architecture work, one of which was a

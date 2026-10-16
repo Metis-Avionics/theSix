@@ -177,6 +177,22 @@ pub trait CacheTier<V>: Send + Sync {
         None
     }
 
+    /// How many slots this tier can hold, when it tracks a fixed capacity.
+    ///
+    /// The default is `None`: a tier without capacity accounting says so, rather
+    /// than a maintenance loop inferring pressure from `None`. Same shape as
+    /// [`Self::capability`]'s pessimistic default — a tier that can answer
+    /// honestly must override this — and the same rule applies: reporting a
+    /// capacity that does not exist is the misreporting this surface exists to
+    /// prevent.
+    ///
+    /// `Some(n)` claims fixed slots, not bytes: a backend with an unbounded or
+    /// externally-managed ceiling (redis, sled) reports `None` even when it is
+    /// configured with one elsewhere, because the tier cannot see that.
+    fn capacity(&self) -> Option<usize> {
+        None
+    }
+
     /// Remove the slot at `address`, but **only if it still holds that
     /// address**.
     ///

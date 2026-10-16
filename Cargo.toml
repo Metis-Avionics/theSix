@@ -4,7 +4,7 @@ exclude = ["fuzz"]
 
 [package]
 name = "thesix"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.98"
 description = "Policy-driven six-tier cache orchestration with an explicit HPA data-continuity contract"
@@ -81,6 +81,11 @@ redis = ["dep:redis"]
 sled = ["dep:sled"]
 oxigraph = ["dep:oxigraph"]
 faults = []
+# `.env` loading for the governor's bootstrap. Optional because a consumer that
+# configures through its own mechanism must not carry a file-format parser it
+# never asked for: detection itself (`EnvSource` over `std::env`) works without
+# it, and every gate here runs with `--all-features` so the loader is exercised.
+dotenv = ["dep:dotenvy"]
 # Compiles the loom-backed model checks. A feature toggle rather than
 # `--cfg loom`: rustflags are part of the sccache cache key, so switching them
 # would invalidate every dependency build (polars alone is minutes), whereas a
@@ -90,6 +95,14 @@ loom-tests = []
 
 [dependencies.redis]
 version = "0.24"
+optional = true
+
+# Loaded by `governor::bootstrap::ProcessEnv` under the `dotenv` feature. Justified,
+# not gratuitous: the feature gate means a consumer who never loads `.env` files
+# neither links nor parses dotenvy, and `unnecessary_dependencies = false` is
+# satisfied by that gate rather than by hand-waving.
+[dependencies.dotenvy]
+version = "0.15"
 optional = true
 
 [dependencies.sled]

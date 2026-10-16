@@ -138,6 +138,7 @@ refuses to report success for a gate whose tooling is missing — it exits `3` f
 | performance | `performance` | Percentiles, shard independence, bounded control plane. |
 | soak | `soak` | Slot-table pressure, tenant isolation at volume, recovery scaling. |
 | backends | `backends`, `oxigraph_backend` | Real backends behind feature gates. |
+| autonomy | `autonomy` | The governor: modes, census-bounded movement, sweep idempotence, bootstrap honesty, cancel-safe autonomy. |
 
 ### Anti-vacuity
 
@@ -175,6 +176,26 @@ The L3–L5 defaults store values so the ladder works out of the box, and report
 `BackendKind::InMemoryFallback` — they claim neither `SHARED` nor `PERSISTENT`,
 because they are process-local and saying otherwise would be a durability lie.
 `CacheManager::capabilities()` tells you what every rung is *actually* bound to.
+
+## Autonomy
+
+`thesix::governor` is a maintenance loop over the control plane. It observes
+aggregate, payload-free statistics (`Cachelito::plane_stats`), telemetry heat
+(`RingTelemetry` digests — keys are never reconstructible from it), and each
+rung's continuity state; then it acts **only through the manager's public
+operations**: recovery sweeps, expiry sweeps, health-driven rung rebinding on a
+`HotRungTier`, and hot/cold entry movement for the keys the application
+registered in a `KeyCensus`. There is no second write path.
+
+Three autonomy levels (`GovernorMode`): `Manual` (plan only), `SemiAutonomous`
+(maintenance sweeps + rebinding, movement stays a suggestion), and
+`FullyAutonomous` (a spawned task running all of it under a per-tick move
+budget). Ladder assembly from the environment is in
+`governor::assemble_ladder`: it reads `THESIX_REDIS_URL` / `THESIX_VALKEY_URL`
+(falling back to `REDIS_URL` / `VALKEY_URL`; a `.env` file is loaded when the
+`dotenv` feature is on), normalises `valkey://` to `redis://`, binds L3's real
+backend when reachable, degrades loudly with a rebindable `HotRungTier` when
+not, and never substitutes an unbound rung silently.
 
 ## License
 

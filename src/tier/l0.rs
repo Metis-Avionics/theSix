@@ -74,6 +74,12 @@ impl<V: Clone + Send + Sync + 'static + IntegrityCheck> CacheTier<V> for L0Stub<
         self.inner.remove_if_address(address)
     }
 
+    /// Capacity accounting is real here: the sharded backend is pre-allocated,
+    /// so its slot total is not an estimate.
+    fn capacity(&self) -> Option<usize> {
+        Some(self.inner.capacity())
+    }
+
     fn health(&self) -> TierHealth {
         TierHealth::default()
     }

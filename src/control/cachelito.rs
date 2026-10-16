@@ -375,6 +375,47 @@ impl ControlEntry {
     }
 }
 
+/// Aggregate occupancy of the control plane, as an autonomous maintenance loop
+/// wants to see it.
+///
+/// Counts only. The indices are positional (`by_state` follows
+/// [`EntryStateAtomic`]'s discriminant order, `by_tier` follows
+/// [`TierId::as_usize`]), so a caller can read a histogram without any
+/// representation that could carry key or payload material.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PlaneStats {
+    /// Total slots across every shard.
+    pub capacity: usize,
+    /// Slots that describe an entry of any kind.
+    pub occupied: usize,
+    /// Occupied slots, counted by entry state (index = `EntryStateAtomic` as
+    /// `usize`).
+    pub by_state: [usize; 6],
+    /// Occupied slots, counted by rung (index = [`TierId::as_usize`]).
+    pub by_tier: [usize; 7],
+    /// Entries currently owned by a population.
+    pub population_owned: usize,
+    /// Entries carrying an outstanding commit intent.
+    pub intents_outstanding: usize,
+    /// `Ready` entries whose TTL has elapsed since they were populated.
+    pub expired_ready: usize,
+}
+
+impl PlaneStats {
+    /// Fraction of the control plane in use, in `0.0..=1.0`.
+    ///
+    /// `0.0` when there is no capacity, so a caller treating the ratio as a
+    /// pressure threshold is never told an empty plane is full.
+    #[must_use]
+    pub fn occupancy(&self) -> f64 {
+        if self.capacity == 0 {
+            return 0.0;
+        }
+        f64::from(u32::try_from(self.occupied).unwrap_or(u32::MAX))
+            / f64::from(u32::try_from(self.capacity).unwrap_or(u32::MAX))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ControlSnapshot {
     pub state: EntryState,
@@ -474,7 +515,8 @@ impl Shard {
 pub struct Cachelito {
     shards: Vec<std::sync::Mutex<Shard>>,
     shard_count: usize,
-    _capacity_per_shard: usize,
+    /// Per-shard slot count; read by `plane_stats` for the capacity total.
+    capacity_per_shard: usize,
     /// How keys are mapped to slots. Injectable for the same reason the data
     /// plane's is: without it, a control-plane collision cannot be produced on
     /// demand, so `no_cross_key_corruption` could only be asserted about the
@@ -499,7 +541,7 @@ impl Cachelito {
         Cachelito {
             shards,
             shard_count,
-            _capacity_per_shard: capacity_per_shard,
+            capacity_per_shard,
             placement: Placement::Default,
         }
     }
@@ -1169,6 +1211,91 @@ impl Cachelito {
         Ok(())
     }
 
+    /// Aggregate, payload-free statistics over every entry the control plane
+    /// describes.
+    ///
+    /// This is the observation surface an autonomous maintenance loop reads.
+    /// Per-entry observation exists (`peek`) but nothing aggregated did, so a
+    /// maintenance pass had no way to answer "is any rung under pressure?" or
+    /// "does any entry hold a claim it should not?" without walking a caller's
+    /// key set.
+    ///
+    /// Counts only, deliberately: no key, no address, no payload can be
+    /// reconstructed from this type, so handing it to a maintenance loop cannot
+    /// leak what the confidentiality clauses protect. Shards are locked one at a
+    /// time, so the pass never blocks a population that only needs one shard —
+    /// `control_plane_blocked_by_data_plane = false` holds during the scan.
+    pub fn plane_stats(&self) -> PlaneStats {
+        let mut stats = PlaneStats {
+            capacity: self.shards.len().saturating_mul(self.capacity_per_shard),
+            ..PlaneStats::default()
+        };
+        for shard in &self.shards {
+            let Ok(guard) = shard.lock() else { continue };
+            for entry in guard.entries.iter().flatten() {
+                stats.occupied += 1;
+                let state_idx = EntryStateAtomic::from(entry.state()) as usize;
+                stats.by_state[state_idx] += 1;
+                let tier_idx = entry.tier().as_usize();
+                if tier_idx < stats.by_tier.len() {
+                    stats.by_tier[tier_idx] += 1;
+                }
+                if entry.is_population_owner() {
+                    stats.population_owned += 1;
+                }
+                if entry.intent().is_some() {
+                    stats.intents_outstanding += 1;
+                }
+                if entry.ttl().is_some() && entry.is_expired() {
+                    stats.expired_ready += 1;
+                }
+            }
+        }
+        stats
+    }
+
+    /// Demote every expired `Ready` entry to `Stale`, without touching data.
+    ///
+    /// Lazy expiry makes the read path do this one entry at a time; a maintenance
+    /// pass does it for the whole table at once so an unused-but-expired entry
+    /// stops occupying a `Ready` slot the moment the governor notices, not the
+    /// moment a reader next asks for that key.
+    ///
+    /// Entries sitting on the authority rung are skipped. Marking an authority
+    /// entry stale is a decision about the system of record, and a maintenance
+    /// pass does not make those: authority data is revalidated by its owning
+    /// path (`refresh_detailed` against the fetch), never by a sweep that cannot
+    /// see where that data came from. The authority's expiry remains lazy, as it
+    /// was before this pass existed.
+    ///
+    /// This is control-plane-only by construction: `is_expired` is derivable from
+    /// the entry record itself, so no key and no tier handle are needed, and
+    /// nothing on any rung changes. The next read reports a miss and repopulates,
+    /// exactly as it would for a lazily-expired entry. The rungs keep whatever
+    /// bytes they keep; the sweep does not decide for them.
+    ///
+    /// Shards are locked one at a time and the return is a count, so the pass
+    /// stays bounded, payload-free and idempotent.
+    pub fn sweep_expired(&self) -> usize {
+        let mut demoted = 0usize;
+        for shard in &self.shards {
+            let Ok(mut guard) = shard.lock() else {
+                continue;
+            };
+            for entry in guard.entries.iter_mut().flatten() {
+                if entry.tier().is_authority_rung() {
+                    continue;
+                }
+                if entry.state() == EntryState::Ready && entry.is_expired() {
+                    entry.set_state(EntryState::Stale);
+                    entry.notify();
+                    demoted += 1;
+                }
+            }
+        }
+        demoted
+    }
+
     /// Every outstanding intent older than `older_than_nanos`.
     ///
     /// The recovery sweep. Returns key hashes because the control plane only ever
@@ -1412,5 +1539,88 @@ mod tests {
         );
         intents.sort_by_key(|(a, _)| a.fingerprint());
         assert_ne!(intents[0].0.fingerprint(), intents[1].0.fingerprint());
+    }
+
+    #[test]
+    fn plane_stats_counts_every_entry_exactly_once_and_exposes_nothing_else() {
+        testkit::proves!("autonomy.stats.plane_stats_expose_no_key_or_payload");
+
+        let cachelito = Cachelito::new();
+        let secret_key = b"SECRET-tenant-order-key";
+        cachelito
+            .prepare(secret_key, None, TierId::L2, IntentKind::Write)
+            .expect("prepare secret");
+        let token = cachelito
+            .prepare(b"plain", None, TierId::L3, IntentKind::Write)
+            .expect("prepare");
+        cachelito
+            .commit(&token, Some(std::time::Duration::from_secs(3600)))
+            .expect("commit");
+
+        let stats = cachelito.plane_stats();
+        assert_eq!(stats.occupied, 2, "two entries, counted separately");
+        assert_eq!(stats.by_state[EntryStateAtomic::Prepared as usize], 1);
+        assert_eq!(stats.by_state[EntryStateAtomic::Ready as usize], 1);
+        // The rung histogram counts the tier each entry is *on*. A still-Prepared
+        // entry's target rung lives in its intent, not in its tier field, which
+        // stays where the entry was until commit lands.
+        assert_eq!(
+            stats.by_tier[TierId::L3.as_usize()],
+            1,
+            "the committed entry sits on the rung its intent named"
+        );
+        assert_eq!(stats.intents_outstanding, 1);
+        assert_eq!(
+            stats.by_state.iter().sum::<usize>(),
+            stats.occupied,
+            "the state histogram is exhaustive"
+        );
+        assert_eq!(
+            stats.by_tier.iter().sum::<usize>(),
+            stats.occupied,
+            "the rung histogram is exhaustive"
+        );
+
+        // The confidentiality clause is about reachability, not discretion: the
+        // aggregate view the governor reads must not be able to say the key.
+        let rendered = format!("{stats:?}");
+        assert!(
+            !rendered.contains("SECRET"),
+            "plane stats rendered a key: {rendered}"
+        );
+        assert!(stats.capacity >= stats.occupied);
+        assert!(stats.occupancy() >= 0.0 && stats.occupancy() <= 1.0);
+    }
+
+    #[test]
+    fn the_expiry_sweep_spared_nothing_until_the_authority_won_that_rule() {
+        testkit::proves!("autonomy.sweeps.expired_sweep_spares_the_authority_rung");
+
+        let cachelito = Cachelito::new();
+        for (key, tier) in [("a-cache-rung", TierId::L2), ("the-authority", TierId::L6)] {
+            let token = cachelito
+                .prepare(key.as_bytes(), None, tier, IntentKind::Write)
+                .expect("prepare");
+            cachelito
+                .commit(&token, Some(std::time::Duration::from_millis(1)))
+                .expect("commit");
+        }
+        // The TTL is one millisecond; by the time this runs both are expired.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        let demoted = cachelito.sweep_expired();
+        assert_eq!(demoted, 1, "the cache rung entry expired and was demoted");
+        assert_eq!(
+            cachelito.peek(b"a-cache-rung").expect("peek").state,
+            EntryState::Stale
+        );
+        assert_eq!(
+            cachelito.peek(b"the-authority").expect("peek").state,
+            EntryState::Ready,
+            "an authority entry is revalidated by its owning path, not by a sweep"
+        );
+
+        // Idempotent: a second pass finds nothing left to do.
+        assert_eq!(cachelito.sweep_expired(), 0);
     }
 }
