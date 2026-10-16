@@ -617,6 +617,36 @@ where
         &self.cachelito
     }
 
+    /// Aggregate, payload-free control-plane statistics.
+    ///
+    /// A pass-through to [`Cachelito::plane_stats`](crate::control::cachelito::Cachelito::plane_stats),
+    /// kept on the manager so a maintenance loop only ever needs the manager.
+    #[must_use]
+    pub fn plane_stats(&self) -> crate::control::cachelito::PlaneStats {
+        self.cachelito.plane_stats()
+    }
+
+    /// Demote every expired `Ready` entry the control plane describes to `Stale`.
+    ///
+    /// Returns how many entries were demoted. Control-plane only: no key, no
+    /// tier call, no payload. See [`Cachelito::sweep_expired`](crate::control::cachelito::Cachelito::sweep_expired)
+    /// for why nothing on the rungs changes.
+    pub fn sweep_expired(&self) -> usize {
+        self.cachelito.sweep_expired()
+    }
+
+    /// The telemetry sink this manager records into.
+    ///
+    /// Exposed so a maintenance loop can read the same records the manager
+    /// produces without the consumer wiring a second channel. An autonomous
+    /// governor derives per-key heat from these records — the records carry a
+    /// [`KeyIdentity`](crate::telemetry::KeyIdentity), never the key, so the
+    /// heat map stays within the confidentiality clauses.
+    #[must_use]
+    pub fn telemetry(&self) -> &SharedSink {
+        &self.telemetry
+    }
+
     /// Run a data-plane operation under the manager's wait bound.
     ///
     /// The control plane is unaffected either way — that is the whole

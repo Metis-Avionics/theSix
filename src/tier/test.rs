@@ -129,4 +129,8 @@ impl<V: Clone + Send + Sync + 'static + IntegrityCheck> CacheTier<V> for TestTie
     fn tier_id(&self) -> TierId {
         self.tier_id
     }
+
+    fn capacity(&self) -> Option<usize> {
+        self.inner.lock().ok().map(|g| g.capacity())
+    }
 }

@@ -108,6 +108,12 @@ impl<V: Clone + Send + Sync + 'static + IntegrityCheck> CacheTier<V> for L3Stub<
         self.inner.remove_if_address(address)
     }
 
+    /// Capacity accounting is real here: the sharded backend is pre-allocated,
+    /// so its slot total is not an estimate.
+    fn capacity(&self) -> Option<usize> {
+        Some(self.inner.capacity())
+    }
+
     fn health(&self) -> TierHealth {
         // Honest: a fallback holds in-process state with a fixed capacity, so it
         // is neither shared nor durable, and it reports healthy because it is

@@ -193,7 +193,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        layer: [unit, negative, fault_injection, property, concurrency, capability, recovery, durability, security, backends]
+        layer: [unit, negative, fault_injection, property, concurrency, capability, recovery, durability, security, backends, autonomy]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable

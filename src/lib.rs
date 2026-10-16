@@ -157,6 +157,7 @@
 //! |--------|---------|
 //! | [`manager`] | `CacheManager` — the public API and orchestration |
 //! | [`control`] | `Cachelito` — control-plane state, generations, commit intents |
+//! | [`governor`] | The autonomy loop: sweeps, census-bounded movement, rebinding, env bootstrap |
 //! | [`policy`] | `CachePolicy`, operations, decisions, the ladder bound |
 //! | [`capability`] | `TierCapability` and its three reporting axes |
 //! | [`continuity`] | Continuity states, recovery direction and outcomes |
@@ -183,6 +184,7 @@ pub mod entry;
 pub mod error;
 #[cfg(feature = "faults")]
 pub mod fault;
+pub mod governor;
 pub mod identity;
 pub mod integrity;
 pub mod key;
@@ -196,12 +198,16 @@ pub use capability::{CapabilityFlags, DurabilityClass, OperationalState, TierCap
 pub use continuity::{
     ContinuityReport, ContinuityState, RecoveryDirection, RecoveryOutcome, RecoveryReport,
 };
-pub use control::cachelito::Cachelito;
+pub use control::cachelito::{Cachelito, PlaneStats};
 pub use entry::{CacheEntry, EntryState, Generation};
 pub use entry::{CommitIntent, CommitToken, IntentKind};
 pub use error::CacheError;
 #[cfg(feature = "faults")]
 pub use fault::{ArmedFault, DeterministicRng, FaultClass, FaultLedger, FaultPlan, OpKind};
+pub use governor::{
+    CensusKey, Governor, GovernorHandle, GovernorMode, GovernorPlan, GovernorReport,
+    GovernorSettings, KeyCensus, Skip,
+};
 pub use identity::{CacheContext, IdentityContext};
 pub use integrity::{ContentDigest, IntegrityCheck, KeyAddress, KeyFingerprint, Placement};
 pub use key::{Key, KeyRef, MAX_KEY_SIZE, TENANT_SEPARATOR, frame_tenant_key};
@@ -213,9 +219,10 @@ pub use policy::{
 pub use pool::MemoryPool;
 pub use telemetry::{
     KeyIdentity, LatencyPercentiles, NoTelemetry, Operation, OperationRecord, Outcome,
-    RingTelemetry, TelemetrySink,
+    RingTelemetry, SharedSink, TelemetrySink,
 };
 pub use tier::fixed_tier_stub::FixedTierStub;
+pub use tier::hot_rung::HotRungTier;
 pub use tier::{BackendKind, CacheTier, TierHealth, TierId, TierRegistry};
 pub use tier::{
     l0::L0Stub, l1::L1Stub, l2::L2Stub, l3::L3Stub, l4::L4Stub, l5::L5Stub, test::TestTier,

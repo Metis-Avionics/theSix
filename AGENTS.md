@@ -202,6 +202,38 @@ tenant `a` + key `bc`. An oversized frame is **rejected, not truncated**.
 part of the key. **This invalidates every existing cached key** — see the 0.4.0
 release notes.
 
+### Autonomy — `src/governor/`
+
+`[autonomy]` in the contract is the section this section derives from; both
+name the same escalation.
+
+* The governor observes `Cachelito::plane_stats` (aggregate, payload-free
+  counts) and telemetry heat — `KeyIdentity` digests, never keys — and acts
+  **only through `CacheManager`'s public operations**. There is no second write
+  path: a move is a `promote`/`demote`, so two-phase intents, guards and
+  telemetry are the consumer path's.
+* It cannot discover keys. The control plane keeps only hashes and the tiers
+  keep no key material, so movement acts on the `KeyCensus` the application
+  registers. No census or no heat source is a stated `Skip` in the plan, not a
+  silent zero.
+* Three modes: `Manual` plans; `SemiAutonomous` executes recovery sweeps,
+  expiry sweeps and rebinding; `FullyAutonomous` additionally executes the
+  (budgeted) moves, optionally from a spawned task whose abort unwinds through
+  the manager's guards.
+* The expiry sweep is control-plane only and **spares the authority rung**:
+  revalidating authority data is its owning path's job, never a sweep's.
+* `HotRungTier` makes one rung's backend replaceable at runtime. It refuses a
+  tier claiming another rung and forwards `capability`/`backend` honestly, so
+  the capability surface never starts lying after a rebind.
+* `assemble_ladder` builds the six cache rungs from the environment:
+  `THESIX_REDIS_URL`/`THESIX_VALKEY_URL`, falling back to
+  `REDIS_URL`/`VALKEY_URL`, `.env` loaded via dotenvy (feature `dotenv`).
+  `valkey://` normalises to `redis://`. Absent URL = stub + report
+  `NotConfigured`; unreachable server = stub + loud
+  `RedisDegradedToMemory` + a rebindable rung; malformed URL =
+  `ConfigurationError` at build time. Nothing here silently substitutes — the
+  authority rung stays unbound by detection.
+
 ## Test layers
 
 | Layer | Target | Demonstrates |
@@ -219,6 +251,7 @@ release notes.
 | performance | `performance` | Percentiles, shard independence, boundedness |
 | soak | `soak` | Endurance, capacity, isolation at volume |
 | backends | `backends` `oxigraph_backend` | Real backends |
+| autonomy | `autonomy` | Governor modes, census-bounded movement, sweep idempotence, bootstrap honesty, cancel-safe loop |
 
 `xtask` is under test rather than trusted: `xtask_unit` covers tool probing, argv
 construction and the merge-readiness check, because the runner decides what passes.

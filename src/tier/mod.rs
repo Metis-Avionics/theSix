@@ -216,6 +216,7 @@ impl Default for TierRegistry {
 }
 
 pub mod fixed_tier_stub;
+pub mod hot_rung;
 pub mod l0;
 pub mod l1;
 pub mod l2;
@@ -230,4 +231,5 @@ pub mod backends;
 #[path = "trait.rs"]
 pub mod tier_trait;
 
+pub use hot_rung::HotRungTier;
 pub use tier_trait::{BackendKind, CacheTier, TierHealth};

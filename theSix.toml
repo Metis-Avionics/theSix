@@ -299,6 +299,70 @@ loom_scope = "control-plane-state-machine"
 loom_excludes = ["notify-waiters", "tokio-select"]
 
 # ---------------------------------------------------------------------------
+# AUTONOMY
+#
+# The governor: an autonomous maintenance loop that observes the control plane
+# and acts through the manager's public operations. Its clauses exist because
+# autonomy is the easiest place in the cache to quietly break one: a loop with
+# its own write path would skip the intents the two-phase commit exists to
+# enforce, and a loop that sourced its own keys would break the confidentiality
+# model the control plane is built around.
+#
+# The level split is the escalation order declared in `GovernorMode`: each level
+# does everything below it plus one more class of action. Nothing the governor
+# does may bypass `CacheManager`, so every guarantee these clauses name is a
+# guarantee the manager already had, exercised by a new caller.
+# ---------------------------------------------------------------------------
+
+[autonomy]
+required = true
+# Manual < SemiAutonomous < FullyAutonomous, by execution surface.
+mode_is_escalating = true
+manual_mode_executes_nothing = true
+semi_mode_executes_maintenance_only = true
+fully_autonomous_task_is_cancel_safe = true
+
+[autonomy.movement]
+required = true
+# every planned move is a `promote`/`demote` call on the manager, so intents,
+# generations, guards and telemetry are the consumer path's, not a second one.
+runs_through_the_manager = true
+# entry movement acts only on keys the application registered in the census.
+acts_only_on_registered_keys = true
+respects_last_cache_rung = true
+requires_observed_heat = true
+has_no_key_of_its_own = true
+move_budget_is_enforced = true
+cancelled_moves_are_resolved_by_the_next_tick = true
+
+[autonomy.sweeps]
+required = true
+# the expiry sweep transitions control-plane state only; the rungs keep their
+# bytes and the next read repopulates, exactly as lazy expiry does.
+expired_sweep_is_control_plane_only = true
+expired_sweep_spares_the_authority_rung = true
+sweeps_are_idempotent = true
+maintenance_legs_are_planned_unconditionally = true
+
+[autonomy.stats]
+required = true
+plane_stats_expose_no_key_or_payload = true
+
+[autonomy.bootstrap]
+required = true
+absent_url_binds_no_redis_backend = true
+invalid_url_is_a_configuration_error = true
+# valkey:// and valkeys:// are normalised to redis:// and rediss:// before the
+# client sees them: same wire protocol, different spelling.
+valkey_scheme_is_normalized = true
+degraded_binding_is_reported_loudly = true
+
+[autonomy.rebind]
+required = true
+rebind_preserves_capability_honesty = true
+rebind_refuses_a_foreign_rung = true
+
+# ---------------------------------------------------------------------------
 # NEGATIVE TESTING
 # ---------------------------------------------------------------------------
 
@@ -323,6 +387,7 @@ performance = ["performance"]
 soak = ["soak"]
 contract = ["contract"]
 backends = ["backends", "oxigraph_backend"]
+autonomy = ["autonomy"]
 
 [testing.negative]
 required = true
@@ -644,6 +709,7 @@ order = [
     "durability",
     "security",
     "backends",
+    "autonomy",
     "doctest",
     "deny",
     "machete",
@@ -799,6 +865,13 @@ features = ["--all-features"]
 description = "Real backends behind feature gates."
 
 [[verification.gate]]
+name = "autonomy"
+kind = "test"
+targets = ["autonomy"]
+features = ["--all-features"]
+description = "Governor modes, census-bounded movement, sweep idempotence, bootstrap honesty, and cancel-safe autonomy loop."
+
+[[verification.gate]]
 name = "doctest"
 kind = "doctest"
 description = "Documentation examples must compile and run."
@@ -937,7 +1010,7 @@ covers = ["doc"]
 [[verification.ci_job]]
 job = "test"
 check_name = "Tests (${{ matrix.layer }})"
-covers = ["unit", "negative", "fault_injection", "property", "concurrency", "capability", "recovery", "durability", "security", "backends"]
+covers = ["unit", "negative", "fault_injection", "property", "concurrency", "capability", "recovery", "durability", "security", "backends", "autonomy"]
 
 [[verification.ci_job]]
 job = "doctest"
