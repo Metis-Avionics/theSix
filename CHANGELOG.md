@@ -1,6 +1,6 @@
 # CHANGELOG
 
-## Unreleased — autonomy governor
+## 0.5.0 — autonomy governor
 
 ### Added
 
